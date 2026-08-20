@@ -6,7 +6,7 @@ Each workspace directory has its own vectr daemon (and port), so the binding is 
 
 ## Install
 
-From the directory that contains this package (its parent), install into the `web` profile:
+From the directory that contains this package:
 
 ```sh
 dsh plugin --profile web add ./dsh-vectr-client
@@ -17,7 +17,7 @@ This links the checkout into the profile, appends `dsh-vectr-client` to `dsh.pro
 From a git host (fetches sources — needs the package's `prepare` build + pnpm build allowance):
 
 ```sh
-dsh plugin --profile web add github:you/dsh-vectr-client
+dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
 ```
 
 ## Config
