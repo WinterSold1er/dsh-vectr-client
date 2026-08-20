@@ -1,0 +1,72 @@
+{
+  "name": "dsh-vectr-client",
+  "version": "0.1.0",
+  "description": "Per-workspace vectr MCP binding bundle: resolves each agent's workspace to its vectr daemon port and registers the vectr tools scoped to that agent",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "vectr",
+    "mcp",
+    "cordis"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-mcp-client": "^0.1.0-rc.8"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:/home/csy/Code/installer/deepseek-harness-official/vendor/cordis",
+    "@deepseek-ai/dsh-agent": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/agent",
+    "@deepseek-ai/dsh-agent-loop": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/agent-loop",
+    "@deepseek-ai/dsh-app-boot": "link:/home/csy/Code/installer/deepseek-harness-official/packages/boot/app-boot",
+    "@deepseek-ai/dsh-attachment": "link:/home/csy/Code/installer/deepseek-harness-official/packages/attachment/attachment",
+    "@deepseek-ai/dsh-invariants": "link:/home/csy/Code/installer/deepseek-harness-official/packages/runtime-diagnostics/invariants",
+    "@deepseek-ai/dsh-llm": "link:/home/csy/Code/installer/deepseek-harness-official/packages/llm/llm",
+    "@deepseek-ai/dsh-mcp-client": "link:/home/csy/Code/installer/deepseek-harness-official/packages/mcp/mcp-client",
+    "@deepseek-ai/dsh-scope": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/scope",
+    "@deepseek-ai/dsh-session": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/session",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "link:/home/csy/Code/installer/deepseek-harness-official/packages/session/session-persistence-jsonl",
+    "@deepseek-ai/dsh-subprocess": "link:/home/csy/Code/installer/deepseek-harness-official/packages/subprocess/subprocess",
+    "@deepseek-ai/dsh-system-prompt": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/system-prompt",
+    "@deepseek-ai/dsh-timeout": "link:/home/csy/Code/installer/deepseek-harness-official/packages/util/timeout",
+    "@deepseek-ai/dsh-tools": "link:/home/csy/Code/installer/deepseek-harness-official/packages/core/tools",
+    "@deepseek-ai/dsh-typert-protocol": "link:/home/csy/Code/installer/deepseek-harness-official/packages/typert/protocol",
+    "@deepseek-ai/schemastery": "link:/home/csy/Code/installer/deepseek-harness-official/vendor/schemastery",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0",
+    "zod": "^4.4.3"
+  }
+}

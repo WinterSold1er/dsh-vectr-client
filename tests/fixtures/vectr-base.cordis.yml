@@ -1,0 +1,26 @@
+# Minimal keyless composition for the vectr-client real-composition test in
+# composition.spec.ts. Source builtins keep this unit test independent of
+# prebuilt workspace artifacts. The agent-loop row owns agent lifecycle; the
+# vectr-client row is mapped to the package's source module by the test.
+- id: system-prompt
+  name: cordis:vectr-test-system-prompt
+
+- id: tools
+  name: cordis:vectr-test-tools
+
+- id: llm
+  name: cordis:vectr-test-llm
+
+- id: session
+  name: cordis:vectr-test-session
+
+- id: agent
+  name: cordis:vectr-test-agent
+
+- id: agent-loop
+  name: cordis:vectr-test-agent-loop
+  config:
+    agents: []
+
+- id: vectr-client
+  name: cordis:vectr-test-vectr-client

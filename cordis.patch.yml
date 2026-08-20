@@ -1,0 +1,9 @@
+# dsh-vectr-client bundle patch: one host row. Applied when a profile lists
+# this bundle; the plugin resolves each agent's workspace to its vectr daemon
+# port from ~/.vectr/instances.json and registers mcp__vectr__* tools scoped
+# to that agent.
+- insert:
+    - id: vectr-client
+      name: dsh-vectr-client
+      config:
+        serverName: vectr

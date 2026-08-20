@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build output (rebuilt on publish)
+lib/
+
+# typescript incremental build cache
+*.tsbuildinfo
+
+# logs and OS noise
+*.log
+.DS_Store
+
+# dev-only: pnpm-lock.yaml / pnpm-workspace.yaml carry absolute `link:`
+# paths into a local dsh monorepo checkout, so they only install on the
+# machine that created them. Committing them would break any other install;
+# the published package needs only peerDependencies resolved by the host.
+# See the Development section in README.md.
+pnpm-lock.yaml
+pnpm-workspace.yaml
