@@ -14,7 +14,7 @@ dsh plugin --profile web add ./dsh-vectr-client
 
 This links the checkout into the profile, appends `dsh-vectr-client` to `dsh.profile.bundles` (because the manifest declares `dsh.bundle`), and applies `cordis.patch.yml` on the next boot. Remove with `dsh plugin --profile web remove dsh-vectr-client`.
 
-From a git host (fetches sources — needs the package's `prepare` build + pnpm build allowance):
+From a git host (the repo commits its compiled `lib/`, so no build step runs on install; the private repo needs GitHub credentials for the machine running pnpm):
 
 ```sh
 dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
