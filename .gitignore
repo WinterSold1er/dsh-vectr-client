@@ -1,9 +1,6 @@
 # dependencies
 node_modules/
 
-# build output (rebuilt on publish)
-lib/
-
 # typescript incremental build cache
 *.tsbuildinfo
 
