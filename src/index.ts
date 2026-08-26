@@ -291,7 +291,12 @@ export function install(
     }, policy)
     void conn.ready.then((outcome) => {
       if (outcome.error !== undefined) {
-        ctx.logger.warn(`vectr-client: connect to :${port} failed: ${String(outcome.error)}`)
+        // D-1: route the failure to the agent-visible channel when one is bound
+        // to the session, so the agent/user (not only the loader fiber) sees it.
+        // The message always carries cwd/port/error so it is self-diagnosing.
+        const message = `vectr-client: vectr connection failed for session ${agent.id} (cwd=${cwd}, port=${port}): ${String(outcome.error)}`
+        if (agent.ctx?.logger !== undefined) agent.ctx.logger.warn(message)
+        else ctx.logger.warn(message)
       }
     })
     handles.set(agent, conn)
