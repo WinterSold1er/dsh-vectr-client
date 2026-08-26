@@ -17,12 +17,34 @@
  * @module dsh-vectr-client
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client';
+/**
+ * Local structural view of the host `webServer` service this plugin registers
+ * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is
+ * typed without taking a build dependency on the webserver package; the running
+ * host provides the real implementation. Only the `register` surface used here
+ * is shaped.
+ */
+declare module '@deepseek-ai/cordis' {
+    interface Context {
+        webServer: WebServerLike;
+    }
+}
+interface WebServerLike {
+    register(route: {
+        kind: 'exact' | 'prefix';
+        path: string;
+        handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+    }): () => void;
+}
 /** Cordis plugin name used by loader diagnostics. */
 export declare const name = "vectr-client";
-/** Services required by this plugin. */
+/** Services required by this plugin. `webServer` is consumed optionally via
+ * `ctx.get` (see {@link registerManagementRoutes}) so the plugin also loads in
+ * harness compositions that do not boot the web server; the host provides it. */
 export declare const inject: string[];
 /** Default path of the vectr daemon registry, inside the user's home. */
 export declare const DEFAULT_INSTANCES_FILE: string;
@@ -127,4 +149,22 @@ export declare function install(ctx: Context, handles: Map<Agent, ConnectionHand
  * @param config - resolved plugin configuration.
  */
 export declare function apply(ctx: Context, config?: Config): void;
+/**
+ * Register the two workspace-console HTTP routes on the injected webServer:
+ *
+ * - `GET /api/vectr/workspaces` → {@link scanWorkspaces} result (JSON array of
+ *   {@link WorkspaceView}).
+ * - `POST /api/vectr/trigger-index` body `{ "port": number }` (or
+ *   `{ "workspace": string }`) → resolve the single matching registry entry and
+ *   call {@link triggerIndex}; returns the {@link TriggerResult}.
+ *
+ * Both handlers are Cordis effects (the disposer from `webServer.register`),
+ * so they vanish with the plugin fiber. A registry read failure on either
+ * route answers 500 with the diagnostic rather than crashing the request.
+ *
+ * @param ctx - plugin context carrying the webServer service.
+ * @param instancesPath - absolute path of `instances.json`.
+ */
+export declare function registerManagementRoutes(ctx: Context, instancesPath: string): void;
+export {};
 //# sourceMappingURL=index.d.ts.map

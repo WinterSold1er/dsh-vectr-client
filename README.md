@@ -59,6 +59,26 @@ No match logs `vectr-client: no vectr daemon for <cwd>, skipping` and the agent 
 |---|---|
 | `ctx.agents` | List live agents, listen for `agent/created` / `agent/disposed` |
 | `ctx.tools` (via `dsh-mcp-client`) | Register/unregister vectr tools in each agent's scope |
+| `ctx.webServer` (optional, via `ctx.get`) | Host two management routes (see below); absent in headless harness compositions, where the console routes are skipped with a warn |
+
+## Workspace console (feature A / C1)
+
+The bundle also ships a **host data plane + browser console** for inspecting and re-indexing every vectr daemon in `~/.vectr/instances.json`. This is the "C1 同包双面" (same-bundle Node + web faces) implementation: the Node half registers HTTP routes and the web half mounts a React view into the **Settings → Plugins** tab.
+
+### Host routes (registered in the plugin's root scope)
+
+- `GET /api/vectr/workspaces` — calls `scanWorkspaces(instancesPath)`: reads the registry, liveness-probes every entry, then concurrently `GET http://<host>:<port>/v1/status` (AbortSignal ~3s, `Promise.allSettled`). Returns an array of rows `{ workspace, port, pid?, mode?, live, error?, status? }`. One dead/unresponsive daemon never blocks the table; offline rows still appear with a reason.
+- `POST /api/vectr/trigger-index` (body `{ "port": <n> }` or `{ "workspace": "<path>" }`) — resolves the single matching registry entry and calls `triggerIndex(entry)`: `POST /v1/index` body `{"force":false}`. It pre-flights `memory_only` / `search_only` modes and `fully_ready === false` (clear errors, no network call) and passes a daemon's 503 "reindex in progress" wording through verbatim.
+
+Both handlers are Cordis effects, disposed with the plugin fiber. All data logic lives on the host; the browser half only fetches these same-origin relative paths.
+
+### Browser view
+
+The `dsh.client` dual-face declaration (`platform: 'web'`) makes the host load `lib/client.js` and mount `WorkspaceConsole` into the `settings.plugins.tab` slot. It renders a table (workspace, online/offline + reason, port, pid, mode, indexed files, chunks, languages, last indexed, notes, fully_ready) with a per-row **re-index** button (disabled with a reason when offline / `memory_only` / `search_only` / `fully_ready === false` / `reindex_in_progress`) and a global **refresh** button.
+
+### Deployment note
+
+The web half and its routes take effect only after the **host process is restarted** (the `dsh.client` scan and the route registration run at boot). Until then the plugin still binds vectr tools normally; the console is simply absent. End-to-end (routes answering through host 3081, the tab mounting) is verified after a host restart — see Known Limitations.
 
 ## Development
 
@@ -67,8 +87,9 @@ The dev dependencies are `pnpm link:` entries into a local
 
 ```sh
 pnpm install       # links the monorepo dsh packages this bundle builds against
-pnpm run typecheck # tsc --noEmit on src/
-pnpm test          # vitest (config schema, port resolution, scoped registration, Loader composition)
+pnpm run typecheck # tsc --noEmit on src/ (host + client faces)
+pnpm test          # vitest (config schema, port resolution, scoped registration, Loader composition, workspace console)
+pnpm build         # tsc emits lib/index.js + lib/workspaces.js (host) and lib/client/index.js (web face)
 ```
 
 The published package itself declares no bundled dev machinery: consumers need only the `peerDependencies` — `@deepseek-ai/cordis`, `@deepseek-ai/dsh-mcp-client`, `@deepseek-ai/dsh-agent` — which the host profile already resolves.
@@ -97,3 +118,4 @@ Prefix-stable while the vectr daemon's advertised tool set and schemas are uncha
 - **Daemon absent/dead → silent skip (now diagnosed)** — an agent whose workspace has no vectr entry, or whose entry points at a dead pid/unlistening port, simply has no vectr tools; the skip is a warn carrying workspace/cwd/port/pid, so a missing or crashed daemon is at least diagnosable in logs rather than invisible.
 - **Same `serverName` across agents is legal** — every agent's tools live in its own scope layer; there is no global `mcp__vectr__*` reservation and no conflict.
 - **Tools are the only bridged capability** — vectr Resources/Prompts (if any appear) have no harness consumer; this bundle bridges only the tool set, consistent with `dsh-mcp-client`.
+- **Console routes/tab need a host restart** — the `dsh.client` declaration and the `/api/vectr/*` route registration run at boot; loading this bundle into an already-running host shows no console until the host is restarted. The route registration is also a no-op in harness compositions that do not provide `ctx.webServer` (it degrades with a warn, and the MCP-binding path is unaffected). End-to-end verification of the routes and the Settings → Plugins tab is therefore pending a host restart, not a code gap.
