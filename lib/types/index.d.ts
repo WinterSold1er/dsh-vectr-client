@@ -85,14 +85,41 @@ export declare function resolveInstance(instances: InstancesFile, cwd: string): 
  */
 export declare function readInstancesFile(ctx: Context, instancesPath: string): InstancesFile | undefined;
 /**
- * Install the vectr MCP connection for one agent.
+ * TCP liveness probe for a vectr daemon endpoint.
+ * @param host - bind host (defaults applied by caller).
+ * @param port - TCP port of the daemon's `/mcp` endpoint.
+ * @param timeoutMs - connect timeout before declaring the port dead.
+ * @returns `true` when a TCP connection opens within the budget, else `false`.
+ */
+export declare function isPortListening(host: string, port: number, timeoutMs?: number): Promise<boolean>;
+/**
+ * Validate that a registry daemon record still corresponds to a live daemon.
+ * A stale record (crashed process, reused port) must not bind tools to a dead
+ * endpoint: a failed bind is invisible to the agent, so we skip explicitly.
+ *
+ * Resolution order (cheapest first):
+ * 1. `entry.pid` present → `process.kill(pid, 0)` (ESRCH/ENOENT = dead,
+ *    EPERM or success = alive). This is authoritative when the daemon writes
+ *    its pid, which vectr does.
+ * 2. No pid → short-timeout TCP probe of `host:port` (a listening socket is
+ *    the weakest signal that something answers, good enough to avoid binding
+ *    to a known-dead port; a real HTTP/MCP handshake still happens at connect).
+ *
+ * @param entry - the daemon record to validate.
+ * @returns `true` when the record looks live, `false` when it should be skipped.
+ */
+export declare function isDaemonAlive(entry: InstanceEntry): Promise<boolean>;
+/**
+ * Install the vectr MCP connection for one agent. Re-reads the registry on
+ * every call so a daemon restart (new port / new pid) is picked up by the next
+ * `agent/created` or seed without a Host reload.
  * @param ctx - plugin context (the loader fiber) providing agents and logger.
  * @param handles - live connection handles keyed by agent.
- * @param instances - parsed daemon registry records.
+ * @param instancesPath - absolute path of the vectr daemon registry.
  * @param config - resolved plugin configuration.
  * @param agent - the agent whose workspace resolves the daemon port.
  */
-export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instances: InstancesFile | undefined, config: Required<Config>, agent: Agent): void;
+export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instancesPath: string, config: Required<Config>, agent: Agent): void;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.
