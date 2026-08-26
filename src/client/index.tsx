@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
+import { apply as applyCodebases } from './codebases'
 
 /** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
 interface WorkspaceView {
@@ -186,4 +187,6 @@ export function apply(ctx: ClientContext): void {
     label: () => 'Vectr Workspaces',
     children: {},
   }), WorkspaceConsole)
+  // Feature B: mount the codebase manager in the same tab (separate panel).
+  applyCodebases(ctx)
 }
