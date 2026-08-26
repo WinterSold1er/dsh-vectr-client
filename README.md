@@ -80,6 +80,50 @@ The `dsh.client` dual-face declaration (`platform: 'web'`) makes the host load `
 
 The web half and its routes take effect only after the **host process is restarted** (the `dsh.client` scan and the route registration run at boot). Until then the plugin still binds vectr tools normally; the console is simply absent. End-to-end (routes answering through host 3081, the tab mounting) is verified after a host restart — see Known Limitations.
 
+## Multi-codebase management (feature B)
+
+Feature B extends the bundle to manage **multiple vectr daemons** — local ones started with `vectr start --path` and remote ones provisioned over `ssh` — and to register each one as its own host-level MCP server. The metadata file `~/.dsh/vectr-codebases.json` records every managed codebase; the secret store (`~/.dsh/vectr-secrets.json`, or the host `ctx.credentials` service when present) holds the only the password ref — **the plaintext password never lands in the metadata file**.
+
+### Host module (`src/codebases.ts`) — pure logic, injected side effects
+
+Every external effect is injected so the whole surface is unit-testable with fakes:
+
+- `spawnRunner` — wraps `node:child_process` `spawn`/`execFile` with no shell interpolation (no injection surface); used for `vectr start --path --json` / `vectr stop --port`.
+- `sshRunner` — wraps `ssh` for remote probe, `uv tool install vectr`, remote `vectr start <path> --host 127.0.0.1`, and the local tunnel `ssh -f -N -L 127.0.0.1:<localPort>:127.0.0.1:<remotePort> <host>`.
+- `credStore` — `set`/`get`/`unset` over a ref; the value never leaves the store into metadata.
+- `metaPath` — the metadata file path.
+
+Core operations:
+
+- `loadCodebases(metaPath)` — missing file → `[]`; malformed JSON → throws (misconfiguration fails loud); on load, the in-process server-name uniqueness registry is re-hydrated.
+- `saveCodebases(metaPath, list)` — atomic write via tmp + `renameSync`, `0600` mode.
+- `createCodebase(deps, metaPath, spec)`:
+  - **local** — `vectr start --path <path> --json`; parses `{ status, port, pid, mcp_url }`; `status === 'failed'` → throw; exit ≠ 0 → throw; the derived `serverName` is `vectr_<slug>` and must match `^[A-Za-z0-9_-]{1,32}$` and be process-unique.
+  - **remote** — ssh probe → `uv tool install vectr` (failure throws "install manually") → remote `vectr start <path> --host 127.0.0.1` → local `ssh -f -N -L …` tunnel; the password is stored via `credStore.set` *before* commands run; `tunnelPid` is recorded; any step failing cleans up what was already built (and unsets the stored secret).
+- `deleteCodebase(deps, metaPath, entry)` — `vectr stop --port` (local) or ssh remote `vectr stop --port` + `process.kill(tunnelPid, 'SIGTERM')` + remove from metadata + `credStore.unset`.
+- `testCodebase(entry)` — `GET http://127.0.0.1:<localPort>/v1/status` with a 3s AbortController timeout.
+- `CredentialStore` — `{ set, get, unset }`; `FileCredentialStore` is the 0600 fallback.
+
+### Host routes (registered in the plugin's root scope)
+
+- `GET /api/vectr/codebases` — list persisted entries (secrets stripped via `stripSecret`).
+- `POST /api/vectr/codebases` (body `CodebaseSpec`) — create; the password is forwarded only to the store and never echoed back.
+- `DELETE /api/vectr/codebases/:slug` — delete.
+- `POST /api/vectr/codebases/:slug/test` — liveness probe.
+
+On startup each `status === 'up'` codebase is also connected as its own `startConnection` (transport `streamable-http`, `serverName: vectr_<slug>`, `url: http://127.0.0.1:<localPort>/mcp`, `failOnStartupError: false`); a failed bind only warns and never blocks the main workspace. The plugin's teardown disposer kills any surviving tunnel PIDs.
+
+### Browser view
+
+The `dsh.client` web face mounts a second panel, **Codebase Manager**, into the same Settings → Plugins tab (alongside the workspace console). It renders a create form (type / path / host / slug / auth key|password + password field — the password is never read back or displayed) and a table with per-row **test** / **delete** actions.
+
+### Configuration
+
+| Field | Required | Description |
+|---|---|---|
+| `codebasesPath` | no | Path of the multi-codebase metadata file (default `~/.dsh/vectr-codebases.json`) |
+| `secretsPath` | no | Path of the file-backed secret store (default `~/.dsh/vectr-secrets.json`; unused when the host `ctx.credentials` service is available) |
+
 ## Development
 
 The dev dependencies are `pnpm link:` entries into a local
@@ -88,8 +132,8 @@ The dev dependencies are `pnpm link:` entries into a local
 ```sh
 pnpm install       # links the monorepo dsh packages this bundle builds against
 pnpm run typecheck # tsc --noEmit on src/ (host + client faces)
-pnpm test          # vitest (config schema, port resolution, scoped registration, Loader composition, workspace console)
-pnpm build         # tsc emits lib/index.js + lib/workspaces.js (host) and lib/client/index.js (web face)
+pnpm test          # vitest (config schema, port resolution, scoped registration, Loader composition, workspace console, codebase management)
+pnpm build         # tsc emits lib/index.js + lib/codebases.js (host) and lib/client/index.js (web face, bundles codebases.tsx)
 ```
 
 The published package itself declares no bundled dev machinery: consumers need only the `peerDependencies` — `@deepseek-ai/cordis`, `@deepseek-ai/dsh-mcp-client`, `@deepseek-ai/dsh-agent` — which the host profile already resolves.

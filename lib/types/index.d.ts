@@ -21,6 +21,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client';
+import { type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
 /**
  * Local structural view of the host `webServer` service this plugin registers
  * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is
@@ -54,6 +55,10 @@ export declare const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000;
 export declare const DEFAULT_SERVER_NAME = "vectr";
 /** Hex-char length of the sha256 workspace key prefix vectr stores per instance. */
 export declare const WORKSPACE_KEY_LENGTH = 12;
+/** Default path of the multi-codebase metadata file (feature B). */
+export declare const DEFAULT_CODEBASES_FILE: string;
+/** Default path of the file-backed secret store (used when no host credentials service). */
+export declare const DEFAULT_SECRETS_FILE: string;
 /** One vectr daemon record from {@link InstancesFile}. */
 export interface InstanceEntry {
     /** Absolute workspace directory this daemon serves. */
@@ -85,6 +90,10 @@ export interface Config {
     toolCallTimeoutMs?: number;
     /** Automatic reconnect policy after a lost connection; default `{ enabled: false }`. */
     reconnect?: ReconnectConfig;
+    /** Path of the multi-codebase metadata file (feature B; default `~/.dsh/vectr-codebases.json`). */
+    codebasesPath?: string;
+    /** Path of the file-backed secret store (feature B; default `~/.dsh/vectr-secrets.json`). */
+    secretsPath?: string;
 }
 export declare const Config: z<Config>;
 /**
@@ -141,7 +150,7 @@ export declare function isDaemonAlive(entry: InstanceEntry): Promise<boolean>;
  * @param config - resolved plugin configuration.
  * @param agent - the agent whose workspace resolves the daemon port.
  */
-export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instancesPath: string, config: Required<Config>, agent: Agent): void;
+export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instancesPath: string, config: Required<Config>, agent: Agent, codebasesPath?: string): void;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.
@@ -166,5 +175,42 @@ export declare function apply(ctx: Context, config?: Config): void;
  * @param instancesPath - absolute path of `instances.json`.
  */
 export declare function registerManagementRoutes(ctx: Context, instancesPath: string): void;
+/**
+ * Build the runtime dependencies for the codebase manager from the host
+ * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`
+ * wraps `spawn('ssh', args)`; `credStore` prefers the host `credentials`
+ * service (when present) and otherwise falls back to a file-backed store.
+ *
+ * When the host `credentials` service exists, its async `set`/`unset` are
+ * adapted to the sync-friendly {@link CredentialStore} shape by awaiting; `get`
+ * resolves via `resolve(ref)`. Ref names follow `VECTR_SSH_<SLUG>`.
+ *
+ * @param ctx - plugin context (for `credentials` lookup + logger).
+ * @param secretsPath - fallback secret file path.
+ * @returns the assembled {@link CodebaseDeps}-compatible runners + store.
+ */
+export declare function buildCodebaseDeps(ctx: Context, secretsPath: string): {
+    spawnRunner: SpawnRunner;
+    sshRunner: SshRunner;
+    credStore: CredentialStore;
+    instancesPath: string;
+};
+/**
+ * Register the feature-B codebase management HTTP routes:
+ *
+ * - `GET  /api/vectr/codebases` → list persisted entries (no secrets).
+ * - `POST /api/vectr/codebases` body {@link CodebaseSpec} → create (password
+ *   only forwarded to the store; never echoed in the response).
+ * - `DELETE /api/vectr/codebases/:slug` → delete.
+ * - `POST /api/vectr/codebases/:slug/test` → liveness probe.
+ *
+ * The routes are Cordis effects so they vanish with the plugin fiber. A host
+ * without `webServer` skips them (logged once).
+ *
+ * @param ctx - plugin context carrying `webServer` + `credentials`.
+ * @param codebasesPath - absolute path of the codebase metadata file.
+ * @param secretsPath - fallback secret file path.
+ */
+export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string): void;
 export {};
 //# sourceMappingURL=index.d.ts.map
