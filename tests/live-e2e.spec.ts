@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
+import { connect as tcpConnect } from 'node:net'
 import { join, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -51,6 +52,27 @@ function readInstances(): Record<string, { workspace: string; port: number }> {
   }
 }
 
+/** TCP liveness probe (mirrors the plugin's pre-bind check) so the live-e2e
+ * `hasBoth` judgment does not falsely run against a dead/registered-but-down
+ * daemon — that produced environmental false failures. */
+function isPortListening(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise<boolean>((resolveAlive) => {
+    const socket = tcpConnect(port, '127.0.0.1', () => {
+      socket.destroy()
+      resolveAlive(true)
+    })
+    const onError = (): void => {
+      socket.destroy()
+      resolveAlive(false)
+    }
+    socket.once('error', onError)
+    socket.setTimeout(timeoutMs, () => {
+      socket.destroy()
+      resolveAlive(false)
+    })
+  })
+}
+
 async function waitForTool(ctx: Context, agent: Agent, name: string, timeoutMs = 15_000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
@@ -73,7 +95,14 @@ describe('vectr-client live daemon e2e', () => {
     const [key, entry] = usable!
     const workspaceCwd = entry.workspace
 
-    it('registers mcp__vectr__* tools scoped to the agent and executes vectr_status', async () => {
+    it('registers mcp__vectr__* tools scoped to the agent and executes vectr_status', async (testCtx) => {
+      // Liveness guard (D-7 follow-up): the registry may list a daemon whose
+      // port is not actually listening (crashed/restarted). Skip cleanly rather
+      // than fail on an environmental condition.
+      if (!(await isPortListening(entry.port))) {
+        testCtx.skip()
+        return
+      }
       expect(key).toBe(keyOf(workspaceCwd))
 
       const patch: PatchOptions = { id: 'vectr-client' }
@@ -138,7 +167,16 @@ describe('vectr-client per-workspace port isolation', () => {
   const maybe = hasBoth ? describe : describe.skip
 
   maybe('with two daemons (8765 twoplus, 8767 two)', () => {
-    it('binds each agent to its own workspace daemon', async () => {
+    it('binds each agent to its own workspace daemon', async (testCtx) => {
+      // Liveness guard (D-7 follow-up): both registry entries must be actually
+      // listening, else the bind is skipped by the plugin and the assertion
+      // would fail on an environmental (not behavioral) condition.
+      const alive8765 = await isPortListening(8765)
+      const alive8767 = await isPortListening(8767)
+      if (!alive8765 || !alive8767) {
+        testCtx.skip()
+        return
+      }
       const patch: PatchOptions = { id: 'vectr-client' }
       const ctx = await boot(
         'vectr-isolation-e2e',
