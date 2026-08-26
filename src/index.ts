@@ -200,7 +200,11 @@ export function install(
     headers: {},
     toolCallTimeoutMs: config.toolCallTimeoutMs,
     failOnStartupError: false,
-    reconnect: config.reconnect,
+    // NOTE: `startConnection` ignores `config.reconnect` — the resolved
+    // `policy` passed as the third argument is the sole reconnect control
+    // (see packages/mcp/mcp-client/src/connection.ts: scheduleReconnect reads
+    // `policy`, never `config.reconnect`). Passing `config.reconnect` here
+    // would be dead, so only `policy` is supplied.
   }, policy)
   void conn.ready.then((outcome) => {
     if (outcome.error !== undefined) {
