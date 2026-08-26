@@ -36,7 +36,7 @@ The bundle patch inserts the row with `serverName: vectr`; users override any fi
 
 ## Workspace resolution
 
-`~/.vectr/instances.json` maps `sha256(<absolute workspace path>)[:12]` to a daemon record (`workspace`, `port`, `pid`, `host`, …). For one agent, the plugin resolves its session `cwd` (`agent.session.header.cwd`, falling back to the process cwd) in this order:
+`~/.vectr/instances.json` maps `sha256(<absolute workspace path>)[:12]` to a daemon record (`workspace`, `port`, `pid`, `host`, …). For one agent, the plugin resolves its session `cwd` (`agent.session.header.cwd`; a session with no `cwd` is skipped with a warn and bound to nothing — there is deliberately no `process.cwd()` fallback, which would risk binding the agent to the wrong workspace's daemon) in this order:
 
 1. Exact `sha256(cwd)[:12]` registry key.
 2. Prefix match: the `cwd` is inside a listed workspace directory (`cwd` equals the stored workspace or starts with it plus a path separator).
@@ -48,7 +48,9 @@ No match logs `vectr-client: no vectr daemon for <cwd>, skipping` and the agent 
 
 - Seeds already-live agents at plugin load, then listens for `agent/created` / `agent/disposed`.
 - The connection is started through the shared `dsh-mcp-client` supervisor (`startConnection`) with the **agent-scoped** context (`agent.ctx`), so every tool registration lands in that agent's tool layer: `mcp__vectr__vectr_search`, `mcp__vectr__vectr_locate`, `mcp__vectr__vectr_trace`, … appear only in the owning agent's view and unwind when the agent is disposed. The same `serverName` across agents is legal because the layers are per-scope.
-- Connect failure is logged (`vectr-client: connect to :<port> failed: …`) but never rejects the `agent/created` listener — a synchronous throw there would veto publication. The first prompt may therefore race tool discovery (see Known Limitations).
+- Connect failure is surfaced on the **agent-visible** logger when the session has one (`vectr-client: vectr connection failed for session <id> (cwd=…, port=…): …`), falling back to the loader-fiber logger otherwise; it never rejects the `agent/created` listener — a synchronous throw there would veto publication. The first prompt may therefore race tool discovery (see Known Limitations).
+- A registry entry is **liveness-checked before binding** (see Known Limitations): a dead pid (or an unlistening port when no pid is recorded) is skipped with a warn carrying workspace/cwd/port/pid, and never blocks `agent/created`.
+- The registry is **re-read on every `agent/created` and at seed time**, so a daemon restart that rewrites `instances.json` (new port/pid) is picked up without a Host reload.
 - On teardown the plugin disposes every live connection handle (idempotent; `agent/disposed` and the effect disposer both call `dispose`).
 
 ## Services consumed
@@ -89,8 +91,9 @@ Prefix-stable while the vectr daemon's advertised tool set and schemas are uncha
 
 ## Known Limitations and Deferred Work
 
-- **First-request race** — the connection is started asynchronously inside the `agent/created` listener (never awaited, so a connection failure cannot veto publication); the first prompt's tool set may miss the vectr tools if the initial discovery has not settled. They appear from the next step on.
-- **Port changes on daemon restart are not re-resolved** — reconnect is disabled by default; a vectr daemon that restarts on a different port leaves the old connection dead and no re-registration until the next session (reconnect, when enabled, retries the same port).
-- **Daemon absent → silent skip** — an agent whose workspace has no vectr entry simply has no vectr tools; the skip is only a log line, so a missing daemon is not surfaced to the model or user.
+- **First-request race** — the connection is started asynchronously inside the `agent/created` listener (never awaited, so a connection failure cannot veto publication); the first prompt's tool set may miss the vectr tools if the initial discovery has not settled. A call that fails for this reason should be retried on the next step, when the tools are registered. `conn.ready` always settles even under `failOnStartupError: false` (verified against `packages/mcp/mcp-client/src/connection.ts`: the `ready` promise resolves with the outcome — success `{}` or `{ error }` — after the first attempt, regardless of reconnect), so the plugin never hangs on a dead daemon.
+- **Port changes on daemon restart are not re-resolved** — reconnect is disabled by default; a vectr daemon that restarts on a different port leaves the old connection dead and no re-registration until the next session (reconnect, when enabled, retries the same port). A daemon that rewrites `instances.json` with a new port *is* picked up by the next `agent/created`, since the registry is re-read per call.
+- **Connect failures are agent-visible, not model-visible** — a failed bind logs on the session logger (and the loader logger as fallback) with cwd/port/error, but the model is not otherwise told; the agent simply gets no vectr tools until connection succeeds.
+- **Daemon absent/dead → silent skip (now diagnosed)** — an agent whose workspace has no vectr entry, or whose entry points at a dead pid/unlistening port, simply has no vectr tools; the skip is a warn carrying workspace/cwd/port/pid, so a missing or crashed daemon is at least diagnosable in logs rather than invisible.
 - **Same `serverName` across agents is legal** — every agent's tools live in its own scope layer; there is no global `mcp__vectr__*` reservation and no conflict.
 - **Tools are the only bridged capability** — vectr Resources/Prompts (if any appear) have no harness consumer; this bundle bridges only the tool set, consistent with `dsh-mcp-client`.
