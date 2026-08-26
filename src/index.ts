@@ -173,7 +173,14 @@ export function install(
 ): void {
   if (instances === undefined) return
   if (handles.has(agent)) return
-  const cwd = agent.session.header.cwd ?? process.cwd()
+  const cwd = agent.session.header.cwd
+  if (cwd === undefined) {
+    // A session without a workspace cwd cannot be bound to any vectr daemon.
+    // Falling back to process.cwd() would silently bind the agent to the wrong
+    // workspace's daemon (or none), so we skip explicitly instead.
+    ctx.logger.warn(`vectr-client: no cwd on session ${agent.id}, skipping vectr binding`)
+    return
+  }
   const entry = resolveInstance(instances, cwd)
   if (entry === undefined) {
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
