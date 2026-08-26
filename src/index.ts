@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { connect as tcpConnect } from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -157,6 +158,64 @@ export function readInstancesFile(ctx: Context, instancesPath: string): Instance
 }
 
 /**
+ * TCP liveness probe for a vectr daemon endpoint.
+ * @param host - bind host (defaults applied by caller).
+ * @param port - TCP port of the daemon's `/mcp` endpoint.
+ * @param timeoutMs - connect timeout before declaring the port dead.
+ * @returns `true` when a TCP connection opens within the budget, else `false`.
+ */
+export function isPortListening(host: string, port: number, timeoutMs = 300): Promise<boolean> {
+  return new Promise<boolean>((resolveAlive) => {
+    const socket = tcpConnect(port, host, () => {
+      socket.destroy()
+      resolveAlive(true)
+    })
+    const onError = (): void => {
+      socket.destroy()
+      resolveAlive(false)
+    }
+    socket.once('error', onError)
+    socket.setTimeout(timeoutMs, () => {
+      socket.destroy()
+      resolveAlive(false)
+    })
+  })
+}
+
+/**
+ * Validate that a registry daemon record still corresponds to a live daemon.
+ * A stale record (crashed process, reused port) must not bind tools to a dead
+ * endpoint: a failed bind is invisible to the agent, so we skip explicitly.
+ *
+ * Resolution order (cheapest first):
+ * 1. `entry.pid` present → `process.kill(pid, 0)` (ESRCH/ENOENT = dead,
+ *    EPERM or success = alive). This is authoritative when the daemon writes
+ *    its pid, which vectr does.
+ * 2. No pid → short-timeout TCP probe of `host:port` (a listening socket is
+ *    the weakest signal that something answers, good enough to avoid binding
+ *    to a known-dead port; a real HTTP/MCP handshake still happens at connect).
+ *
+ * @param entry - the daemon record to validate.
+ * @returns `true` when the record looks live, `false` when it should be skipped.
+ */
+export async function isDaemonAlive(entry: InstanceEntry): Promise<boolean> {
+  const host = entry.host ?? '127.0.0.1'
+  if (entry.pid !== undefined) {
+    try {
+      process.kill(entry.pid, 0)
+      return true // alive (or exists without permission to signal)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      if (code === 'ESRCH' || code === 'ENOENT') return false // process gone → dead
+      // EPERM and other codes: process exists; treat as alive.
+      return true
+    }
+  }
+  // No pid: fall back to a TCP probe.
+  return isPortListening(host, entry.port)
+}
+
+/**
  * Install the vectr MCP connection for one agent. Re-reads the registry on
  * every call so a daemon restart (new port / new pid) is picked up by the next
  * `agent/created` or seed without a Host reload.
@@ -199,32 +258,44 @@ export function install(
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
     return
   }
-  const host = entry.host ?? '127.0.0.1'
-  const port = entry.port
-  const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
-  // The SCOPED agent context routes every registration into that agent's
-  // tool layer; disposal of the scope (which the loop runs BEFORE emitting
-  // `agent/disposed`) unwinds the tools, so this listener only closes the
-  // HTTP connection.
-  const conn = startConnection(agent.ctx, {
-    transport: 'streamable-http',
-    serverName: config.serverName,
-    url: `http://${host}:${port}/mcp`,
-    headers: {},
-    toolCallTimeoutMs: config.toolCallTimeoutMs,
-    failOnStartupError: false,
-    // NOTE: `startConnection` ignores `config.reconnect` — the resolved
-    // `policy` passed as the third argument is the sole reconnect control
-    // (see packages/mcp/mcp-client/src/connection.ts: scheduleReconnect reads
-    // `policy`, never `config.reconnect`). Passing `config.reconnect` here
-    // would be dead, so only `policy` is supplied.
-  }, policy)
-  void conn.ready.then((outcome) => {
-    if (outcome.error !== undefined) {
-      ctx.logger.warn(`vectr-client: connect to :${port} failed: ${String(outcome.error)}`)
+  // Liveness gate (D-2): a stale record must not bind tools to a dead daemon.
+  // Runs in a non-blocking IIFE so the liveness probe (TCP) never delays
+  // `agent/created` publication; failures are reported as warn + skip only.
+  void (async () => {
+    if (!await isDaemonAlive(entry)) {
+      const pid = entry.pid === undefined ? 'n/a' : String(entry.pid)
+      ctx.logger.warn(
+        `vectr-client: vectr daemon for ${cwd} is not alive (workspace=${entry.workspace}, port=${entry.port}, pid=${pid}); skipping bind for session ${agent.id}`,
+      )
+      return
     }
-  })
-  handles.set(agent, conn)
+    const host = entry.host ?? '127.0.0.1'
+    const port = entry.port
+    const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
+    // The SCOPED agent context routes every registration into that agent's
+    // tool layer; disposal of the scope (which the loop runs BEFORE emitting
+    // `agent/disposed`) unwinds the tools, so this listener only closes the
+    // HTTP connection.
+    const conn = startConnection(agent.ctx, {
+      transport: 'streamable-http',
+      serverName: config.serverName,
+      url: `http://${host}:${port}/mcp`,
+      headers: {},
+      toolCallTimeoutMs: config.toolCallTimeoutMs,
+      failOnStartupError: false,
+      // NOTE: `startConnection` ignores `config.reconnect` — the resolved
+      // `policy` passed as the third argument is the sole reconnect control
+      // (see packages/mcp/mcp-client/src/connection.ts: scheduleReconnect reads
+      // `policy`, never `config.reconnect`). Passing `config.reconnect` here
+      // would be dead, so only `policy` is supplied.
+    }, policy)
+    void conn.ready.then((outcome) => {
+      if (outcome.error !== undefined) {
+        ctx.logger.warn(`vectr-client: connect to :${port} failed: ${String(outcome.error)}`)
+      }
+    })
+    handles.set(agent, conn)
+  })()
 }
 
 /**
