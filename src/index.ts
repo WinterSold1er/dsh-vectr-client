@@ -157,21 +157,22 @@ export function readInstancesFile(ctx: Context, instancesPath: string): Instance
 }
 
 /**
- * Install the vectr MCP connection for one agent.
+ * Install the vectr MCP connection for one agent. Re-reads the registry on
+ * every call so a daemon restart (new port / new pid) is picked up by the next
+ * `agent/created` or seed without a Host reload.
  * @param ctx - plugin context (the loader fiber) providing agents and logger.
  * @param handles - live connection handles keyed by agent.
- * @param instances - parsed daemon registry records.
+ * @param instancesPath - absolute path of the vectr daemon registry.
  * @param config - resolved plugin configuration.
  * @param agent - the agent whose workspace resolves the daemon port.
  */
 export function install(
   ctx: Context,
   handles: Map<Agent, ConnectionHandle>,
-  instances: InstancesFile | undefined,
+  instancesPath: string,
   config: Required<Config>,
   agent: Agent,
 ): void {
-  if (instances === undefined) return
   if (handles.has(agent)) return
   const cwd = agent.session.header.cwd
   if (cwd === undefined) {
@@ -181,6 +182,18 @@ export function install(
     ctx.logger.warn(`vectr-client: no cwd on session ${agent.id}, skipping vectr binding`)
     return
   }
+  // Re-read the registry on every call (D-7): a daemon restart that rewrote
+  // the registry (new port / new pid) is picked up without a Host reload.
+  let instances: InstancesFile | undefined
+  try {
+    instances = readInstancesFile(ctx, instancesPath)
+  } catch (error) {
+    // An unparseable registry must not veto agent/created publication: skip
+    // this agent with a diagnostic instead of throwing into the listener.
+    ctx.logger.warn(`vectr-client: cannot read daemon registry at ${instancesPath} (${String(error)}); skipping bind for session ${agent.id}`)
+    return
+  }
+  if (instances === undefined) return
   const entry = resolveInstance(instances, cwd)
   if (entry === undefined) {
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
@@ -230,11 +243,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   const instancesPath = isAbsolute(resolved.instancesPath)
     ? resolved.instancesPath
     : resolve(process.cwd(), resolved.instancesPath)
-  const instances = readInstancesFile(ctx, instancesPath)
   const handles = new Map<Agent, ConnectionHandle>()
 
-  for (const agent of ctx.agents.list()) install(ctx, handles, instances, resolved, agent)
-  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, instances, resolved, agent) })
+  // The registry is read inside install() on every call (D-7), so seed and
+  // each agent/created both see the current on-disk state.
+  for (const agent of ctx.agents.list()) install(ctx, handles, instancesPath, resolved, agent)
+  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, instancesPath, resolved, agent) })
   ctx.on('agent/disposed', ({ agent }) => {
     void handles.get(agent)?.dispose()
     handles.delete(agent)
