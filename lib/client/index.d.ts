@@ -18,7 +18,8 @@
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
     slots: {
-        inject(name: string, factory: () => {
+        inject(key: string, callback: () => unknown): () => void;
+        register(options: {
             name: string;
             id?: string;
             order?: number;

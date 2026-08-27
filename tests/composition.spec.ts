@@ -80,6 +80,13 @@ describe('vectr-client real composition', () => {
 
   beforeAll(async () => {
     httpServer = createServer((req, res) => {
+      // R3: the liveness gate probes /v1/status; a real vectr daemon answers 2xx.
+      const url = new URL(req.url ?? '/', 'http://x')
+      if (url.pathname === '/v1/status') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ fully_ready: true }))
+        return
+      }
       handleMcpRequest(req, res).catch((error: unknown) => {
         res.writeHead(500).end(String(error))
       })

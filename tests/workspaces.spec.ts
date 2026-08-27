@@ -147,19 +147,20 @@ describe('scanWorkspaces', () => {
     expect(views).toHaveLength(1)
     expect(views[0]!.live).toBe(false)
     expect(views[0]!.error).toMatch(/not alive/)
+    // Reviewer follow-up: the precise skip reason must be emitted (not only a
+    // generic error string) so the console row shows why the daemon is dead.
+    expect(views[0]!.reason).toBe('PORT_CLOSED')
     expect(views[0]!.status).toBeUndefined()
   })
 
-  it('falls back to an empty status object when /v1/status is non-200', async () => {
+  it('treats a non-2xx /v1/status as not alive (R3 HTTP layer fails)', async () => {
     const a = await startDaemon({ status: undefined as unknown as VectrStatus })
-    // Make /v1/status 404 by overriding: simplest is to point at a closed port
-    // is not possible mid-flight, so instead use a daemon whose status is fine
-    // but we test the live-but-empty-status branch via a 404 handler.
     a.server.removeAllListeners('request')
     a.server.on('request', (_req, res) => { res.statusCode = 500; res.end() })
     await writeRegistry({ cc: { workspace: '/ws/c', port: a.port, mode: 'full', host: '127.0.0.1' } })
     const views = await scanWorkspaces(ctx, registryPath)
-    expect(views[0]!.live).toBe(true)
+    // R3: the HTTP /v1/status probe returns non-2xx → daemon not alive.
+    expect(views[0]!.live).toBe(false)
     expect(views[0]!.status).toBeUndefined()
     await new Promise<void>((r) => a.server.close(() => r()))
   })
@@ -178,12 +179,12 @@ describe('scanWorkspaces', () => {
     await new Promise<void>((r) => a.server.close(() => r()))
   })
 
-  it('respects the status timeout (AbortSignal) and still returns a live-but-statusless row', async () => {
+  it('does not treat a slow /v1/status as alive (HTTP probe aborts → not alive)', async () => {
     const a = await startDaemon({ statusDelayMs: 500 })
     await writeRegistry({ tt: { workspace: '/ws/t', port: a.port, mode: 'full', host: '127.0.0.1' } })
     const views = await scanWorkspaces(ctx, registryPath, { statusTimeoutMs: 50 })
-    // Liveness gate passes (TCP up), but status fetch is aborted → status undefined.
-    expect(views[0]!.live).toBe(true)
+    // R3: no pid → TCP listens, but the HTTP /v1/status probe aborts at 50ms → not alive.
+    expect(views[0]!.live).toBe(false)
     expect(views[0]!.status).toBeUndefined()
     await new Promise<void>((r) => a.server.close(() => r()))
   })

@@ -18,23 +18,13 @@
  * @module dsh-vectr-client/workspaces
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { type InstanceEntry } from './index';
+import { type InstanceEntry } from './registry';
+import { type SkipReason, type VectrStatus } from './probe';
+export type { VectrStatus };
 /** Default per-status request budget before a daemon is treated as unresponsive. */
 export declare const DEFAULT_STATUS_TIMEOUT_MS = 3000;
 /** Default per-index-trigger request budget. */
 export declare const DEFAULT_TRIGGER_TIMEOUT_MS = 30000;
-/** Shape of `/v1/status` as vectr documents it (optional fields tolerated). */
-export interface VectrStatus {
-    indexed_files?: number;
-    total_chunks?: number;
-    languages?: string[];
-    last_indexed?: string | null;
-    notes_count?: number;
-    fully_ready?: boolean;
-    reindex_in_progress?: boolean;
-    embed_model?: string;
-    [key: string]: unknown;
-}
 /** One row in the workspace console table. */
 export interface WorkspaceView {
     /** Absolute workspace directory the daemon serves. */
@@ -47,7 +37,9 @@ export interface WorkspaceView {
     mode?: string;
     /** Whether the registry record passed the liveness probe. */
     live: boolean;
-    /** Why the row is not `live` (missing daemon / probe failure); absent when live. */
+    /** Precise liveness-failure reason (PROCESS_DEAD_ESRCH / PORT_CLOSED / HTTP_PROBE_TIMEOUT / HTTP_PROBE_UNREACHABLE); absent when `live`. */
+    reason?: SkipReason;
+    /** Human-readable reason the row is not `live`; absent when live. */
     error?: string;
     /** Parsed `/v1/status` payload; present only when `live` and the call succeeded. */
     status?: VectrStatus;

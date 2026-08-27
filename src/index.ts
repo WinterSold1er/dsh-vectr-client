@@ -18,10 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { connect as tcpConnect } from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -33,7 +30,7 @@ import {
   type ConnectionHandle,
   type ReconnectConfig,
 } from '@deepseek-ai/dsh-mcp-client'
-import { scanWorkspaces, triggerIndex, type VectrStatus } from './workspaces'
+import { scanWorkspaces, triggerIndex } from './workspaces'
 import {
   createCodebase,
   deleteCodebase,
@@ -47,6 +44,24 @@ import {
   type SpawnRunner,
   type SshRunner,
 } from './codebases'
+import {
+  DEFAULT_INSTANCES_FILE,
+  DEFAULT_HOST,
+  resolveInstance,
+  readInstancesFile,
+  type InstancesFile,
+} from './registry'
+import {
+  DEFAULT_TCP_TIMEOUT_MS,
+  diagnoseDaemon,
+  fetchStatus,
+} from './probe'
+
+// Re-export the registry/probe surface so existing importers (and tests) keep
+// resolving these symbols from the plugin root without the index↔workspaces cycle.
+export { isDaemonAlive, isPortListening } from './probe'
+export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry'
+export type { InstanceEntry, InstancesFile } from './registry'
 
 /** Return a shallow copy with the credential ref omitted (no secret leaks). */
 function stripSecret(entry: CodebaseEntry): CodebaseEntry {
@@ -83,46 +98,17 @@ export const name = 'vectr-client'
  * harness compositions that do not boot the web server; the host provides it. */
 export const inject = ['agents']
 
-/** Default path of the vectr daemon registry, inside the user's home. */
-export const DEFAULT_INSTANCES_FILE = join(homedir(), '.vectr', 'instances.json')
-
 /** Default per-tool-call timeout for vectr MCP calls (ms). */
 export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60_000
 
 /** Default local namespace for vectr tools (`mcp__vectr__*`). */
 export const DEFAULT_SERVER_NAME = 'vectr'
 
-/** Hex-char length of the sha256 workspace key prefix vectr stores per instance. */
-export const WORKSPACE_KEY_LENGTH = 12
-
 /** Default path of the multi-codebase metadata file (feature B). */
 export const DEFAULT_CODEBASES_FILE = join(homedir(), '.dsh', 'vectr-codebases.json')
 
 /** Default path of the file-backed secret store (used when no host credentials service). */
 export const DEFAULT_SECRETS_FILE = join(homedir(), '.dsh', 'vectr-secrets.json')
-
-/** One vectr daemon record from {@link InstancesFile}. */
-export interface InstanceEntry {
-  /** Absolute workspace directory this daemon serves. */
-  workspace: string
-  /** TCP port of the daemon's Streamable HTTP MCP endpoint. */
-  port: number
-  /** Daemon process id. */
-  pid?: number
-  /** Unix epoch milliseconds when the daemon started. */
-  started_at?: number
-  /** Registry mode (`full`, `lite`, …). */
-  mode?: string
-  /** Bind host; defaults to `127.0.0.1`. */
-  host?: string
-  /** Optional extra index roots. */
-  extra_roots?: string[]
-  /** Optional VS Code workspace file the daemon indexes. */
-  code_workspace_file?: string | null
-}
-
-/** The on-disk `instances.json` mapping: sha256(workspace)[:12] → daemon record. */
-export type InstancesFile = Record<string, InstanceEntry>
 
 /** Plugin configuration validated by {@link Config}. */
 export interface Config {
@@ -138,7 +124,17 @@ export interface Config {
   codebasesPath?: string
   /** Path of the file-backed secret store (feature B; default `~/.dsh/vectr-secrets.json`). */
   secretsPath?: string
+  /** HTTP `/v1/status` liveness-probe budget in ms (default 5000); below the known hang window so a hung daemon is judged dead. */
+  daemonHttpTimeoutMs?: number
+  /** TCP port-listening probe budget in ms (default 300). */
+  daemonTcpTimeoutMs?: number
 }
+
+/** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
+export const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5_000
+
+/** Default TCP port-listening probe budget (ms). */
+export const DEFAULT_DAEMON_TCP_TIMEOUT_MS = DEFAULT_TCP_TIMEOUT_MS
 
 const Reconnect: z<ReconnectConfig> = z.object({
   enabled: z.boolean().default(false),
@@ -154,124 +150,16 @@ export const Config: z<Config> = z.object({
   reconnect: Reconnect.default({ enabled: false }),
   codebasesPath: z.string().default(DEFAULT_CODEBASES_FILE),
   secretsPath: z.string().default(DEFAULT_SECRETS_FILE),
+  daemonHttpTimeoutMs: z.number().min(1).default(DEFAULT_DAEMON_HTTP_TIMEOUT_MS),
+  daemonTcpTimeoutMs: z.number().min(1).default(DEFAULT_DAEMON_TCP_TIMEOUT_MS),
 })
 
 /**
- * Resolve the vectr daemon record for one workspace, following the same
- * registry conventions vectr writes: exact sha256(cwd)[:12] key first, then a
- * prefix match (cwd inside a listed workspace directory), then a
- * trailing-slash-tolerant string match on the stored workspace path.
- * @param instances - parsed `instances.json` records.
- * @param cwd - absolute workspace directory of the agent.
- * @returns the matching daemon record, or `undefined` when no entry applies.
+ * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
+ * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
+ * These were migrated out of this file; it re-exports them above and only
+ * wires the plugin together.
  */
-export function resolveInstance(instances: InstancesFile, cwd: string): InstanceEntry | undefined {
-  const key = createHash('sha256').update(cwd).digest('hex').slice(0, WORKSPACE_KEY_LENGTH)
-  const exact = instances[key]
-  if (exact !== undefined) return exact
-  const normalizedCwd = cwd.endsWith('/') ? cwd.slice(0, -1) : cwd
-  const candidates = Object.values(instances)
-  const prefix = candidates.find(entry => {
-    const stored = entry.workspace.endsWith('/') ? entry.workspace.slice(0, -1) : entry.workspace
-    return stored.length > 0 && (normalizedCwd === stored || normalizedCwd.startsWith(`${stored}/`))
-  })
-  if (prefix !== undefined) return prefix
-  const exactWorkspace = candidates.find(entry => {
-    const stored = entry.workspace.endsWith('/') ? entry.workspace.slice(0, -1) : entry.workspace
-    return stored === normalizedCwd
-  })
-  return exactWorkspace
-}
-
-/**
- * Read and parse the vectr daemon registry file. A missing file means "no
- * vectr daemons"; a present-but-unparseable file is a misconfiguration and
- * fails loud.
- * @param ctx - plugin context carrying the logger.
- * @param instancesPath - absolute path of `instances.json`.
- * @returns the parsed records, or `undefined` when the file does not exist.
- */
-export function readInstancesFile(ctx: Context, instancesPath: string): InstancesFile | undefined {
-  let text: string
-  try {
-    text = readFileSync(instancesPath, 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
-      ctx.logger.info(`vectr-client: no daemon registry at ${instancesPath}, skipping`)
-      return undefined
-    }
-    throw new Error(`vectr-client: failed to read ${instancesPath}: ${String(error)}`)
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    throw new Error(`vectr-client: failed to parse ${instancesPath}: ${String(error)}`)
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`vectr-client: ${instancesPath} must be a JSON object mapping workspace keys to daemon records`)
-  }
-  return parsed as InstancesFile
-}
-
-/**
- * TCP liveness probe for a vectr daemon endpoint.
- * @param host - bind host (defaults applied by caller).
- * @param port - TCP port of the daemon's `/mcp` endpoint.
- * @param timeoutMs - connect timeout before declaring the port dead.
- * @returns `true` when a TCP connection opens within the budget, else `false`.
- */
-export function isPortListening(host: string, port: number, timeoutMs = 300): Promise<boolean> {
-  return new Promise<boolean>((resolveAlive) => {
-    const socket = tcpConnect(port, host, () => {
-      socket.destroy()
-      resolveAlive(true)
-    })
-    const onError = (): void => {
-      socket.destroy()
-      resolveAlive(false)
-    }
-    socket.once('error', onError)
-    socket.setTimeout(timeoutMs, () => {
-      socket.destroy()
-      resolveAlive(false)
-    })
-  })
-}
-
-/**
- * Validate that a registry daemon record still corresponds to a live daemon.
- * A stale record (crashed process, reused port) must not bind tools to a dead
- * endpoint: a failed bind is invisible to the agent, so we skip explicitly.
- *
- * Resolution order (cheapest first):
- * 1. `entry.pid` present → `process.kill(pid, 0)` (ESRCH/ENOENT = dead,
- *    EPERM or success = alive). This is authoritative when the daemon writes
- *    its pid, which vectr does.
- * 2. No pid → short-timeout TCP probe of `host:port` (a listening socket is
- *    the weakest signal that something answers, good enough to avoid binding
- *    to a known-dead port; a real HTTP/MCP handshake still happens at connect).
- *
- * @param entry - the daemon record to validate.
- * @returns `true` when the record looks live, `false` when it should be skipped.
- */
-export async function isDaemonAlive(entry: InstanceEntry): Promise<boolean> {
-  const host = entry.host ?? '127.0.0.1'
-  if (entry.pid !== undefined) {
-    try {
-      process.kill(entry.pid, 0)
-      return true // alive (or exists without permission to signal)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | null)?.code
-      if (code === 'ESRCH' || code === 'ENOENT') return false // process gone → dead
-      // EPERM and other codes: process exists; treat as alive.
-      return true
-    }
-  }
-  // No pid: fall back to a TCP probe.
-  return isPortListening(host, entry.port)
-}
-
 /**
  * Install the vectr MCP connection for one agent. Re-reads the registry on
  * every call so a daemon restart (new port / new pid) is picked up by the next
@@ -316,18 +204,27 @@ export function install(
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
     return
   }
-  // Liveness gate (D-2): a stale record must not bind tools to a dead daemon.
-  // Runs in a non-blocking IIFE so the liveness probe (TCP) never delays
-  // `agent/created` publication; failures are reported as warn + skip only.
+  // Liveness gate (D-2 / R3): a stale record must not bind tools to a dead
+  // daemon. alive = (pid alive OR TCP listening) AND HTTP /v1/status reachable,
+  // so a "pid alive + port listening but HTTP hung" daemon is correctly skipped
+  // (R3/R4). HTTP probe + budgets are injected from config (NFR2). Runs in a
+  // non-blocking IIFE so the probe never delays `agent/created` publication;
+  // failures are reported as warn + skip only and never thrown (NFR4).
   void (async () => {
-    if (!await isDaemonAlive(entry)) {
+    const diagnosis = await diagnoseDaemon(entry, {
+      httpProbe: (e, ms) => fetchStatus(e, ms),
+      httpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
+      tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
+    })
+    if (!diagnosis.alive) {
       const pid = entry.pid === undefined ? 'n/a' : String(entry.pid)
+      const reason = diagnosis.reason ?? 'HTTP_PROBE_UNREACHABLE'
       ctx.logger.warn(
-        `vectr-client: vectr daemon for ${cwd} is not alive (workspace=${entry.workspace}, port=${entry.port}, pid=${pid}); skipping bind for session ${agent.id}`,
+        `vectr-client: vectr daemon not alive, skipping bind for session ${agent.id} (cwd=${cwd}, workspace=${entry.workspace}, port=${entry.port}, pid=${pid}, reason=${reason})`,
       )
       return
     }
-    const host = entry.host ?? '127.0.0.1'
+    const host = entry.host ?? DEFAULT_HOST
     const port = entry.port
     const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
     // The SCOPED agent context routes every registration into that agent's
@@ -432,7 +329,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     reconnect: config.reconnect ?? { enabled: false },
     codebasesPath: config.codebasesPath ?? DEFAULT_CODEBASES_FILE,
     secretsPath: config.secretsPath ?? DEFAULT_SECRETS_FILE,
+    daemonHttpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
+    daemonTcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
   }
+  // Relative-path fallback (P3-safe): only resolves against process.cwd()
+  // when Config supplies a *relative* path. Both defaults
+  // (DEFAULT_INSTANCES_FILE / DEFAULT_CODEBASES_FILE) are absolute
+  // (homedir-based), so the common case never uses process.cwd() as a
+  // workspace fallback (D-4 still skips sessions lacking a cwd).
   const instancesPath = isAbsolute(resolved.instancesPath)
     ? resolved.instancesPath
     : resolve(process.cwd(), resolved.instancesPath)
@@ -473,7 +377,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Feature A (C1): host-side JSON routes backing the workspace console.
   // Registered in the root plugin scope (not per-agent) so a single pair of
   // management endpoints serves every workspace; disposed with this fiber.
-  registerManagementRoutes(ctx, instancesPath)
+  registerManagementRoutes(ctx, instancesPath, resolved)
   registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath)
 }
 
@@ -523,8 +427,9 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promi
  *
  * @param ctx - plugin context carrying the webServer service.
  * @param instancesPath - absolute path of `instances.json`.
+ * @param config - resolved plugin configuration (supplies `daemonHttpTimeoutMs`).
  */
-export function registerManagementRoutes(ctx: Context, instancesPath: string): void {
+export function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>): void {
   // `webServer` is provided by the host; in headless/unit contexts it may be
   // absent. `ctx.get` returns undefined (rather than throwing) so the plugin
   // still loads and the MCP-binding path keeps working without the console
@@ -540,7 +445,7 @@ export function registerManagementRoutes(ctx: Context, instancesPath: string): v
     path: '/api/vectr/workspaces',
     handler: async (_req, res) => {
       try {
-        const views = await scanWorkspaces(ctx, instancesPath)
+        const views = await scanWorkspaces(ctx, instancesPath, { statusTimeoutMs: config.daemonHttpTimeoutMs })
         sendJson(res, 200, views)
       } catch (error) {
         sendJson(res, 500, { error: String(error) })
@@ -579,16 +484,10 @@ export function registerManagementRoutes(ctx: Context, instancesPath: string): v
         sendJson(res, 404, { ok: false, error: 'no daemon matches the requested port/workspace' })
         return
       }
-      // Reuse the scan's status so triggerIndex can apply its fully_ready gate
-      // without a second round-trip when the caller just listed.
-      let status: VectrStatus | undefined
-      try {
-        const host = entry.host ?? '127.0.0.1'
-        const probe = await fetch(`http://${host}:${entry.port}/v1/status`)
-        if (probe.ok) status = await probe.json() as VectrStatus
-      } catch {
-        status = undefined
-      }
+      // Reuse the shared /v1/status probe (fetchStatus) with the configured
+      // timeout so a hung daemon cannot block this route (M2). Same probe the
+      // liveness gate uses; never hand-roll fetch here.
+      const status = await fetchStatus(entry, config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS)
       const result = await triggerIndex(entry, status !== undefined ? { status } : {})
       sendJson(res, result.ok ? 200 : 409, result)
     },

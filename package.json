@@ -12,7 +12,7 @@
     },
     "./client": {
       "types": "./lib/client/index.d.ts",
-      "default": "./lib/client/index.js"
+      "default": "./lib/client.js"
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
@@ -44,7 +44,8 @@
     "cordis"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.build.json && tsc -p tsconfig.client.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && tsdown --config tsdown.config.ts",
+    "build:client": "tsdown --config tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run"
   },
@@ -79,6 +80,7 @@
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
     "typescript": "^5.9.0",
+    "tsdown": "^0.22.2",
     "vitest": "^4.1.0",
     "zod": "^4.4.3"
   }

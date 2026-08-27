@@ -29,7 +29,8 @@ interface CodebaseView {
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
   slots: {
-    inject(name: string, factory: () => { name: string; id?: string; order?: number; label?: () => string; locale?: string; inject?: () => unknown; children?: Record<string, unknown> }, component: unknown): () => void
+    inject(key: string, callback: () => unknown): () => void
+    register(options: { name: string; id?: string; order?: number; label?: () => string; locale?: string; inject?: () => unknown; children?: Record<string, unknown> }, component: unknown): () => void
   }
   effect(disposer: () => void, name?: string): void
 }
@@ -226,11 +227,10 @@ export const inject = ['slots']
 
 /** Mount the codebase manager into the Settings → Plugins tab (alongside the workspace console). */
 export function apply(ctx: ClientContext): void {
-  ctx.slots.inject('settings.plugins.tab', () => ({
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
     name: 'settings.plugins.tab',
     id: 'vectr-codebases',
     order: 21,
     label: () => 'Vectr Codebases',
-    children: {},
-  }), CodebaseManager)
+  }, CodebaseManager))
 }

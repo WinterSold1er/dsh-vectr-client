@@ -20,26 +20,18 @@
 
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import { isDaemonAlive, readInstancesFile, type InstanceEntry, type InstancesFile } from './index'
+import { readInstancesFile, type InstanceEntry, type InstancesFile } from './registry'
+import { DEFAULT_TCP_TIMEOUT_MS, diagnoseDaemon, fetchStatus, type SkipReason, type VectrStatus } from './probe'
+
+// Re-exported so existing importers (and tests) keep resolving VectrStatus
+// from this module without a Cordis/config dependency on the probe layer.
+export type { VectrStatus }
 
 /** Default per-status request budget before a daemon is treated as unresponsive. */
 export const DEFAULT_STATUS_TIMEOUT_MS = 3000
 
 /** Default per-index-trigger request budget. */
 export const DEFAULT_TRIGGER_TIMEOUT_MS = 30_000
-
-/** Shape of `/v1/status` as vectr documents it (optional fields tolerated). */
-export interface VectrStatus {
-  indexed_files?: number
-  total_chunks?: number
-  languages?: string[]
-  last_indexed?: string | null
-  notes_count?: number
-  fully_ready?: boolean
-  reindex_in_progress?: boolean
-  embed_model?: string
-  [key: string]: unknown
-}
 
 /** One row in the workspace console table. */
 export interface WorkspaceView {
@@ -53,7 +45,9 @@ export interface WorkspaceView {
   mode?: string
   /** Whether the registry record passed the liveness probe. */
   live: boolean
-  /** Why the row is not `live` (missing daemon / probe failure); absent when live. */
+  /** Precise liveness-failure reason (PROCESS_DEAD_ESRCH / PORT_CLOSED / HTTP_PROBE_TIMEOUT / HTTP_PROBE_UNREACHABLE); absent when `live`. */
+  reason?: SkipReason
+  /** Human-readable reason the row is not `live`; absent when live. */
   error?: string
   /** Parsed `/v1/status` payload; present only when `live` and the call succeeded. */
   status?: VectrStatus
@@ -67,28 +61,6 @@ export interface TriggerResult {
   error?: string
   /** HTTP status code the daemon returned, when the request reached it. */
   status?: number
-}
-
-/**
- * Fetch `/v1/status` from one live daemon, returning `undefined` on any
- * transport failure or non-2xx so the caller can decide how to render the row.
- * @param entry - the daemon registry record.
- * @param timeoutMs - abort budget for the request.
- * @returns the parsed status object, or `undefined` on failure.
- */
-async function fetchStatus(entry: InstanceEntry, timeoutMs: number): Promise<VectrStatus | undefined> {
-  const host = entry.host ?? '127.0.0.1'
-  const controller = new AbortController()
-  const timer = sleep(timeoutMs).then(() => controller.abort())
-  try {
-    const res = await fetch(`http://${host}:${entry.port}/v1/status`, { signal: controller.signal })
-    if (!res.ok) return undefined
-    return await res.json() as VectrStatus
-  } catch {
-    return undefined
-  } finally {
-    void timer.catch(() => {})
-  }
 }
 
 /**
@@ -122,23 +94,27 @@ export async function scanWorkspaces(
   if (instances === undefined) return []
 
   const entries = Object.values(instances)
-  const liveness = await Promise.all(entries.map(async (entry) => {
-    try {
-      return await isDaemonAlive(entry)
-    } catch {
-      return false
-    }
-  }))
+  // Use the precise diagnosis (not the boolean gate) so the console shows the
+  // exact death reason (R4/M1) instead of a generic "not alive" string.
+  const liveness = await Promise.all(entries.map(async (entry) =>
+    diagnoseDaemon(entry, {
+      httpProbe: (e, ms) => fetchStatus(e, ms),
+      httpTimeoutMs: timeoutMs,
+      tcpTimeoutMs: DEFAULT_TCP_TIMEOUT_MS,
+    }),
+  ))
 
   const rows = await Promise.allSettled(entries.map(async (entry, i) => {
-    if (!liveness[i]) {
+    const diag = liveness[i]!
+    if (!diag.alive) {
       return {
         workspace: entry.workspace,
         port: entry.port,
         ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
         ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
         live: false,
-        error: 'daemon not alive (pid gone or port closed)',
+        ...(diag.reason !== undefined ? { reason: diag.reason } : {}),
+        error: diag.reason !== undefined ? `daemon not alive: ${diag.reason}` : 'daemon not alive',
       } satisfies WorkspaceView
     }
     const status = await fetchStatus(entry, timeoutMs)

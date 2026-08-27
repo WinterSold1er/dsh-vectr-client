@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { Config as ConfigSchema, DEFAULT_INSTANCES_FILE, DEFAULT_SERVER_NAME, DEFAULT_TOOL_CALL_TIMEOUT_MS, inject, name } from '../src/index.ts'
+import { Config as ConfigSchema, DEFAULT_DAEMON_HTTP_TIMEOUT_MS, DEFAULT_DAEMON_TCP_TIMEOUT_MS, DEFAULT_INSTANCES_FILE, DEFAULT_SERVER_NAME, DEFAULT_TOOL_CALL_TIMEOUT_MS, inject, name } from '../src/index.ts'
 
 /** Resolve a raw config object through the schemastery schema (the Loader path). */
 function resolveConfig(raw: Record<string, unknown>): Record<string, unknown> {
@@ -35,6 +35,8 @@ describe('Config schema defaults and validation', () => {
     expect(resolved.serverName).toBe(DEFAULT_SERVER_NAME)
     expect(resolved.toolCallTimeoutMs).toBe(DEFAULT_TOOL_CALL_TIMEOUT_MS)
     expect(resolved.reconnect).toEqual({ enabled: false, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 })
+    expect(resolved.daemonHttpTimeoutMs).toBe(DEFAULT_DAEMON_HTTP_TIMEOUT_MS)
+    expect(resolved.daemonTcpTimeoutMs).toBe(DEFAULT_DAEMON_TCP_TIMEOUT_MS)
   })
 
   it('accepts explicit values and merges a partial reconnect block', () => {
@@ -56,5 +58,15 @@ describe('Config schema defaults and validation', () => {
 
   it('rejects an invalid reconnect block', () => {
     expect(() => resolveConfig({ reconnect: { maxAttempts: 0 } })).toThrow()
+  })
+
+  it('rejects daemonHttpTimeoutMs <= 0 (guardrail F2)', () => {
+    expect(() => resolveConfig({ daemonHttpTimeoutMs: 0 })).toThrow()
+    expect(() => resolveConfig({ daemonHttpTimeoutMs: -1 })).toThrow()
+  })
+
+  it('rejects daemonTcpTimeoutMs <= 0 (guardrail F2)', () => {
+    expect(() => resolveConfig({ daemonTcpTimeoutMs: 0 })).toThrow()
+    expect(() => resolveConfig({ daemonTcpTimeoutMs: -5 })).toThrow()
   })
 })

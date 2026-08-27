@@ -27,6 +27,8 @@ interface WorkspaceView {
   mode?: string
   live: boolean
   error?: string
+  /** Precise liveness-failure reason enum from the host (PROCESS_DEAD_ESRCH / PORT_CLOSED / HTTP_PROBE_TIMEOUT / HTTP_PROBE_UNREACHABLE); absent when live. */
+  reason?: string
   status?: {
     indexed_files?: number
     total_chunks?: number
@@ -43,7 +45,8 @@ interface WorkspaceView {
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
   slots: {
-    inject(name: string, factory: () => { name: string; id?: string; order?: number; label?: () => string; locale?: string; inject?: () => unknown; children?: Record<string, unknown> }, component: unknown): () => void
+    inject(key: string, callback: () => unknown): () => void
+    register(options: { name: string; id?: string; order?: number; label?: () => string; locale?: string; inject?: () => unknown; children?: Record<string, unknown> }, component: unknown): () => void
   }
   effect(disposer: () => void, name?: string): void
 }
@@ -73,7 +76,8 @@ function WorkspaceRow(props: {
       <td title={view.workspace}>{view.workspace.split('/').slice(-2).join('/')}</td>
       <td>{view.live
         ? <span style={{ color: 'green' }}>online</span>
-        : <span style={{ color: 'red' }}>offline{view.error ? ` (${view.error})` : ''}</span>}</td>
+        : <span style={{ color: 'red' }}>offline</span>}</td>
+      <td title={view.error ?? ''}>{view.reason ?? view.error ?? '—'}</td>
       <td>{view.port}</td>
       <td>{view.pid ?? '—'}</td>
       <td>{view.mode ?? '—'}</td>
@@ -153,6 +157,7 @@ function WorkspaceConsole(): ReactNode {
           <tr>
             <th>workspace</th>
             <th>status</th>
+            <th>reason</th>
             <th>port</th>
             <th>pid</th>
             <th>mode</th>
@@ -180,13 +185,15 @@ export const inject = ['slots']
 
 /** Mount the workspace console into the Settings → Plugins tab. */
 export function apply(ctx: ClientContext): void {
-  ctx.slots.inject('settings.plugins.tab', () => ({
+  // `slots.inject` runs its callback as a Cordis effect: the callback must
+  // return a disposer (here, the one `slots.register` yields), not a plain
+  // descriptor object — otherwise the loader rejects it as `Invalid effect`.
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
     name: 'settings.plugins.tab',
     id: 'vectr-workspaces',
     order: 20,
     label: () => 'Vectr Workspaces',
-    children: {},
-  }), WorkspaceConsole)
+  }, WorkspaceConsole))
   // Feature B: mount the codebase manager in the same tab (separate panel).
   applyCodebases(ctx)
 }

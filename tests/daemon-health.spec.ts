@@ -1,17 +1,21 @@
 /**
- * Daemon-health and session-cwd unit tests (D-2, D-4, D-7) for the vectr-client
- * plugin's `install` path.
+ * Daemon-health and session-cwd unit tests (D-2, D-4, D-7, R3, R4) for the
+ * vectr-client plugin's `install` path and the liveness gate.
  *
- * These run WITHOUT any real vectr daemon: `startConnection` is mocked so we can
- * assert whether a bind was attempted (connection requested) or skipped. The
- * `process.cwd()` fallback (removed by D-4) and the registry re-read (D-7) and
- * the pid/TCP liveness gate (D-2) are exercised directly.
+ * These run WITHOUT any real vectr daemon: `startConnection` is mocked so we
+ * can assert whether a bind was attempted (connection requested) or skipped.
+ * The `process.cwd()` fallback (removed by D-4), the registry re-read (D-7),
+ * the pid/TCP/HTTP liveness gate (D-2 / R3) and the graceful skip (R4) are
+ * exercised directly. A process-local HTTP server stands in for a live daemon's
+ * `/v1/status` so the R3 HTTP layer is exercised end-to-end.
  */
+import { createServer, type Server } from 'node:http'
 import { createHash } from 'node:crypto'
+import { AddressInfo } from 'node:net'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type Mock } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { startConnection } from '@deepseek-ai/dsh-mcp-client'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -23,6 +27,7 @@ import {
   type InstancesFile,
   type InstanceEntry,
 } from '../src/index.ts'
+import { diagnoseDaemon, fetchStatus, type HttpProbe } from '../src/probe.ts'
 
 // Mock startConnection so no real MCP/HTTP connection is ever attempted; the
 // test asserts call/non-call directly.
@@ -65,8 +70,45 @@ function entryFor(cwd: string, port: number, pid?: number): InstanceEntry {
   return { workspace: cwd, port, pid, started_at: 0, mode: 'full', host: '127.0.0.1' }
 }
 
+/** A real, answering `/v1/status` daemon simulator (for the R3 HTTP layer). */
+function startStatusServer(): Promise<Server> {
+  return new Promise((resolve) => {
+    const server = createServer((_req, res) => {
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ fully_ready: true }))
+    })
+    server.listen(0, '127.0.0.1', () => resolve(server))
+  })
+}
+
+/** A daemon that accepts TCP but never answers `/v1/status` (the R3 hang case). */
+function startHangingServer(): Promise<Server> {
+  return new Promise((resolve) => {
+    const server = createServer((_req, _res) => {
+      // Never respond: simulates a process that is up but HTTP-dead.
+    })
+    server.listen(0, '127.0.0.1', () => resolve(server))
+  })
+}
+
+function portOf(server: Server): number {
+  return (server.address() as AddressInfo).port
+}
+
 const roots: string[] = []
 const handles = new Map<Agent, unknown>()
+let statusServer: Server
+let statusPort: number
+
+beforeAll(async () => {
+  statusServer = await startStatusServer()
+  statusPort = portOf(statusServer)
+})
+
+afterAll(async () => {
+  await new Promise<void>((r) => statusServer.close(() => r()))
+})
 
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -77,7 +119,11 @@ afterEach(async () => {
 
 /** Let the non-blocking liveness IIFE inside install() settle. */
 async function tick(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await new Promise(resolve => setTimeout(resolve, 20))
+}
+
+function aliveDeps(probe: HttpProbe = (e, ms) => fetchStatus(e, ms)) {
+  return { httpProbe: probe, httpTimeoutMs: 10, tcpTimeoutMs: 300 }
 }
 
 describe('isDaemonAlive / isPortListening (D-2 primitives)', () => {
@@ -87,13 +133,14 @@ describe('isDaemonAlive / isPortListening (D-2 primitives)', () => {
       err.code = 'ESRCH'
       throw err
     })
-    expect(await isDaemonAlive(entryFor('/w', 1234, 99_999))).toBe(false)
+    expect(await isDaemonAlive(entryFor('/w', 1234, 99_999), aliveDeps())).toBe(false)
     spy.mockRestore()
   })
 
   it('reports an alive pid (kill(0) success) as alive', async () => {
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
-    expect(await isDaemonAlive(entryFor('/w', 1234, 4242))).toBe(true)
+    // HTTP layer exercised via an injected probe (no real network).
+    expect(await isDaemonAlive(entryFor('/w', statusPort, 4242), aliveDeps(async () => ({ fully_ready: true })))).toBe(true)
     spy.mockRestore()
   })
 
@@ -103,18 +150,27 @@ describe('isDaemonAlive / isPortListening (D-2 primitives)', () => {
       err.code = 'EPERM'
       throw err
     })
-    expect(await isDaemonAlive(entryFor('/w', 1234, 1))).toBe(true)
+    expect(await isDaemonAlive(entryFor('/w', statusPort, 1), aliveDeps(async () => ({ fully_ready: true })))).toBe(true)
     spy.mockRestore()
   })
 
   it('probes TCP when no pid is present; a closed port is not alive', async () => {
     const closedPort = 1 // privileged / nothing listening
-    expect(await isDaemonAlive(entryFor('/w', closedPort))).toBe(false)
+    expect(await isDaemonAlive(entryFor('/w', closedPort), aliveDeps())).toBe(false)
+  })
+
+  it('treats a non-number pid ("abc") as process-layer absent, falling through to TCP/HTTP (F3)', async () => {
+    // A non-number pid must NOT be run through process.kill (which would throw
+    // TypeError) — it is treated as pid-less and judged by TCP/HTTP instead.
+    const entry = entryFor('/w', 2, 'abc' as unknown as number) // closed port
+    const diag = await diagnoseDaemon(entry, aliveDeps())
+    expect(diag.alive).toBe(false)
+    expect(diag.reason).toBe('PORT_CLOSED') // prove process-layer signal was skipped
   })
 })
 
-describe('install liveness gate (D-2)', () => {
-  it('skips a dead pid entry: no connect, warn carries workspace/cwd/port/pid', async () => {
+describe('install liveness gate (D-2 / R3)', () => {
+  it('skips a dead pid entry: no connect, warn carries workspace/cwd/port/pid + reason', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d2-deadpid-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
@@ -135,12 +191,14 @@ describe('install liveness gate (D-2)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent)
     await tick()
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
-    const warned = warn.mock.calls.some(c => String(c[0]).includes('is not alive') && String(c[0]).includes('pid=99999'))
+    const warned = warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('pid=99999') && String(c[0]).includes('reason=PROCESS_DEAD_ESRCH'))
     expect(warned).toBe(true)
     spy.mockRestore()
   })
@@ -161,20 +219,22 @@ describe('install liveness gate (D-2)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent)
     await tick()
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
-    expect(warn.mock.calls.some(c => String(c[0]).includes('is not alive'))).toBe(true)
+    expect(warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PORT_CLOSED'))).toBe(true)
   })
 
-  it('binds a live pid entry (mocked alive): connect is attempted', async () => {
+  it('binds a live pid + HTTP-reachable entry: connect is attempted', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d2-alivepid-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
     const file = join(dir, 'instances.json')
-    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, 1234, 4242) }))
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, statusPort, 4242) }))
 
     const ctx = new Context()
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
@@ -184,12 +244,48 @@ describe('install liveness gate (D-2)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent)
     await tick()
 
     expect(startConnectionMock).toHaveBeenCalledTimes(1)
     expect(handles.has(agent)).toBe(true)
     spy.mockRestore()
+  })
+
+  it('R3/R4: pid alive + port listening but HTTP hung → skip (graceful, no throw)', async () => {
+    const hangServer = await startHangingServer()
+    const hangPort = portOf(hangServer)
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-r3-hang-'))
+    roots.push(dir)
+    const cwd = join(dir, 'ws')
+    const file = join(dir, 'instances.json')
+    // twoplus 8765 analog: pid present, TCP up, HTTP /v1/status hung.
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, hangPort, 2483691) }))
+
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const agent = makeAgent('hang-daemon-agent', cwd)
+    install(ctx, handles as Map<Agent, never>, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      // Small budgets so the hang is judged dead quickly.
+      daemonHttpTimeoutMs: 30,
+      daemonTcpTimeoutMs: 30,
+    }, agent)
+    // The HTTP probe aborts after daemonHttpTimeoutMs (30ms); wait past it so
+    // the graceful skip warn has been emitted before we assert.
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    expect(startConnectionMock).not.toHaveBeenCalled()
+    expect(handles.has(agent)).toBe(false)
+    expect(warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=HTTP_PROBE_UNREACHABLE'))).toBe(true)
+    spy.mockRestore()
+    await new Promise<void>((r) => hangServer.close(() => r()))
   })
 })
 
@@ -198,7 +294,7 @@ describe('missing session cwd (D-4)', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d4-'))
     roots.push(dir)
     const file = join(dir, 'instances.json')
-    await writeFile(file, JSON.stringify({ x: entryFor('/somewhere', 1234, 1) }))
+    await writeFile(file, JSON.stringify({ x: entryFor('/somewhere', statusPort, 1) }))
 
     const ctx = new Context()
     const warn = vi.spyOn(ctx.logger, 'warn')
@@ -208,6 +304,8 @@ describe('missing session cwd (D-4)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent)
     await tick()
 
@@ -221,13 +319,17 @@ describe('missing session cwd (D-4)', () => {
 
 describe('registry re-read on every call (D-7)', () => {
   it('resolves a freshly rewritten registry entry for a later agent (new port)', async () => {
+    const server1 = await startStatusServer()
+    const server2 = await startStatusServer()
+    const p1 = portOf(server1)
+    const p2 = portOf(server2)
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d7-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
     const file = join(dir, 'instances.json')
 
-    // First generation: port 7001.
-    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, 7001, 1) }))
+    // First generation: port p1.
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, p1, 1) }))
     const ctx = new Context()
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true) // treat pid as alive
 
@@ -237,29 +339,35 @@ describe('registry re-read on every call (D-7)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent1)
     await tick()
     const firstUrl = startConnectionMock.mock.calls[0]?.[1]?.url as string | undefined
-    expect(firstUrl).toContain(':7001')
+    expect(firstUrl).toContain(`:${p1}`)
 
     // Rewrite the registry with a NEW port (simulating a daemon restart).
-    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, 7002, 1) }))
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, p2, 1) }))
     const agent2 = makeAgent('reread-agent-2', cwd)
     install(ctx, handles as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, agent2)
     await tick()
     const secondUrl = startConnectionMock.mock.calls[1]?.[1]?.url as string | undefined
-    expect(secondUrl).toContain(':7002')
+    expect(secondUrl).toContain(`:${p2}`)
 
     spy.mockRestore()
+    await new Promise<void>((r) => server1.close(() => r()))
+    await new Promise<void>((r) => server2.close(() => r()))
   })
 })
 
-describe('subagent / multi-agent scenario (D-2)', () => {
+describe('subagent / multi-agent scenario (D-2 / R4)', () => {
   it('binds the live parent daemon but skips a child whose daemon is dead', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-subagent-'))
     roots.push(dir)
@@ -267,8 +375,8 @@ describe('subagent / multi-agent scenario (D-2)', () => {
     const childCwd = join(dir, 'child')
     const file = join(dir, 'instances.json')
     await writeFile(file, JSON.stringify({
-      [keyOf(parentCwd)]: entryFor(parentCwd, 8001, 1),
-      [keyOf(childCwd)]: entryFor(childCwd, 8002, 99_999), // dead pid
+      [keyOf(parentCwd)]: entryFor(parentCwd, statusPort, 1),
+      [keyOf(childCwd)]: entryFor(childCwd, statusPort, 99_999), // dead pid
     }))
 
     const ctx = new Context()
@@ -289,12 +397,16 @@ describe('subagent / multi-agent scenario (D-2)', () => {
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, parent)
     install(ctx, handles as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
       reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
     }, child)
     await tick()
 
@@ -309,10 +421,10 @@ describe('readInstancesFile still used by install (D-7 integration)', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-read-'))
     roots.push(dir)
     const file = join(dir, 'instances.json')
-    const inst: InstancesFile = { [keyOf('/w')]: entryFor('/w', 9001, 1) }
+    const inst: InstancesFile = { [keyOf('/w')]: entryFor('/w', statusPort, 1) }
     await writeFile(file, JSON.stringify(inst))
     const ctx = new Context()
     const parsed = readInstancesFile(ctx, file)
-    expect(parsed?.[keyOf('/w')]?.port).toBe(9001)
+    expect(parsed?.[keyOf('/w')]?.port).toBe(statusPort)
   })
 })

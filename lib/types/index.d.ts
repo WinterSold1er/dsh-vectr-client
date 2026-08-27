@@ -22,6 +22,9 @@ import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client';
 import { type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
+export { isDaemonAlive, isPortListening } from './probe';
+export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
+export type { InstanceEntry, InstancesFile } from './registry';
 /**
  * Local structural view of the host `webServer` service this plugin registers
  * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is
@@ -47,39 +50,14 @@ export declare const name = "vectr-client";
  * `ctx.get` (see {@link registerManagementRoutes}) so the plugin also loads in
  * harness compositions that do not boot the web server; the host provides it. */
 export declare const inject: string[];
-/** Default path of the vectr daemon registry, inside the user's home. */
-export declare const DEFAULT_INSTANCES_FILE: string;
 /** Default per-tool-call timeout for vectr MCP calls (ms). */
 export declare const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000;
 /** Default local namespace for vectr tools (`mcp__vectr__*`). */
 export declare const DEFAULT_SERVER_NAME = "vectr";
-/** Hex-char length of the sha256 workspace key prefix vectr stores per instance. */
-export declare const WORKSPACE_KEY_LENGTH = 12;
 /** Default path of the multi-codebase metadata file (feature B). */
 export declare const DEFAULT_CODEBASES_FILE: string;
 /** Default path of the file-backed secret store (used when no host credentials service). */
 export declare const DEFAULT_SECRETS_FILE: string;
-/** One vectr daemon record from {@link InstancesFile}. */
-export interface InstanceEntry {
-    /** Absolute workspace directory this daemon serves. */
-    workspace: string;
-    /** TCP port of the daemon's Streamable HTTP MCP endpoint. */
-    port: number;
-    /** Daemon process id. */
-    pid?: number;
-    /** Unix epoch milliseconds when the daemon started. */
-    started_at?: number;
-    /** Registry mode (`full`, `lite`, …). */
-    mode?: string;
-    /** Bind host; defaults to `127.0.0.1`. */
-    host?: string;
-    /** Optional extra index roots. */
-    extra_roots?: string[];
-    /** Optional VS Code workspace file the daemon indexes. */
-    code_workspace_file?: string | null;
-}
-/** The on-disk `instances.json` mapping: sha256(workspace)[:12] → daemon record. */
-export type InstancesFile = Record<string, InstanceEntry>;
 /** Plugin configuration validated by {@link Config}. */
 export interface Config {
     /** Path of the vectr daemon registry (default `~/.vectr/instances.json`). */
@@ -94,52 +72,22 @@ export interface Config {
     codebasesPath?: string;
     /** Path of the file-backed secret store (feature B; default `~/.dsh/vectr-secrets.json`). */
     secretsPath?: string;
+    /** HTTP `/v1/status` liveness-probe budget in ms (default 5000); below the known hang window so a hung daemon is judged dead. */
+    daemonHttpTimeoutMs?: number;
+    /** TCP port-listening probe budget in ms (default 300). */
+    daemonTcpTimeoutMs?: number;
 }
+/** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
+export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
+/** Default TCP port-listening probe budget (ms). */
+export declare const DEFAULT_DAEMON_TCP_TIMEOUT_MS = 300;
 export declare const Config: z<Config>;
 /**
- * Resolve the vectr daemon record for one workspace, following the same
- * registry conventions vectr writes: exact sha256(cwd)[:12] key first, then a
- * prefix match (cwd inside a listed workspace directory), then a
- * trailing-slash-tolerant string match on the stored workspace path.
- * @param instances - parsed `instances.json` records.
- * @param cwd - absolute workspace directory of the agent.
- * @returns the matching daemon record, or `undefined` when no entry applies.
+ * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
+ * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
+ * These were migrated out of this file; it re-exports them above and only
+ * wires the plugin together.
  */
-export declare function resolveInstance(instances: InstancesFile, cwd: string): InstanceEntry | undefined;
-/**
- * Read and parse the vectr daemon registry file. A missing file means "no
- * vectr daemons"; a present-but-unparseable file is a misconfiguration and
- * fails loud.
- * @param ctx - plugin context carrying the logger.
- * @param instancesPath - absolute path of `instances.json`.
- * @returns the parsed records, or `undefined` when the file does not exist.
- */
-export declare function readInstancesFile(ctx: Context, instancesPath: string): InstancesFile | undefined;
-/**
- * TCP liveness probe for a vectr daemon endpoint.
- * @param host - bind host (defaults applied by caller).
- * @param port - TCP port of the daemon's `/mcp` endpoint.
- * @param timeoutMs - connect timeout before declaring the port dead.
- * @returns `true` when a TCP connection opens within the budget, else `false`.
- */
-export declare function isPortListening(host: string, port: number, timeoutMs?: number): Promise<boolean>;
-/**
- * Validate that a registry daemon record still corresponds to a live daemon.
- * A stale record (crashed process, reused port) must not bind tools to a dead
- * endpoint: a failed bind is invisible to the agent, so we skip explicitly.
- *
- * Resolution order (cheapest first):
- * 1. `entry.pid` present → `process.kill(pid, 0)` (ESRCH/ENOENT = dead,
- *    EPERM or success = alive). This is authoritative when the daemon writes
- *    its pid, which vectr does.
- * 2. No pid → short-timeout TCP probe of `host:port` (a listening socket is
- *    the weakest signal that something answers, good enough to avoid binding
- *    to a known-dead port; a real HTTP/MCP handshake still happens at connect).
- *
- * @param entry - the daemon record to validate.
- * @returns `true` when the record looks live, `false` when it should be skipped.
- */
-export declare function isDaemonAlive(entry: InstanceEntry): Promise<boolean>;
 /**
  * Install the vectr MCP connection for one agent. Re-reads the registry on
  * every call so a daemon restart (new port / new pid) is picked up by the next
@@ -173,8 +121,9 @@ export declare function apply(ctx: Context, config?: Config): void;
  *
  * @param ctx - plugin context carrying the webServer service.
  * @param instancesPath - absolute path of `instances.json`.
+ * @param config - resolved plugin configuration (supplies `daemonHttpTimeoutMs`).
  */
-export declare function registerManagementRoutes(ctx: Context, instancesPath: string): void;
+export declare function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>): void;
 /**
  * Build the runtime dependencies for the codebase manager from the host
  * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`
@@ -212,5 +161,4 @@ export declare function buildCodebaseDeps(ctx: Context, secretsPath: string): {
  * @param secretsPath - fallback secret file path.
  */
 export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string): void;
-export {};
 //# sourceMappingURL=index.d.ts.map
