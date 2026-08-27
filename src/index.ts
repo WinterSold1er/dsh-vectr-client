@@ -29,7 +29,7 @@ import {
   startConnection,
   type ConnectionHandle,
   type ReconnectConfig,
-} from '@deepseek-ai/dsh-mcp-client'
+} from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 import { scanWorkspaces, triggerIndex } from './workspaces'
 import {
   createCodebase,

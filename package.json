@@ -44,7 +44,7 @@
     "cordis"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && tsdown --config tsdown.config.ts",
+    "build": "tsc -p tsconfig.json && tsdown --config tsdown.server.config.ts && tsc -p tsconfig.client.json && tsdown --config tsdown.config.ts",
     "build:client": "tsdown --config tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "vitest run"

@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client';
+import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
 import { type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
