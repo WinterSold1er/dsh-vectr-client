@@ -567,14 +567,25 @@ export function buildCodebaseDeps(
       // can read it at startup. Key-auth hosts (auth absent) run plain `ssh`.
       const passFile = join(tmpdir(), `vectr-sshpass-${process.pid}-${randomBytes(6).toString('hex')}`)
       writeFileSync(passFile, auth.password, { mode: 0o600 })
-      const handle = spawnRunner('sshpass', ['-f', passFile,
-        '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...args])
-      void handle.promise.finally(() => {
+      try {
+        const handle = spawnRunner('sshpass', ['-f', passFile,
+          '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...args])
+        void handle.promise.finally(() => {
+          try { rmSync(passFile) } catch {
+            // best-effort cleanup; a stale 0600 temp file only holds a password.
+          }
+        })
+        return handle
+      } catch (err) {
+        // spawnRunner threw synchronously (illegal cwd/option, ENOENT, …) before
+        // any child existed, so the `finally` above never registered. The temp
+        // file already holds the plaintext password, so remove it now instead of
+        // leaking a 0600 secret into /tmp, then propagate the original error.
         try { rmSync(passFile) } catch {
-          // best-effort cleanup; a stale 0600 temp file only holds a password.
+          // best-effort; nothing more we can do here.
         }
-      })
-      return handle
+        throw err
+      }
     }
     return spawnRunner('ssh', args)
   }

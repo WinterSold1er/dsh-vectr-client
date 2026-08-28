@@ -110,4 +110,22 @@ describe('sshpass -f construction (no plaintext argv)', () => {
     // temp file removed on exit
     await expect(stat(passFile)).rejects.toThrow()
   })
+
+  it('removes the temp file when spawn throws synchronously (cwd/option error)', async () => {
+    // P2 sync-throw path: make the FIRST spawn (the sshpass one) throw before
+    // any child exists. The 0600 temp file is already written, so sshRunner must
+    // clean it up AND still propagate the error. Without the guard, the file
+    // would leak into /tmp — exactly the exposure P2 set out to remove.
+    spawnMock.mockImplementationOnce((command: string, args: string[]) => {
+      hoist.captured.push({ command, args, child: null as unknown as EventEmitter })
+      throw new Error('spawn ENOENT: cwd does not exist')
+    })
+    const deps = buildCodebaseDeps({ get: () => undefined } as never, '/tmp/vectr-secrets.json')
+    const call = () => deps.sshRunner(['-o', 'ConnectTimeout=5', 'h', 'true'], { password: 's3cret' })
+    expect(call).toThrow(/cwd does not exist/)
+    const passFile = hoist.captured.at(-1)!.args[1]
+    expect(passFile).toBeTypeOf('string')
+    // temp file must be gone — cleanup ran on the synchronous throw.
+    await expect(stat(passFile)).rejects.toThrow()
+  })
 })

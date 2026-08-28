@@ -193,6 +193,14 @@ export async function triggerIndex(
     const text = await res.text().catch(() => '')
     if (res.status === 503) {
       // Pass through the daemon's own "reindex in progress" wording.
+      //
+      // Concurrency note (H7): this client has NO plugin-side guard against
+      // concurrent re-indexes — it deliberately relies on the daemon to reject a
+      // second `POST /v1/index` while one is already running with a 503
+      // `reindex_in_progress`. The frontend disables the button during an in-
+      // flight call, but that is only UX; the real backstop is this 503 pass-
+      // through. If the daemon ever stops returning 503 for a busy index, the
+      // client would happily double-trigger — the guard lives in the daemon.
       return { ok: false, error: text.trim() || 'reindex already in progress (503)', status: 503 }
     }
     return { ok: false, error: `index request rejected: ${res.status}${text ? ` ${text}` : ''}`, status: res.status }
