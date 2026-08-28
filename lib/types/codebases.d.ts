@@ -129,6 +129,26 @@ export declare const DEFAULT_CODEBASES_FILE: string;
 export declare function _resetServerNameRegistry(): void;
 /** Sentinel `workspace` for old entries that cannot be inferred during migration. */
 export declare const UNASSIGNED_WORKSPACE = "__unassigned__";
+/**
+ * Derive the MCP server name from an owning workspace + slug. The workspace is
+ * hashed (sha256, first {@link WORKSPACE_KEY_LENGTH} hex chars — the same key
+ * vectr writes into `~/.vectr/instances.json`) so two workspaces may reuse the
+ * same slug while still getting globally-unique server names (binding isolation
+ * at the MCP-registration layer). Reuses the registry's key length constant so
+ * the two never drift.
+ * @param workspace - absolute owning workspace path.
+ * @param slug - the codebase slug.
+ * @returns `vectr_<workspaceKey>_<slug>`.
+ */
+/**
+ * C2: only remove a file we actually own under a controlled base directory.
+ * A corrupted/absent `tunnelCtl` (or any meta-derived path) must never let us
+ * `rmSync` an arbitrary file on disk. We resolve and require the target to be
+ * strictly inside `base`; otherwise throw instead of deleting.
+ * @param path - candidate path to remove.
+ * @param base - the only directory under which removal is permitted.
+ */
+export declare function safeRemove(path: string, base: string): void;
 export declare function deriveServerName(workspace: string, slug: string): string;
 /**
  * Validate a slug and its derived server name, enforcing the format and the

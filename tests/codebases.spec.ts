@@ -4,7 +4,7 @@
  * in-memory `CredentialStore`, and a temp metadata file. No real vectr daemon,
  * no real ssh, no external network. The 41 existing feature-A specs stay green.
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,9 +17,11 @@ import {
   FileCredentialStore,
   findFreePort,
   loadCodebases,
+  migrateCodebases,
   saveCodebases,
   testCodebase,
   cleanupStaleTunnelSockets,
+  safeRemove,
   type CodebaseDeps,
   type CodebaseEntry,
   type CodebaseSpec,
@@ -795,6 +797,45 @@ describe('cleanupStaleTunnelSockets (P6)', () => {
 
   it('returns 0 when the dir cannot be read', () => {
     expect(cleanupStaleTunnelSockets('/nonexistent/path/that/does/not/exist')).toBe(0)
+  })
+})
+
+describe('migrateCodebases (N2 null guard)', () => {
+  it('returns no-op when instances is null', () => {
+    expect(migrateCodebases('/tmp/no-such-meta.json', null as unknown as never)).toEqual({
+      changed: false,
+      migrated: 0,
+    })
+  })
+
+  it('returns no-op when instances is undefined', () => {
+    expect(migrateCodebases('/tmp/no-such-meta.json', undefined as unknown as never)).toEqual({
+      changed: false,
+      migrated: 0,
+    })
+  })
+})
+
+describe('safeRemove (N1 base-dir guard)', () => {
+  it('throws when target equals the controlled base itself', () => {
+    const base = join(tmpdir(), `safe-remove-base-${process.pid}`)
+    expect(() => safeRemove(base, base)).toThrow(/outside controlled dir/)
+  })
+
+  it('throws when target is outside the controlled base', () => {
+    const base = join(tmpdir(), `safe-remove-base-${process.pid}-2`)
+    const outside = join(tmpdir(), `safe-remove-other-${process.pid}`)
+    expect(() => safeRemove(outside, base)).toThrow(/outside controlled dir/)
+  })
+
+  it('removes a file strictly inside the controlled base', async () => {
+    const base = join(tmpdir(), `safe-remove-base-${process.pid}-3`)
+    await mkdir(base, { recursive: true })
+    const file = join(base, 'sock')
+    await writeFile(file, '')
+    expect(existsSync(file)).toBe(true)
+    expect(() => safeRemove(file, base)).not.toThrow()
+    expect(existsSync(file)).toBe(false)
   })
 })
 

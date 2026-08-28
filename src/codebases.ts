@@ -205,10 +205,10 @@ export const UNASSIGNED_WORKSPACE = '__unassigned__'
  * @param path - candidate path to remove.
  * @param base - the only directory under which removal is permitted.
  */
-function safeRemove(path: string, base: string): void {
+export function safeRemove(path: string, base: string): void {
   const safeBase = resolve(base)
   const target = resolve(path)
-  if (target !== safeBase && !target.startsWith(`${safeBase}${sep}`)) {
+  if (!target.startsWith(`${safeBase}${sep}`)) {
     throw new Error(`vectr-client: refusing to remove ${path}: outside controlled dir ${base}`)
   }
   rmSync(target, { force: true })
@@ -1038,7 +1038,7 @@ export function migrateCodebases(
   // A2: an empty/undefined registry cannot infer local workspaces; writing would
   // stamp every entry UNASSIGNED and poison the sticky "already defined" field so
   // the migration never retries. Skip (no write) until a real registry exists.
-  if (instances === undefined || Object.keys(instances).length === 0) {
+  if (instances == null || Object.keys(instances).length === 0) {
     return { changed: false, migrated: 0 }
   }
   const list = loadCodebases(metaPath)

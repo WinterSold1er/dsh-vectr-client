@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "vectr": {
+      "url": "http://localhost:8766/mcp"
+    }
+  }
+}
