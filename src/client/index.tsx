@@ -506,10 +506,13 @@ export function WorkspaceConsole(): ReactNode {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ workspace: ws }),
     })
-      .then((res) => res.json().catch(() => ({})) as Promise<{ ok?: boolean; error?: string }>)
-      .then((result) => {
-        if (result.ok === false || result.error !== undefined) {
-          setFlash(`assign "${slug}" → "${ws}" needs a backend PATCH route (not yet implemented)`)
+      .then(async (res) => {
+        // Success is judged on the explicit HTTP status + absence of error, not
+        // on a hard-coded "not implemented" string: any 4xx/5xx or error payload
+        // is surfaced verbatim so ops is never misled.
+        const result = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+        if (!res.ok || result.error !== undefined) {
+          setFlash(`assign failed: ${result.error ?? 'unknown'}`)
         } else {
           setFlash(`assigned "${slug}" → "${ws}"`)
           refresh()
@@ -531,14 +534,19 @@ export function WorkspaceConsole(): ReactNode {
   // Group codebases by workspace; everything unassigned/undefined falls into the
   // unassigned bucket; workspaces present in codebases but absent from the
   // workspaces endpoint become orphan pseudo-sections (so no entry is hidden).
-  const knownWorkspaces = (wsViews ?? []).map((w) => w.workspace)
+  // Both key sides are normalized (trailing slash trimmed) so a backend that
+  // tolerates trailing slashes does not split one logical workspace into a
+  // phantom orphan section (B1).
+  const normWs = (w: string): string => w.replace(/\/+$/, '')
+  const knownWorkspaces = (wsViews ?? []).map((w) => normWs(w.workspace))
   const byWs = new Map<string, CodebaseView[]>()
   const unassigned: CodebaseView[] = []
   for (const cb of cbViews ?? []) {
     const ws = cb.workspace
     if (ws === undefined || ws === UNASSIGNED_WORKSPACE) { unassigned.push(cb); continue }
-    const list = byWs.get(ws)
-    if (list === undefined) byWs.set(ws, [cb])
+    const key = normWs(ws)
+    const list = byWs.get(key)
+    if (list === undefined) byWs.set(key, [cb])
     else list.push(cb)
   }
   const orphans = [...byWs.keys()].filter((ws) => !knownWorkspaces.includes(ws))

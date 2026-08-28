@@ -29,7 +29,10 @@ interface CodebaseView {
   error?: string
 }
 
-/** One table row with test / delete actions. Exported for layout-regression tests. */
+/** One table row with test / delete actions. Exported for layout-regression tests.
+ *  dead: rollback only — the 阶段2 merged panel renders `CodebaseSubRow`
+ *  (src/client/index.tsx) instead; keep this for the legacy CodebaseManager
+ *  rollback path, do not wire it back into the live panel. */
 export function CodebaseRow(props: {
   view: CodebaseView
   onTest: (slug: string) => void

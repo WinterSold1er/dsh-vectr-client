@@ -770,12 +770,10 @@ export function patchCodebase(
   }
   const entry = list[idx]!
   // B4: the reassign target must be a known vectr daemon workspace, not an
-  // arbitrary path. A missing/unparseable registry or a target that matches no
-  // daemon record is rejected loudly (the composite serverName is derived from
-  // the workspace, so binding to an unregistered one would silently mis-scope
-  // the MCP registration). Uses the same resolveInstance convention vectr
-  // itself uses, so a workspace prefix still resolves.
-  if (options.instances === undefined || resolveInstance(options.instances, workspace) === undefined) {
+  // arbitrary path — UNLESS the target is the UNASSIGNED_WORKSPACE sentinel,
+  // which stores the literal sentinel (no daemon binding, matching GET/grouping).
+  const isUnassign = workspace === UNASSIGNED_WORKSPACE
+  if (!isUnassign && (options.instances === undefined || resolveInstance(options.instances, workspace) === undefined)) {
     throw new CodebaseError(409, `workspace "${workspace}" is not registered with a vectr daemon`)
   }
   const newServerName = deriveServerName(workspace, entry.slug)

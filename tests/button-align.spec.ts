@@ -15,6 +15,11 @@ import { describe, expect, it } from 'vitest'
 import { CodebaseRow } from '../src/client/codebases.tsx'
 
 const src = readFileSync(new URL('../src/client/codebases.tsx', import.meta.url), 'utf8')
+// The live component rendered by the 阶段2 merged panel is `CodebaseSubRow`
+// (src/client/index.tsx), not the now-dead `CodebaseRow` from codebases.tsx.
+// Guard the live actions cell too, so its flex/nowrap/gap layout cannot regress
+// unguarded while the dead component keeps its own guard.
+const clientSrc = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
 
 describe('CodebaseRow action cell (问题2)', () => {
   it('CodebaseRow is exported (module compiles + testable)', () => {
@@ -40,5 +45,21 @@ describe('CodebaseRow action cell (问题2)', () => {
   it('actions th sets minWidth:110 so long columns cannot crush it', () => {
     expect(src).toMatch(/minWidth:\s*110/)
     expect(src).toMatch(/whiteSpace:\s*'nowrap'/)
+  })
+})
+
+describe('CodebaseSubRow action cell (问题2, 活组件)', () => {
+  it('wraps the actions in a flex container with nowrap + gap (与 CodebaseRow 一致)', () => {
+    expect(clientSrc).toMatch(
+      /display:\s*'flex',\s*alignItems:\s*'center',\s*gap:\s*4,\s*whiteSpace:\s*'nowrap'/,
+    )
+  })
+
+  it('action td opts into nowrap so the cell never wraps', () => {
+    expect(clientSrc).toMatch(/tdStyle,\s*whiteSpace:\s*'nowrap'/)
+  })
+
+  it('actions th reserves width (minWidth:130) so long columns cannot crush it', () => {
+    expect(clientSrc).toMatch(/minWidth:\s*130,\s*whiteSpace:\s*'nowrap'/)
   })
 })

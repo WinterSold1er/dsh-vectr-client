@@ -174,4 +174,24 @@ describe('PATCH /:slug assign', () => {
     const meta = await readMeta()
     expect(meta[0]!.workspace).toBe('/w1')
   })
+
+  it('accepts the "__unassigned__" sentinel (moves entry back to unassigned, no daemon)', async () => {
+    // Registry has no entry that would validate '__unassigned__' as a real
+    // workspace; the sentinel must bypass the daemon-registry check.
+    await writeFile(instancesPath, JSON.stringify({ wother: { workspace: '/w_other', port: 1 } }))
+    const seeded: CodebaseEntry = {
+      id: 'demo', slug: 'demo', type: 'local', path: '/w_old',
+      workspace: '/w_old', serverName: deriveServerName('/w_old', 'demo'), status: 'up',
+    }
+    await writeFile(codebasesPath, JSON.stringify([seeded]))
+    const call = capturePrefix()
+    const res = await call('PATCH', '/api/vectr/codebases/demo', { workspace: '__unassigned__' })
+    expect(res.code).toBe(200)
+    const body = JSON.parse(res.body) as { ok?: boolean; workspace?: string }
+    // C2: success envelope carries ok:true.
+    expect(body.ok).toBe(true)
+    expect(body.workspace).toBe('__unassigned__')
+    const meta = await readMeta()
+    expect(meta[0]!.workspace).toBe('__unassigned__')
+  })
 })

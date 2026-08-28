@@ -49,6 +49,7 @@ import {
   patchCodebase,
   CodebaseError,
   testCodebase,
+  UNASSIGNED_WORKSPACE,
   type CodebaseEntry,
   type CodebaseSpec,
   type CredentialStore,
@@ -808,8 +809,14 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
         }
         // Body shape: `{ workspace: string }` — the absolute target workspace.
         const { workspace } = (body ?? {}) as { workspace?: unknown }
-        if (typeof workspace !== 'string' || workspace.length === 0 || !isAbsolute(workspace)) {
-          sendJson(res, 400, { error: 'PATCH body must include an absolute "workspace" path' })
+        // PATCH accepts either an absolute workspace path (the normal assign
+        // target) or the UNASSIGNED_WORKSPACE sentinel, which moves a codebase
+        // back into the unassigned bucket without requiring a daemon registry
+        // (consistent with GET / grouping semantics). Any other value is 400.
+        const wsValid = typeof workspace === 'string' && workspace.length > 0 &&
+          (workspace === UNASSIGNED_WORKSPACE || isAbsolute(workspace))
+        if (!wsValid) {
+          sendJson(res, 400, { error: 'PATCH body must include an absolute "workspace" path (or the "__unassigned__" sentinel)' })
           return
         }
         // Validate the target against the live daemon registry (assign only
@@ -829,7 +836,7 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
             workspace,
             instances === undefined ? {} : { instances },
           )
-          sendJson(res, 200, stripSecret(updated))
+          sendJson(res, 200, { ok: true, ...stripSecret(updated) })
         } catch (error) {
           if (error instanceof CodebaseError) {
             sendJson(res, error.status, { ok: false, error: error.message })
