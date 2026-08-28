@@ -419,7 +419,12 @@ async function resolveRemotePort(
   host: string,
   workspace: string,
 ): Promise<number | undefined> {
-  const cat = ssh([host, 'cat', join(homedir(), '.vectr', 'instances.json')])
+  // The `cat` runs on the REMOTE host, so the path must be the remote user's
+  // home. A literal `~` is expanded by the remote login shell to that user's
+  // `$HOME` (e.g. conan's `/home/edogawaconan/.vectr/instances.json`); using
+  // the local `homedir()` would point `cat` at a path that does not exist on
+  // the remote, making the read fail silently and fall back to stdout/8760.
+  const cat = ssh([host, 'cat', '~/.vectr/instances.json'])
   const result = await cat.promise
   if (result.code !== 0) return undefined
   try {

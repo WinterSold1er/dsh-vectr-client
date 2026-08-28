@@ -262,6 +262,39 @@ describe('create remote', () => {
     const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5' })
     expect(entry.remotePort).toBe(8762) // from instances.json, overrides stdout 9999
     expect(entry.localPort).toBeGreaterThan(0)
+    // P1 anti-false-green: the cat argument must be the REMOTE home
+    // (`~/.vectr/instances.json`), not the local `homedir()` path. A local
+    // path would point `cat` at a non-existent file on the remote and silently
+    // fall back to stdout/8760.
+    const catCall = ssh.calls.find(c => c.includes('cat'))
+    expect(catCall).toBeDefined()
+    expect(catCall?.[0]).toBe('h') // host first
+    expect(catCall?.[2]).toBe('~/.vectr/instances.json') // remote home, expanded by remote shell
+    expect(catCall?.[2]).not.toContain('/home/csy') // must NOT leak local home
+  })
+
+  it('falls back to stdout port when remote instances.json is absent', async () => {
+    // The remote file does not exist (or is unreadable) -> cat exits non-zero.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('uv'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":9999}', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 1, stdout: '', stderr: 'No such file or directory' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=7)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+      instancesPath: '',
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb' })
+    // cat failed -> resolveRemotePort returns undefined -> falls back to the
+    // `vectr start` stdout port (9999), never the silent 8760 default.
+    expect(entry.remotePort).toBe(9999)
+    const catCall = ssh.calls.find(c => c.includes('cat'))
+    expect(catCall?.[2]).toBe('~/.vectr/instances.json')
   })
 })
 
