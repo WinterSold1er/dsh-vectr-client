@@ -449,6 +449,61 @@ describe('delete', () => {
     expect(stopArgs).toContain('8731')
     expect(loadCodebases(metaPath)).toEqual([])
   })
+
+  it('stops remote daemon on remotePort (not localPort) via PATH-injected vectr stop', async () => {
+    // Regression for the conan-rerun / dev-fix5 bug: remote delete must stop the
+    // daemon on `entry.remotePort` (the port the conan daemon actually binds),
+    // NOT `entry.localPort` (our local tunnel endpoint). Stopping on localPort is
+    // a silent no-op that orphans the remote daemon + its instances.json entry.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('stop'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry: CodebaseEntry = {
+      id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
+      localPort: 8760, remotePort: 8767, tunnelPid: 999, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+    }
+    saveCodebases(metaPath, [entry])
+    await deleteCodebase(deps, metaPath, entry)
+    const stopCall = ssh.calls.find((c) => c.includes('stop'))
+    expect(stopCall).toBeDefined()
+    const portIdx = stopCall!.indexOf('--port')
+    expect(portIdx).toBeGreaterThanOrEqual(0)
+    expect(stopCall![portIdx + 1]).toBe('8767') // remotePort, NOT localPort 8760
+    expect(stopCall![portIdx + 1]).not.toBe('8760')
+    // PATH injected so non-interactive ssh resolves the uv-installed vectr.
+    expect(stopCall).toContain('PATH=$HOME/.local/bin:$PATH')
+    expect(stopCall?.[1]).toBe('export')
+    expect(loadCodebases(metaPath)).toEqual([])
+  })
+
+  it('tears down tunnel before stopping the remote daemon', async () => {
+    // Spec order: ssh -O exit (tunnel) -> vectr stop (remote daemon) -> metadata delete.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('stop'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry: CodebaseEntry = {
+      id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
+      localPort: 8760, remotePort: 8767, tunnelPid: 999, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+    }
+    saveCodebases(metaPath, [entry])
+    await deleteCodebase(deps, metaPath, entry)
+    const exitIdx = ssh.calls.findIndex((c) => c.includes('-O') && c.includes('exit'))
+    const stopIdx = ssh.calls.findIndex((c) => c.includes('stop'))
+    expect(exitIdx).toBeGreaterThanOrEqual(0)
+    expect(stopIdx).toBeGreaterThan(exitIdx) // tunnel teardown precedes remote stop
+  })
 })
 
 describe('remote vectr PATH + idempotent install', () => {
