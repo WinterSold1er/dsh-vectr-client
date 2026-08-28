@@ -32,8 +32,14 @@ import {
   type ConnectionHandle,
   type ReconnectConfig,
 } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+// P7: these symbols are only exposed via the package SUBPATH
+// `@deepseek-ai/dsh-mcp-client/src/connection.ts`; the package ROOT only
+// re-exports { Config, apply, inject, name }. Pinning the subpath import is
+// intentional and must not be 'simplified' to the root, or the real binding is
+// lost at build time (rc.2 constraint; revisit if upstream adds root exports).
 import { scanWorkspaces, triggerIndex } from './workspaces'
 import {
+  cleanupStaleTunnelSockets,
   createCodebase,
   deleteCodebase,
   FileCredentialStore,
@@ -342,6 +348,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   const instancesPath = isAbsolute(resolved.instancesPath)
     ? resolved.instancesPath
     : resolve(process.cwd(), resolved.instancesPath)
+  // P6: best-effort cleanup of stale tunnel control sockets from a crashed
+  // prior process before we (re)establish live tunnels.
+  try { cleanupStaleTunnelSockets() } catch {
+    // best-effort startup hygiene; never fatal.
+  }
   const codebasesPath = isAbsolute(resolved.codebasesPath)
     ? resolved.codebasesPath
     : resolve(process.cwd(), resolved.codebasesPath)
@@ -366,9 +377,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (entry.type === 'remote' && (entry.tunnelPid !== undefined || entry.tunnelCtl !== undefined)) {
           // Prefer a clean control-socket exit (works even when tunnelPid was
           // never recorded), then best-effort SIGTERM the recorded PID.
-          if (entry.tunnelCtl !== undefined) {
+          if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
             try {
-              spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? ''])
+              spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host])
             } catch {
               // best-effort: control-socket exit unavailable at teardown.
             }

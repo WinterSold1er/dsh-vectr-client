@@ -12,7 +12,7 @@
  */
 
 import { homedir, tmpdir } from 'node:os'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /** Discriminant for where a codebase's vectr daemon runs. */
@@ -661,4 +661,51 @@ export function _removeMeta(metaPath: string): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Best-effort cleanup of stale tunnel control sockets left behind when a
+ * previous plugin process crashed (the master ssh process is gone but its
+ * `vectr-tunnel-*.sock` remains in tmpdir). A socket is considered stale when
+ * the node process that created it (pid encoded in the filename) is no longer
+ * alive; live tunnels of the current process are left untouched. Every error is
+ * swallowed — this is a startup hygiene step, never fatal.
+ *
+ * ponytail: pid-based heuristic — it verifies only that the *owning node process*
+ * is dead, not that the ssh master itself is gone. If a node process dies while
+ * its ssh master somehow outlives it, the socket would be skipped. To tighten,
+ * attempt `ssh -O check -S <sock> <host>` once host is known, but that needs the
+ * remote host which this function does not have, so the pid heuristic is the
+ * pragmatic default.
+ */
+export function cleanupStaleTunnelSockets(dir: string = tmpdir()): number {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  const re = /^vectr-tunnel-.*-(\d+)\.sock$/
+  let removed = 0
+  for (const name of names) {
+    const m = re.exec(name)
+    if (m === null || m[1] === undefined) continue
+    const pid = Number(m[1])
+    if (pid === process.pid) continue
+    // Owning process alive -> its tunnel is still in use; leave it.
+    try {
+      process.kill(pid, 0)
+      continue
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ESRCH') continue // not ours to touch (e.g. EPERM)
+    }
+    try {
+      rmSync(join(dir, name))
+      removed += 1
+    } catch {
+      // best-effort
+    }
+  }
+  return removed
 }
