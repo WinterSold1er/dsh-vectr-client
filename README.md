@@ -113,7 +113,7 @@ Core operations:
   - **remote** — ssh probe → `uv tool install vectr` (failure throws "install manually") → remote `vectr start <path> --host 127.0.0.1` → local `ssh -f -N -L …` tunnel; the password is stored via `credStore.set` *before* commands run; `tunnelPid` is recorded; any step failing cleans up what was already built (and unsets the stored secret).
 - `deleteCodebase(deps, metaPath, entry)` — `vectr stop --port` (local) or ssh remote `vectr stop --port` + `ssh -O exit` on the tunnel control socket (fallback `process.kill(tunnelPid, 'SIGTERM')`) + remove from metadata + `credStore.unset`.
 
-**Remote password auth** requires `sshpass` on the host PATH: password-auth codebases resolve the secret from `credStore` and the host `sshRunner` feeds it via `sshpass -p <pw> ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no …`. Key-auth hosts (the default `auth: 'key'`) run plain `ssh` using already-configured keys and never touch the password. The tunnel is opened as an ssh control master (`-M -S <ctl>`); its PID is read reliably via `ssh -O check` (`Master running (pid=…)`) rather than the unreliable `Process ID <pid>` line, and the remote daemon port is read from the remote `~/.vectr/instances.json` (matched by workspace) with `vectr start` stdout scrape as fallback.
+**Remote password auth** requires `sshpass` on the host PATH: password-auth codebases resolve the secret from `credStore` and the host `sshRunner` writes it to a `0600` temp file, then runs `sshpass -f <0600 temp file> ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no …`. The plaintext password never enters `argv` (visible in `ps` / `/proc`) or the process environment, and the temp file is unlinked once the `ssh` process exits — on both success and failure. Key-auth hosts (the default `auth: 'key'`) run plain `ssh` using already-configured keys and never touch the password. The tunnel is opened as an ssh control master (`-M -S <ctl>`); its PID is read reliably via `ssh -O check` (`Master running (pid=…)`) rather than the unreliable `Process ID <pid>` line, and the remote daemon port is read from the remote `~/.vectr/instances.json` (matched by workspace) with `vectr start` stdout scrape as fallback.
 - `testCodebase(entry)` — `GET http://127.0.0.1:<localPort>/v1/status` with a 3s AbortController timeout.
 - `CredentialStore` — `{ set, get, unset }`; `FileCredentialStore` is the 0600 fallback.
 
@@ -136,6 +136,8 @@ The `dsh.client` web face mounts a second panel, **Codebase Manager**, into the 
 |---|---|---|
 | `codebasesPath` | no | Path of the multi-codebase metadata file (default `~/.dsh/vectr-codebases.json`) |
 | `secretsPath` | no | Path of the file-backed secret store (default `~/.dsh/vectr-secrets.json`; unused when the host `ctx.credentials` service is available) |
+| `daemonHttpTimeoutMs` | no | HTTP `/v1/status` liveness-probe budget in ms (default `5000`); below the known hang window |
+| `daemonTcpTimeoutMs` | no | TCP port-listening probe budget in ms (default `300`) |
 
 ## Development
 
