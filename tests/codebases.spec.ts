@@ -5,6 +5,7 @@
  * no real ssh, no external network. The 41 existing feature-A specs stay green.
  */
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,6 +18,7 @@ import {
   loadCodebases,
   saveCodebases,
   testCodebase,
+  cleanupStaleTunnelSockets,
   type CodebaseDeps,
   type CodebaseEntry,
   type CodebaseSpec,
@@ -305,6 +307,29 @@ describe('create remote', () => {
     expect(catCall?.[2]).toBe('~/.vectr/instances.json')
   })
 
+  it('falls back to the 8760 default when cat fails AND stdout carries no port (H6)', async () => {
+    // P2-adjacent / H6: both resolvers fail -> the magic `?? 8760` default must
+    // fire. This pins the constant so a silent change (e.g. to 0 or NaN) cannot
+    // stay green. cat exits non-zero AND `vectr start` stdout has no parseable
+    // port line, so resolveRemotePort() and parseRemotePort() both return
+    // undefined and the conventional default is used.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('uv'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: 'vectr started ok', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 1, stdout: '', stderr: 'No such file or directory' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=7)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb8760' })
+    expect(entry.remotePort).toBe(8760)
+  })
+
   it('retries ssh -O check once on transient failure and still captures PID', async () => {
     // P3: ssh -f -N -M may not have finished the master handshake when the
     // first `ssh -O check` runs, so it fails once; the retry must recover.
@@ -521,6 +546,59 @@ describe('FileCredentialStore', () => {
     expect(store.get('K')).toBe('v')
     store.unset('K')
     expect(store.get('K')).toBeUndefined()
+  })
+})
+
+describe('cleanupStaleTunnelSockets (P6)', () => {
+  let sockDir: string
+  beforeEach(async () => {
+    sockDir = await mkdtemp(join(tmpdir(), 'sock-cleanup-'))
+  })
+  afterEach(async () => {
+    await rm(sockDir, { recursive: true, force: true })
+  })
+
+  it('removes sockets whose owning pid is dead (ESRCH); keeps live / current / EPERM', async () => {
+    // ponytail: pid-based heuristic — only the *owning node process* liveness is
+    // checked. Mirror that here: dead pid -> removed; live pid / current pid /
+    // EPERM -> kept. Orphaned ssh masters are intentionally out of scope.
+    const deadPid = 12345
+    const livePid = 67890
+    const epermPid = 55555
+    const curPid = process.pid
+    await writeFile(join(sockDir, `vectr-tunnel-host-${deadPid}.sock`), '')
+    await writeFile(join(sockDir, `vectr-tunnel-host-${livePid}.sock`), '')
+    await writeFile(join(sockDir, `vectr-tunnel-host-${epermPid}.sock`), '')
+    await writeFile(join(sockDir, `vectr-tunnel-host-${curPid}.sock`), '')
+    await writeFile(join(sockDir, 'not-a-sock.txt'), '') // ignored by regex
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((pidArg: number, _sig?: string | number): boolean => {
+      const pid = pidArg as number
+      if (pid === livePid || pid === curPid) return true // alive -> keep
+      if (pid === deadPid) {
+        const e = new Error('esrch') as NodeJS.ErrnoException
+        e.code = 'ESRCH'
+        throw e
+      }
+      if (pid === epermPid) {
+        const e = new Error('eperm') as NodeJS.ErrnoException
+        e.code = 'EPERM'
+        throw e
+      }
+      return true
+    })
+
+    const removed = cleanupStaleTunnelSockets(sockDir)
+    expect(removed).toBe(1)
+    expect(existsSync(join(sockDir, `vectr-tunnel-host-${deadPid}.sock`))).toBe(false)
+    expect(existsSync(join(sockDir, `vectr-tunnel-host-${livePid}.sock`))).toBe(true)
+    expect(existsSync(join(sockDir, `vectr-tunnel-host-${epermPid}.sock`))).toBe(true)
+    expect(existsSync(join(sockDir, `vectr-tunnel-host-${curPid}.sock`))).toBe(true)
+    killSpy.mockRestore()
+  })
+
+  it('returns 0 when the dir cannot be read', () => {
+    expect(cleanupStaleTunnelSockets('/nonexistent/path/that/does/not/exist')).toBe(0)
   })
 })
 
