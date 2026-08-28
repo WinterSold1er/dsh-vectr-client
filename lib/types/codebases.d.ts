@@ -10,6 +10,7 @@
  *
  * @module dsh-vectr-client/codebases
  */
+import { type InstancesFile } from './registry';
 /** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
  * local port (ms) — used by `ensureTunnelUp` purely to decide
  * reuse-vs-reallocate of `localPort`. This is NOT the ssh control-master
@@ -32,6 +33,8 @@ export interface CodebaseSpec {
     type: CodebaseType;
     /** Absolute workspace path served by the daemon. */
     path: string;
+    /** Owning workspace (absolute). Local == `path`; remote == the remote workspace the daemon serves. Composite `serverName` is derived from this + `slug`. */
+    workspace?: string;
     /** Remote host (`user@host` or `host`) for `type === 'remote'`. */
     host?: string;
     /** Remote auth method. */
@@ -53,7 +56,9 @@ export interface CodebaseEntry {
     path: string;
     /** Remote host for `type === 'remote'`. */
     host?: string;
-    /** Derived MCP server name (`vectr_<slug>`) — globally unique. */
+    /** Owning workspace (absolute); enables per-workspace binding isolation. Local == `path`; remote == the remote workspace. */
+    workspace?: string;
+    /** Derived MCP server name (`vectr_<sha256(workspace)[:12]>_<slug>`) — globally unique across workspaces. */
     serverName: string;
     /** Local Streamable HTTP port the host connects to (tunnel endpoint / daemon port). */
     localPort?: number;
@@ -122,19 +127,17 @@ export declare const SLUG_PATTERN: RegExp;
 export declare const DEFAULT_CODEBASES_FILE: string;
 /** Clear the in-process server-name registry (test helper). */
 export declare function _resetServerNameRegistry(): void;
-/**
- * Derive the MCP server name from a slug.
- * @param slug - the codebase slug.
- * @returns `vectr_<slug>`.
- */
-export declare function deriveServerName(slug: string): string;
+/** Sentinel `workspace` for old entries that cannot be inferred during migration. */
+export declare const UNASSIGNED_WORKSPACE = "__unassigned__";
+export declare function deriveServerName(workspace: string, slug: string): string;
 /**
  * Validate a slug and its derived server name, enforcing the format and the
- * in-process uniqueness invariant.
+ * in-process uniqueness invariant (composite key: workspace + slug).
+ * @param workspace - absolute owning workspace path.
  * @param slug - candidate slug.
- * @throws when the slug is malformed or its server name is already taken.
+ * @throws when the slug is malformed or its composite server name is already taken.
  */
-export declare function assertSlugAvailable(slug: string): void;
+export declare function assertServerNameAvailable(workspace: string, slug: string): void;
 /**
  * Read the codebase metadata file. A missing file yields `[]`; a malformed file
  * throws with a clear diagnostic (misconfiguration must fail loud).
@@ -256,6 +259,34 @@ export interface EnsureTunnelResult {
  * @param entry - the (persisted) remote entry to bring up.
  */
 export declare function ensureTunnelUp(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<EnsureTunnelResult>;
+/** Result of {@link migrateCodebases}. */
+export interface MigrateResult {
+    /** `true` when at least one entry was rewritten (persisted). */
+    changed: boolean;
+    /** Number of entries rewritten this run. */
+    migrated: number;
+}
+/**
+ * Idempotently backfill the `workspace` field and recompute the composite
+ * `serverName` for entries written before per-workspace isolation existed.
+ * Runs once at plugin apply (best-effort). Existing entries that already carry a
+ * `workspace` matching their composite `serverName` are left untouched, so a
+ * second run is a no-op (no rewrite, no churn).
+ *
+ * Inference for entries missing `workspace`:
+ *  - local: reverse-lookup the workspace via `resolveInstance(instances, path)`
+ *    (the daemon whose `instances.json` workspace equals `path`).
+ *  - remote: match `host` against `instances[].host`.
+ *  - either fails → {@link UNASSIGNED_WORKSPACE}.
+ *
+ * The on-disk envelope stays a bare `CodebaseEntry[]` (no schema change).
+ * @param metaPath - absolute path of the codebase metadata file.
+ * @param instances - parsed vectr daemon registry (for workspace inference).
+ * @returns whether anything changed and how many entries were migrated.
+ */
+export declare function migrateCodebases(metaPath: string, instances: InstancesFile, logger?: {
+    warn(message: string): void;
+}): MigrateResult;
 /** Options for {@link testCodebase}. */
 export interface TestCodebaseOpts {
     /** Injected runners/store — required when `heal` is set. */

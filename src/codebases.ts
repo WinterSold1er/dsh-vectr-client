@@ -12,9 +12,11 @@
  */
 
 import { homedir, tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { isPortListening } from './probe'
+import { WORKSPACE_KEY_LENGTH, resolveInstance, type InstancesFile } from './registry'
 
 /** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
  * local port (ms) — used by `ensureTunnelUp` purely to decide
@@ -42,6 +44,8 @@ export interface CodebaseSpec {
   type: CodebaseType
   /** Absolute workspace path served by the daemon. */
   path: string
+  /** Owning workspace (absolute). Local == `path`; remote == the remote workspace the daemon serves. Composite `serverName` is derived from this + `slug`. */
+  workspace?: string
   /** Remote host (`user@host` or `host`) for `type === 'remote'`. */
   host?: string
   /** Remote auth method. */
@@ -64,7 +68,9 @@ export interface CodebaseEntry {
   path: string
   /** Remote host for `type === 'remote'`. */
   host?: string
-  /** Derived MCP server name (`vectr_<slug>`) — globally unique. */
+  /** Owning workspace (absolute); enables per-workspace binding isolation. Local == `path`; remote == the remote workspace. */
+  workspace?: string
+  /** Derived MCP server name (`vectr_<sha256(workspace)[:12]>_<slug>`) — globally unique across workspaces. */
   serverName: string
   /** Local Streamable HTTP port the host connects to (tunnel endpoint / daemon port). */
   localPort?: number
@@ -177,28 +183,56 @@ const inProgressLocalPorts = new Set<number>()
  */
 const healLocks = new Map<string, Promise<EnsureTunnelResult>>()
 
+/** Sentinel `workspace` for old entries that cannot be inferred during migration. */
+export const UNASSIGNED_WORKSPACE = '__unassigned__'
+
 /**
- * Derive the MCP server name from a slug.
+ * Derive the MCP server name from an owning workspace + slug. The workspace is
+ * hashed (sha256, first {@link WORKSPACE_KEY_LENGTH} hex chars — the same key
+ * vectr writes into `~/.vectr/instances.json`) so two workspaces may reuse the
+ * same slug while still getting globally-unique server names (binding isolation
+ * at the MCP-registration layer). Reuses the registry's key length constant so
+ * the two never drift.
+ * @param workspace - absolute owning workspace path.
  * @param slug - the codebase slug.
- * @returns `vectr_<slug>`.
+ * @returns `vectr_<workspaceKey>_<slug>`.
  */
-export function deriveServerName(slug: string): string {
-  return `vectr_${slug}`
+/**
+ * C2: only remove a file we actually own under a controlled base directory.
+ * A corrupted/absent `tunnelCtl` (or any meta-derived path) must never let us
+ * `rmSync` an arbitrary file on disk. We resolve and require the target to be
+ * strictly inside `base`; otherwise throw instead of deleting.
+ * @param path - candidate path to remove.
+ * @param base - the only directory under which removal is permitted.
+ */
+function safeRemove(path: string, base: string): void {
+  const safeBase = resolve(base)
+  const target = resolve(path)
+  if (target !== safeBase && !target.startsWith(`${safeBase}${sep}`)) {
+    throw new Error(`vectr-client: refusing to remove ${path}: outside controlled dir ${base}`)
+  }
+  rmSync(target, { force: true })
+}
+
+export function deriveServerName(workspace: string, slug: string): string {
+  const key = createHash('sha256').update(workspace).digest('hex').slice(0, WORKSPACE_KEY_LENGTH)
+  return `vectr_${key}_${slug}`
 }
 
 /**
  * Validate a slug and its derived server name, enforcing the format and the
- * in-process uniqueness invariant.
+ * in-process uniqueness invariant (composite key: workspace + slug).
+ * @param workspace - absolute owning workspace path.
  * @param slug - candidate slug.
- * @throws when the slug is malformed or its server name is already taken.
+ * @throws when the slug is malformed or its composite server name is already taken.
  */
-export function assertSlugAvailable(slug: string): void {
+export function assertServerNameAvailable(workspace: string, slug: string): void {
   if (!SLUG_PATTERN.test(slug)) {
     throw new Error(`invalid slug "${slug}": must match ${String(SLUG_PATTERN)}`)
   }
-  const serverName = deriveServerName(slug)
+  const serverName = deriveServerName(workspace, slug)
   if (takenServerNames.has(serverName)) {
-    throw new Error(`server name "${serverName}" is already in use (slug "${slug}" conflicts)`)
+    throw new Error(`server name "${serverName}" is already in use (workspace "${workspace}" + slug "${slug}" conflicts)`)
   }
 }
 
@@ -298,7 +332,7 @@ export async function createCodebase(
   const prev = createLocks.get(spec.slug)
   if (prev !== undefined) {
     await prev
-    assertSlugAvailable(spec.slug)
+    assertServerNameAvailable(spec.workspace ?? spec.path, spec.slug)
   }
   const run = (async () => {
     try {
@@ -342,8 +376,17 @@ async function createCodebaseCore(
   metaPath: string,
   spec: CodebaseSpec,
 ): Promise<CodebaseEntry> {
-  assertSlugAvailable(spec.slug)
-  const serverName = deriveServerName(spec.slug)
+  const workspace = spec.workspace ?? spec.path
+  // B2: a remote codebase's `workspace` is the CALLER's local cwd — it cannot be
+  // inferred from the remote `path` (a different machine). The client must report
+  // it at create time (阶段2 UI). Refuse remote entries that omit it so we never
+  // silently bind a remote entry to the wrong (remote) workspace. Local entries
+  // default `workspace` to `path`, which is correct.
+  if (spec.type === 'remote' && spec.workspace === undefined) {
+    throw new Error('remote codebase requires an explicit workspace (the caller local cwd); server-side isolation cannot infer it')
+  }
+  assertServerNameAvailable(workspace, spec.slug)
+  const serverName = deriveServerName(workspace, spec.slug)
 
   if (spec.type === 'local') {
     const handle = deps.spawnRunner('vectr', ['start', '--path', spec.path, '--json'])
@@ -372,6 +415,7 @@ async function createCodebaseCore(
       slug: spec.slug,
       type: 'local',
       path: spec.path,
+      workspace,
       serverName,
       localPort: parsed.port,
       status: 'up',
@@ -530,6 +574,7 @@ async function createCodebaseCore(
     slug: spec.slug,
     type: 'remote',
     path: spec.path,
+    workspace,
     host: spec.host,
     serverName,
     localPort,
@@ -800,8 +845,30 @@ async function healTunnelOnce(
   metaPath: string,
   entry: CodebaseEntry,
 ): Promise<EnsureTunnelResult> {
-  const health = await probeTunnel(entry, deps)
-  if (health.alive) return { entry, healed: false }
+  // C1: reuse the authoritative {@link probeTunnel} instead of an inline
+  // duplicate. Master liveness (问题1B) is the signal: when the same control
+  // master answers `ssh -O check`, the tunnel is alive. BUT B1: a master can be
+  // UP while its forwarded local port is DEAD (remote restarted; `-O check`
+  // still 0 but the `-L` port is gone). So reuse only when masterUp AND the
+  // forward port actually listens; otherwise tear the stale master down and
+  // reopen (a dead forward bound to an agent is the silent-dead defect).
+  const masterUp = (await probeTunnel(entry, deps)).alive
+  if (masterUp) {
+    if (entry.localPort !== undefined
+      && await isPortListening('127.0.0.1', entry.localPort, DEFAULT_TUNNEL_PROBE_MS)) {
+      return { entry, healed: false }
+    }
+    // Master up but the forward is dead: cleanly exit the stale master so the
+    // reopen below binds a fresh one instead of colliding with the still-alive
+    // process (which would otherwise refuse its socket / leak the old master).
+    if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
+      try {
+        await deps.sshRunner(['-o', 'ConnectTimeout=5', '-O', 'exit', '-S', entry.tunnelCtl, entry.host]).promise
+      } catch {
+        // best-effort; a missing control socket is exactly what we clear.
+      }
+    }
+  }
 
   // Resolve auth (password hosts store the secret under credentialRef).
   let auth: SshAuthContext | undefined
@@ -825,10 +892,24 @@ async function healTunnelOnce(
     return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
   }
 
+  // Master is dead: clear any stale control socket so `-M -S` does not refuse
+  // ("ControlSocket ... already exists") on a socket whose master is gone. C2:
+  // only remove a socket we own under tmpdir — never an arbitrary path.
+  if (entry.tunnelCtl !== undefined) {
+    try {
+      safeRemove(entry.tunnelCtl, tmpdir())
+    } catch {
+      // best-effort; a missing / already-gone / out-of-bounds socket is skipped.
+    }
+  }
+
   // Reuse the existing localPort when still free; otherwise allocate a fresh
-  // one and record it so every consumer sees the new endpoint.
+  // one and record it so every consumer sees the new endpoint. The "port
+  // occupied" trigger is gated on `!masterUp` (already true here) so a
+  // healthy-but-listening localPort is never mistaken for a collision and
+  // reallocated.
   let localPort = entry.localPort
-  if (localPort === undefined || await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS)) {
+  if (localPort === undefined || (!masterUp && await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS))) {
     const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, new Set([...inProgressLocalPorts, ...(localPort !== undefined ? [localPort] : [])]))
     if (fresh === undefined) {
       const msg = `tunnel down: no free local port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`
@@ -880,6 +961,16 @@ async function healTunnelOnce(
       return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
     }
 
+    // Capture the silent-dead case: the master answered `-O check` (so `alive`
+    // is true) but the forwarded local port never actually bound. A lying 'up'
+    // here would bind an agent to a dead endpoint. Verify the forward is really
+    // listening before we persist 'up'.
+    if (!await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS)) {
+      const msg = `tunnel down: forward on 127.0.0.1:${localPort} did not bind after reopen`
+      downgrade(metaPath, entry, msg)
+      return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
+    }
+
     // Drop any prior downgrade reason now that the tunnel is up again.
     const { error: _omit, ...entryWithoutError } = entry
     void _omit
@@ -911,6 +1002,100 @@ function downgrade(metaPath: string, entry: CodebaseEntry, msg: string): void {
     // Persistence failed, but the diagnostic is the return value's `error`;
     // do not rethrow (B3).
   }
+}
+
+/** Result of {@link migrateCodebases}. */
+export interface MigrateResult {
+  /** `true` when at least one entry was rewritten (persisted). */
+  changed: boolean
+  /** Number of entries rewritten this run. */
+  migrated: number
+}
+
+/**
+ * Idempotently backfill the `workspace` field and recompute the composite
+ * `serverName` for entries written before per-workspace isolation existed.
+ * Runs once at plugin apply (best-effort). Existing entries that already carry a
+ * `workspace` matching their composite `serverName` are left untouched, so a
+ * second run is a no-op (no rewrite, no churn).
+ *
+ * Inference for entries missing `workspace`:
+ *  - local: reverse-lookup the workspace via `resolveInstance(instances, path)`
+ *    (the daemon whose `instances.json` workspace equals `path`).
+ *  - remote: match `host` against `instances[].host`.
+ *  - either fails → {@link UNASSIGNED_WORKSPACE}.
+ *
+ * The on-disk envelope stays a bare `CodebaseEntry[]` (no schema change).
+ * @param metaPath - absolute path of the codebase metadata file.
+ * @param instances - parsed vectr daemon registry (for workspace inference).
+ * @returns whether anything changed and how many entries were migrated.
+ */
+export function migrateCodebases(
+  metaPath: string,
+  instances: InstancesFile,
+  logger?: { warn(message: string): void },
+): MigrateResult {
+  // A2: an empty/undefined registry cannot infer local workspaces; writing would
+  // stamp every entry UNASSIGNED and poison the sticky "already defined" field so
+  // the migration never retries. Skip (no write) until a real registry exists.
+  if (instances === undefined || Object.keys(instances).length === 0) {
+    return { changed: false, migrated: 0 }
+  }
+  const list = loadCodebases(metaPath)
+  let changed = false
+  let migrated = 0
+  // B3: planned server names for THIS run, so two entries that collapse to the
+  // same composite name (e.g. two remote entries both forced UNASSIGNED) are
+  // de-duplicated instead of silently colliding in the MCP registry.
+  const plannedNames = new Set<string>()
+  for (const entry of list) {
+    let workspace = entry.workspace
+    if (workspace === undefined) {
+      if (entry.type === 'local') {
+        workspace = resolveInstance(instances, entry.path)?.workspace ?? UNASSIGNED_WORKSPACE
+      } else {
+        // A1: InstanceEntry.host is the daemon BIND address (default 127.0.0.1),
+        // while entry.host is the SSH TARGET (e.g. 'conan'); the two never match,
+        // so the old `e.host === entry.host` lookup always failed (and would have
+        // mis-assigned a remote entry to a LOCAL workspace had it ever matched).
+        // Remote migration cannot infer workspace — the old remote entry must be
+        // rebuilt / manually re-assigned by the client (which reports its
+        // workspace at create time, 阶段2). Force UNASSIGNED.
+        workspace = UNASSIGNED_WORKSPACE
+      }
+    }
+    let expectedName = deriveServerName(workspace, entry.slug)
+    // B3: collision -> force UNASSIGNED and suffix the serverName so the MCP
+    // registry stays unique (a duplicate serverName would clobber the bind).
+    if (plannedNames.has(expectedName)) {
+      logger?.warn(
+        `vectr-client: migrate ${entry.slug}: serverName "${expectedName}" collides with another entry; `
+        + 'leaving UNASSIGNED + disambiguation suffix',
+      )
+      workspace = UNASSIGNED_WORKSPACE
+      expectedName = deriveServerName(workspace, `${entry.slug}-${plannedNames.size}`)
+    }
+    plannedNames.add(expectedName)
+    if (workspace === UNASSIGNED_WORKSPACE) {
+      // A2: stamping an entry UNASSIGNED is a real, actionable outcome, not a
+      // silent success — the operator must rebuild / re-assign it.
+      logger?.warn(`vectr-client: migrate ${entry.slug}: workspace could not be inferred; set to UNASSIGNED (rebuild or re-assign)`)
+    }
+    if (entry.workspace !== workspace || entry.serverName !== expectedName) {
+      entry.workspace = workspace
+      entry.serverName = expectedName
+      changed = true
+      migrated += 1
+    }
+  }
+  if (changed) {
+    saveCodebases(metaPath, list)
+    // Re-hydrate the in-process uniqueness registry so a subsequent create in the
+    // same process sees the recomputed composite server names.
+    takenServerNames.clear()
+    for (const e of list) takenServerNames.add(e.serverName)
+  }
+  return { changed, migrated }
 }
 
 /** Options for {@link testCodebase}. */
@@ -1067,8 +1252,10 @@ export function cleanupStaleTunnelSockets(dir: string = tmpdir()): number {
       const code = (err as NodeJS.ErrnoException).code
       if (code !== 'ESRCH') continue // not ours to touch (e.g. EPERM)
     }
+    // C2: only remove a socket resolved strictly inside `dir`; a meta-polluted
+    // name with '..' is collapsed by resolve() and rejected by safeRemove.
     try {
-      rmSync(join(dir, name))
+      safeRemove(join(dir, name), dir)
       removed += 1
     } catch {
       // best-effort

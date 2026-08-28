@@ -22,6 +22,7 @@ import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
 import { type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
+import { type InstancesFile } from './registry';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
@@ -101,6 +102,18 @@ export declare const Config: z<Config>;
  * @param agent - the agent whose workspace resolves the daemon port.
  */
 export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instancesPath: string, config: Required<Config>, agent: Agent, codebasesPath?: string): void;
+/**
+ * Connect the agent to every persisted codebase entry with `status === 'up'`.
+ * Each entry exposes a Streamable HTTP MCP endpoint at
+ * `http://127.0.0.1:<localPort>/mcp`; registration uses the entry's
+ * `serverName` (globally unique). A bind failure only logs a warning and never
+ * blocks the main workspace connection.
+ * @param ctx - plugin context providing the logger.
+ * @param config - resolved plugin configuration.
+ * @param agent - the agent to bind the codebase tools to.
+ * @param codebasesPath - absolute path of the codebase metadata file.
+ */
+export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string): Promise<void>;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.

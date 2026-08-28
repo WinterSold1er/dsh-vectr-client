@@ -45,6 +45,7 @@ import {
   ensureTunnelUp,
   FileCredentialStore,
   loadCodebases,
+  migrateCodebases,
   testCodebase,
   type CodebaseEntry,
   type CodebaseSpec,
@@ -276,7 +277,7 @@ export function install(
   // failed bind must not veto the agent and only logs a warning. Runs once per
   // agent (guarded by `handles.has(agent)` at the top of install).
   if (codebasesPath !== undefined) {
-    void installCodebaseConnections(ctx, config, agent, codebasesPath)
+    void installCodebaseConnections(ctx, config, agent, codebasesPath, instances, cwd)
   }
 }
 
@@ -291,11 +292,13 @@ export function install(
  * @param agent - the agent to bind the codebase tools to.
  * @param codebasesPath - absolute path of the codebase metadata file.
  */
-async function installCodebaseConnections(
+export async function installCodebaseConnections(
   ctx: Context,
   config: Required<Config>,
   agent: Agent,
   codebasesPath: string,
+  instances?: InstancesFile,
+  cwd?: string,
 ): Promise<void> {
   let entries: CodebaseEntry[]
   try {
@@ -304,9 +307,30 @@ async function installCodebaseConnections(
     ctx.logger.warn(`vectr-client: cannot read codebase metadata at ${codebasesPath} (${String(error)}); skipping codebase binds for session ${agent.id}`)
     return
   }
+  // Per-workspace binding isolation (阶段1): only bind codebases owned by the
+  // agent's resolved workspace. `ws` comes from the agent cwd; when `cwd` or the
+  // registry is absent we fall back to binding all 'up' entries (the architect's
+  // `ws === undefined || e.workspace === ws` clause) — a permissive default used
+  // only when isolation data is unavailable.
+  // B4: resolve the agent's own workspace from its cwd via the registry. When
+  // that is unavailable (session has no cwd, or no registry), do NOT blindly
+  // bind every 'up' entry — that would bind UNASSIGNED/orphaned entries to an
+  // agent. Only bind entries whose OWN workspace is a known key in the registry;
+  // with no registry at all this binds nothing (the safe default). The risk this
+  // accepts: an entry whose daemon has since vanished from the registry is also
+  // skipped (it cannot be isolated), which is preferable to over-binding.
+  const agentWs = (cwd !== undefined && instances !== undefined)
+    ? resolveInstance(instances, cwd)?.workspace
+    : undefined
+  const knownWorkspaces = new Set(Object.values(instances ?? {}).map((e) => e.workspace))
   const policy = resolveReconnectPolicy(config.reconnect, 'vectr-client(codebase): reconnect')
   for (const entry of entries) {
     if (entry.status !== 'up' || entry.localPort === undefined) continue
+    if (agentWs !== undefined) {
+      if (entry.workspace !== agentWs) continue
+    } else if (entry.workspace === undefined || !knownWorkspaces.has(entry.workspace)) {
+      continue
+    }
     try {
       const conn = startConnection(agent.ctx, {
         transport: 'streamable-http',
@@ -362,6 +386,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   const codebasesPath = isAbsolute(resolved.codebasesPath)
     ? resolved.codebasesPath
     : resolve(process.cwd(), resolved.codebasesPath)
+  // 阶段1: idempotently backfill `workspace` + recompute the composite
+  // `serverName` on existing meta (no-op once migrated). A2: skip entirely when
+  // no registry is present (writing would poison the sticky UNASSIGNED field).
+  // Best-effort — a malformed registry must not block host startup.
+  try {
+    const instances = readInstancesFile(ctx, instancesPath)
+    if (instances !== undefined) migrateCodebases(codebasesPath, instances, ctx.logger)
+  } catch (err) {
+    ctx.logger.warn(`vectr-client: startup codebase migration skipped: ${String(err)}`)
+  }
   // 问题1B: bring every persisted 'up' remote tunnel back up at startup. A
   // tunnel can die while the host stays up (ssh master crash, network blip); the
   // meta keeps `status: 'up'` but the endpoint is unreachable. Re-probe and
@@ -683,7 +717,13 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
     handler: async (req, res) => {
       if (req.method === 'GET') {
         try {
-          const list = loadCodebases(codebasesPath).map(stripSecret)
+          const url = new URL(req.url ?? '', 'http://localhost')
+          const wsFilter = url.searchParams.get('workspace') ?? undefined
+          let list = loadCodebases(codebasesPath).map(stripSecret)
+          // 阶段1: optional `?workspace=` scoping for the workspace console.
+          if (wsFilter !== undefined) {
+            list = list.filter(e => e.workspace === wsFilter)
+          }
           sendJson(res, 200, list)
         } catch (error) {
           sendJson(res, 500, { error: String(error) })

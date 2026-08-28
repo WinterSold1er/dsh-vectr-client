@@ -14,10 +14,13 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ensureTunnelUp,
+  findFreePort,
   loadCodebases,
   probeTunnel,
   saveCodebases,
   testCodebase,
+  TUNNEL_PORT_MIN,
+  TUNNEL_PORT_MAX,
   type CodebaseDeps,
   type CodebaseEntry,
   type CredentialStore,
@@ -33,7 +36,15 @@ interface FakeSshOpts {
   openCode?: number
   /** PID reported in `-O check` stdout when alive. */
   pid?: number
+  /** When true (default), a successful `-f` reopen binds the forwarded local
+   * port so the post-reopen `isPortListening` force-check passes (faithful to
+   * real ssh -L). Set false to simulate the silent-dead case: the reopen "succeeds"
+   * but the forward never actually binds. */
+  bindOnOpen?: boolean
 }
+
+/** Real listeners opened by fake reopens, closed in afterEach. */
+const boundServers: Server[] = []
 
 function makeSsh(opts: FakeSshOpts = {}): SshRunner & { calls: string[][]; auths: Array<SshAuthContext | undefined>; opens: string[][] } {
   const checkCodes = opts.checkSequence ?? [1]
@@ -46,7 +57,29 @@ function makeSsh(opts: FakeSshOpts = {}): SshRunner & { calls: string[][]; auths
     auths.push(auth)
     if (args.includes('-f')) {
       opens.push(args)
-      return { promise: Promise.resolve({ code: opts.openCode ?? 0, stdout: '', stderr: '' }), kill() {} }
+      const code = opts.openCode ?? 0
+      // A failed reopen (or an explicit no-bind) must NOT pretend to have bound.
+      if (opts.bindOnOpen === false || code !== 0) {
+        return { promise: Promise.resolve({ code, stdout: '', stderr: '' }), kill() {} }
+      }
+      // Parse `-L 127.0.0.1:<port>:...` and bind a real listener so the
+      // post-reopen `isPortListening` force-check reflects the real forward.
+      const lIdx = args.indexOf('-L')
+      const spec = lIdx >= 0 ? (args[lIdx + 1] ?? '') : ''
+      const m = /127\.0\.0\.1:(\d+):/.exec(spec)
+      const port = m !== null ? Number(m[1]) : undefined
+      const p = new Promise<{ code: number; stdout: string; stderr: string }>((resolveOpen) => {
+        if (port !== undefined) {
+          const s = createServer((_q, res) => res.end())
+          s.listen(port, '127.0.0.1', () => {
+            boundServers.push(s)
+            resolveOpen({ code, stdout: '', stderr: '' })
+          })
+        } else {
+          resolveOpen({ code, stdout: '', stderr: '' })
+        }
+      })
+      return { promise: p, kill() {} }
     }
     if (args.includes('-O') && args.includes('check')) {
       const code = checkCodes[Math.min(checkIdx, checkCodes.length - 1)] ?? 1
@@ -82,20 +115,27 @@ function deps(ssh: SshRunner, creds: CredentialStore = makeCredStore()): Codebas
 
 let dir: string
 let metaPath: string
+// Dynamically-free local tunnel port for fixtures. The test host may already
+// have a real daemon/tunnel bound on 8760 (e.g. a live vnm_gui), so we never
+// hardcode it; every fixture entry uses this port which is free at test time.
+let testPort = TUNNEL_PORT_MIN
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tunnel-heal-'))
   metaPath = join(dir, 'codebases.json')
+  testPort = (await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX)) ?? TUNNEL_PORT_MIN
 })
 
 afterEach(async () => {
+  await Promise.all(boundServers.map((s) => new Promise<void>((r) => s.close(() => r()))))
+  boundServers.length = 0
   await rm(dir, { recursive: true, force: true })
   vi.restoreAllMocks()
 })
 
 const remoteEntry = (over: Partial<CodebaseEntry> = {}): CodebaseEntry => ({
   id: 'vnm', slug: 'vnm', type: 'remote', path: '/w', host: 'conan',
-  serverName: 'vectr_vnm', localPort: 8760, remotePort: 8767,
+  serverName: 'vectr_vnm', localPort: testPort, remotePort: 8767,
   tunnelCtl: '/tmp/vectr-tunnel-vnm.sock', status: 'up', ...over,
 })
 
@@ -125,14 +165,37 @@ describe('probeTunnel', () => {
 })
 
 describe('ensureTunnelUp', () => {
-  it('does NOT reopen when the tunnel is already alive', async () => {
-    const ssh = makeSsh({ checkSequence: [0], pid: 123 })
-    const entry = remoteEntry()
+  it('B1: master up but forward port dead reopens instead of reusing the dead port', async () => {
+    // masterUp true (checkSequence [0]), but NOTHING is bound on testPort, so
+    // isPortListening fails -> the stale master is exited and the forward reopened.
+    const ssh = makeSsh({ checkSequence: [0], pid: 1 })
+    const entry = remoteEntry() // localPort = testPort, nothing listening
     saveCodebases(metaPath, [entry])
     const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
-    expect(res.healed).toBe(false)
-    expect(ssh.opens).toHaveLength(0) // no reopen attempt
-    expect(res.entry).toEqual(entry)
+    expect(res.healed).toBe(true) // reopened, not reused
+    expect(ssh.opens).toHaveLength(1)
+    // The fake reopen binds a real listener, so the post-reopen force-check passes.
+    expect(res.entry.status).toBe('up')
+    expect(loadCodebases(metaPath)[0]?.status).toBe('up')
+  })
+
+  it('does NOT reopen when the tunnel is already alive (master up + forward listening)', async () => {
+    // B1 invariant: healthy means BOTH the master answers `-O check` AND the
+    // forwarded local port is listening. Here we bind the port so both hold.
+    const server = createServer((_q, res) => res.end())
+    await new Promise<void>((r) => server.listen(testPort, '127.0.0.1', () => r()))
+    const ssh = makeSsh({ checkSequence: [0], pid: 123 })
+    const entry = remoteEntry() // localPort = testPort (now bound)
+    saveCodebases(metaPath, [entry])
+    try {
+      const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+      expect(res.healed).toBe(false)
+      expect(ssh.opens).toHaveLength(0) // no reopen attempt
+      expect(res.entry.localPort).toBe(testPort)
+      expect(loadCodebases(metaPath)[0]?.localPort).toBe(testPort)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
   })
 
   it('reopens a dead tunnel, reusing the free localPort, and persists up', async () => {
@@ -144,7 +207,7 @@ describe('ensureTunnelUp', () => {
     expect(res.healed).toBe(true)
     expect(res.error).toBeUndefined()
     expect(res.entry.status).toBe('up')
-    expect(res.entry.localPort).toBe(8760) // reused, not reallocated
+    expect(res.entry.localPort).toBe(testPort) // reused, not reallocated
     // The reopen argv must be the exact forward tuple.
     const open = ssh.opens[0]
     expect(open).toContain('-f')
@@ -152,11 +215,11 @@ describe('ensureTunnelUp', () => {
     expect(open).toContain('-S')
     expect(open).toContain('-L')
     const lIdx = open.indexOf('-L')
-    expect(open[lIdx + 1]).toBe('127.0.0.1:8760:127.0.0.1:8767')
+    expect(open[lIdx + 1]).toBe(`127.0.0.1:${testPort}:127.0.0.1:8767`)
     // Meta reflects the healed status.
     const meta = loadCodebases(metaPath)
     expect(meta[0]?.status).toBe('up')
-    expect(meta[0]?.localPort).toBe(8760)
+    expect(meta[0]?.localPort).toBe(testPort)
   })
 
   it('reallocates a fresh localPort via findFreePort when the old one is occupied', async () => {
@@ -224,6 +287,41 @@ describe('ensureTunnelUp', () => {
   })
 })
 
+describe('ensureTunnelUp port-reuse P0 fix (阶段1)', () => {
+  it('master alive + port listening reuses localPort without reopening or reallocating', async () => {
+    // The real defect: a listening localPort was treated as "occupied" and the
+    // tunnel was reopened on a fresh port (silent dead). The fix treats the
+    // master's `-O check` as authoritative: alive => reuse, never reopen.
+    const server = createServer((_q, res) => res.end())
+    await new Promise<void>((r) => server.listen(testPort, '127.0.0.1', () => r()))
+    const ssh = makeSsh({ checkSequence: [0], pid: 1 })
+    const entry = remoteEntry() // localPort 8760
+    saveCodebases(metaPath, [entry])
+    try {
+      const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+      expect(res.healed).toBe(false)
+      expect(ssh.opens).toHaveLength(0) // no reopen attempt
+      expect(res.entry.localPort).toBe(testPort) // unchanged
+      expect(loadCodebases(metaPath)[0]?.localPort).toBe(testPort)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it('reopen succeeds but the forward port never binds -> downgrade error (silent dead caught)', async () => {
+    // P0 addition: after a seemingly-successful reopen, the forwarded port MUST
+    // actually be listening; otherwise the persisted 'up' is a lie.
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 2, bindOnOpen: false })
+    const entry = remoteEntry() // localPort 8760, nothing listening
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+    expect(res.healed).toBe(false)
+    expect(res.error).toMatch(new RegExp(`forward on 127\.0\.0\.1:${testPort} did not bind after reopen`))
+    expect(res.entry.status).toBe('error')
+    expect(loadCodebases(metaPath)[0]?.status).toBe('error')
+  })
+})
+
 describe('testCodebase heal (问题1B route path)', () => {
   it('short-circuits with a diagnostic when the tunnel cannot be reopened', async () => {
     const ssh = makeSsh({ openCode: 1 })
@@ -249,7 +347,7 @@ describe('testCodebase heal (问题1B route path)', () => {
       const result = await testCodebase(entry, { deps: deps(ssh), metaPath, heal: true })
       // heal happened (open attempted) and fetch was reached.
       expect(ssh.opens).toHaveLength(1)
-      expect(fetchSpy).toHaveBeenCalledWith('http://127.0.0.1:8760/v1/status', expect.anything())
+      expect(fetchSpy).toHaveBeenCalledWith(`http://127.0.0.1:${testPort}/v1/status`, expect.anything())
       // With our mocked fetch the probe reports ok.
       expect(result.ok).toBe(true)
     } finally {

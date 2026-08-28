@@ -25,8 +25,14 @@ import {
 
 const libIndexJs = join(__dirname, '..', 'lib', 'index.js')
 
+/** Real listeners opened by fake reopens, closed in afterEach. */
+const boundServers: Server[] = []
+
 beforeEach(() => {})
-afterEach(() => {})
+afterEach(async () => {
+  await Promise.all(boundServers.map((s) => new Promise<void>((r) => s.close(() => r()))))
+  boundServers.length = 0
+})
 
 describe('built artifact contains both fixes (anti fake-green)', () => {
   it('lib/index.js exists', () => {
@@ -58,7 +64,27 @@ describe('built ensureTunnelUp self-heals (functional, fakes)', () => {
   function makeSsh(): { runner: import('../src/codebases.ts').SshRunner; opens: string[][] } {
     const opens: string[][] = []
     const runner = ((args: string[]): import('../src/codebases.ts').SpawnHandle => {
-      if (args.includes('-f')) { opens.push(args); return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} } }
+      if (args.includes('-f')) {
+        opens.push(args)
+        // Bind the forwarded local port so the post-reopen `isPortListening`
+        // force-check (built artifact) reflects a real forward.
+        const lIdx = args.indexOf('-L')
+        const spec = lIdx >= 0 ? (args[lIdx + 1] ?? '') : ''
+        const m = /127\.0\.0\.1:(\d+):/.exec(spec)
+        const port = m !== null ? Number(m[1]) : undefined
+        const p = new Promise<{ code: number; stdout: string; stderr: string }>((resolveOpen) => {
+          if (port !== undefined) {
+            const s = createServer((_q, res) => res.end())
+            s.listen(port, '127.0.0.1', () => {
+              boundServers.push(s)
+              resolveOpen({ code: 0, stdout: '', stderr: '' })
+            })
+          } else {
+            resolveOpen({ code: 0, stdout: '', stderr: '' })
+          }
+        })
+        return { promise: p, kill() {} }
+      }
       if (args.includes('-O') && args.includes('check')) {
         // first -O check = dead (probe), second = alive (confirm)
         const code = opens.length === 0 ? 1 : 0

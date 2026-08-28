@@ -13,6 +13,7 @@ import {
   _resetServerNameRegistry,
   createCodebase,
   deleteCodebase,
+  deriveServerName,
   FileCredentialStore,
   findFreePort,
   loadCodebases,
@@ -151,7 +152,7 @@ describe('create local', () => {
     const spec: CodebaseSpec = { type: 'local', path: '/work', slug: 'alpha' }
     const entry = await createCodebase(deps, metaPath, spec)
     expect(entry.localPort).toBe(8731)
-    expect(entry.serverName).toBe('vectr_alpha')
+    expect(entry.serverName).toBe(deriveServerName('/work', 'alpha'))
     expect(entry.status).toBe('up')
     expect(loadCodebases(metaPath)[0]?.slug).toBe('alpha')
   })
@@ -194,7 +195,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'r' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'r' }))
       .rejects.toThrow(/cannot reach/)
   })
 
@@ -208,7 +209,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'r' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'r' }))
       .rejects.toThrow(/install vectr/)
   })
 
@@ -227,7 +228,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: creds,
     }
-    const spec: CodebaseSpec = { type: 'remote', path: '/w', host: 'h', slug: 'r', auth: 'password', password: 'secret123' }
+    const spec: CodebaseSpec = { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'r', auth: 'password', password: 'secret123' }
     const entry = await createCodebase(deps, metaPath, spec)
     expect(entry.tunnelPid).toBe(12345)
     expect(entry.tunnelCtl).toBeDefined()
@@ -250,7 +251,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(), // empty: get() returns undefined
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p8', auth: 'password' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p8', auth: 'password' }))
       .rejects.toThrow(/no password was provided/)
     // Must NOT silently downgrade to key auth and probe — no ssh issued at all.
     expect(ssh.calls).toHaveLength(0)
@@ -270,7 +271,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5' })
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p5' })
     expect(entry.remotePort).toBe(8762) // from instances.json, overrides stdout 9999
     expect(entry.localPort).toBeGreaterThan(0)
     // P1 anti-false-green: the cat argument must be the REMOTE home
@@ -299,7 +300,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb' })
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p5fb' })
     // cat failed -> resolveRemotePort returns undefined -> falls back to the
     // `vectr start` stdout port (9999), never the silent 8760 default.
     expect(entry.remotePort).toBe(9999)
@@ -324,7 +325,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb8760' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p5fb8760' }))
       .rejects.toThrow(/could not resolve remote vectr daemon port on h for workspace \/w/)
     // The tunnel/port step never ran, so nothing was persisted.
     expect(loadCodebases(metaPath)).toEqual([])
@@ -347,7 +348,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: creds,
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5cred', auth: 'password', password: 'secret123' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p5cred', auth: 'password', password: 'secret123' }))
       .rejects.toThrow(/could not resolve remote vectr daemon port on h for workspace \/w/)
     expect(creds.get('VECTR_SSH_P5CRED')).toBeUndefined()
     expect(loadCodebases(metaPath)).toEqual([])
@@ -373,7 +374,7 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'retry' })
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'retry' })
     expect(checkCalls).toBeGreaterThanOrEqual(2) // retried after the first failure
     expect(entry.tunnelPid).toBe(4321)
     expect(entry.tunnelCtl).toBeDefined()
@@ -550,7 +551,7 @@ describe('remote vectr PATH + idempotent install', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p' })
+    await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'p' })
     const calls = vectrCalls(ssh.calls)
     expect(calls.length).toBeGreaterThan(0)
     for (const call of calls) {
@@ -604,7 +605,7 @@ describe('remote vectr PATH + idempotent install', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'idem' })
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'idem' })
     expect(entry.status).toBe('up')
     // `uv tool install` must NOT have been issued (only `uv tool list`).
     expect(ssh.calls.some((c) => c.join(' ').includes('uv tool install'))).toBe(false)
@@ -627,7 +628,7 @@ describe('remote vectr PATH + idempotent install', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'tol' })
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'tol' })
     expect(entry.status).toBe('up')
   })
 
@@ -641,7 +642,7 @@ describe('remote vectr PATH + idempotent install', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'fail' }))
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', workspace: '/local/w', slug: 'fail' }))
       .rejects.toThrow(/install vectr/)
   })
 })
@@ -696,7 +697,7 @@ describe('serverName validation + uniqueness', () => {
       spawnRunner: makeSpawnRunner(scripts), sshRunner: makeSshRunner([]), credStore: makeCredStore(),
     }
     await createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'dup' })
-    await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w2', slug: 'dup' }))
+    await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'dup' }))
       .rejects.toThrow(/already in use/)
   })
 })
