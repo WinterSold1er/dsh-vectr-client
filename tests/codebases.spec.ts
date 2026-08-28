@@ -296,6 +296,33 @@ describe('create remote', () => {
     const catCall = ssh.calls.find(c => c.includes('cat'))
     expect(catCall?.[2]).toBe('~/.vectr/instances.json')
   })
+
+  it('retries ssh -O check once on transient failure and still captures PID', async () => {
+    // P3: ssh -f -N -M may not have finished the master handshake when the
+    // first `ssh -O check` runs, so it fails once; the retry must recover.
+    let checkCalls = 0
+    const ssh: SshRunner = (args) => {
+      if (args.includes('-O') && args.includes('check')) {
+        checkCalls += 1
+        const ok = checkCalls >= 2
+        return { promise: Promise.resolve({ code: ok ? 0 : 1, stdout: ok ? 'Master running (pid=4321)' : '', stderr: '' }), kill() {} }
+      }
+      let proc = { code: 0, stdout: '', stderr: '' }
+      if (args.includes('start')) proc = { code: 0, stdout: '{"port":8760}', stderr: '' }
+      else if (args.includes('cat')) proc = { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' }
+      return { promise: Promise.resolve(proc), kill() {} }
+    }
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+      instancesPath: '',
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'retry' })
+    expect(checkCalls).toBeGreaterThanOrEqual(2) // retried after the first failure
+    expect(entry.tunnelPid).toBe(4321)
+    expect(entry.tunnelCtl).toBeDefined()
+  })
 })
 
 describe('delete', () => {
@@ -336,6 +363,30 @@ describe('delete', () => {
     const entry: CodebaseEntry = {
       id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
       localPort: 8761, remotePort: 8760, tunnelPid: 999, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+    }
+    saveCodebases(metaPath, [entry])
+    await deleteCodebase(deps, metaPath, entry)
+    expect(ssh.calls.some((c) => c.includes('-O') && c.includes('exit'))).toBe(true)
+    expect(loadCodebases(metaPath)).toEqual([])
+  })
+
+  it('exits tunnel via control socket even when tunnelPid is missing (P3)', async () => {
+    // P3: a transient -O check race can leave tunnelPid undefined while the
+    // master (and its socket) is alive. Teardown must still run `ssh -O exit`.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('stop'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+      instancesPath: '',
+    }
+    const entry: CodebaseEntry = {
+      id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
+      localPort: 8761, remotePort: 8760, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+      // intentionally NO tunnelPid
     }
     saveCodebases(metaPath, [entry])
     await deleteCodebase(deps, metaPath, entry)

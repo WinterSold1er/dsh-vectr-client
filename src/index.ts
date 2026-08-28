@@ -363,11 +363,22 @@ export function apply(ctx: Context, config: Config = {}): void {
     // host teardown does not leave orphaned port-forward processes.
     try {
       for (const entry of loadCodebases(codebasesPath)) {
-        if (entry.type === 'remote' && entry.tunnelPid !== undefined) {
-          try {
-            process.kill(entry.tunnelPid, 'SIGTERM')
-          } catch {
-            // tunnel already gone.
+        if (entry.type === 'remote' && (entry.tunnelPid !== undefined || entry.tunnelCtl !== undefined)) {
+          // Prefer a clean control-socket exit (works even when tunnelPid was
+          // never recorded), then best-effort SIGTERM the recorded PID.
+          if (entry.tunnelCtl !== undefined) {
+            try {
+              spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? ''])
+            } catch {
+              // best-effort: control-socket exit unavailable at teardown.
+            }
+          }
+          if (entry.tunnelPid !== undefined) {
+            try {
+              process.kill(entry.tunnelPid, 'SIGTERM')
+            } catch {
+              // tunnel already gone.
+            }
           }
         }
       }

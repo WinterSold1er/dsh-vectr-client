@@ -368,11 +368,29 @@ export async function createCodebase(
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error(`failed to open tunnel to ${spec.host}: ${tunnelResult.stderr}`)
   }
-  // Query the master PID through the control socket (reliable), falling back to
-  // the legacy "Process ID <pid>" scrape if the socket check is unavailable.
-  const check = ssh(['-O', 'check', '-S', ctl, spec.host])
-  const checkResult = await check.promise
-  const tunnelPid = tunnelPidFrom(checkResult.stdout) ?? tunnelPidFrom(tunnelResult.stdout)
+  // Query the master PID through the control socket. `ssh -f -N -M` may not
+  // have finished the master handshake the instant the `ssh` process exits, so
+  // a single `ssh -O check` can transiently fail (exit != 0, no pid) — retrying
+  // a few times with small backoff absorbs that race. If the PID still can't
+  // be read after retries we fall back to the legacy "Process ID <pid>" scrape
+  // of the tunnel-open stdout, then proceed: teardown keys off `tunnelCtl`
+  // (see deleteCodebase), so a failed read never orphans the tunnel.
+  let tunnelPid: number | undefined
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const check = ssh(['-O', 'check', '-S', ctl, spec.host])
+    const checkResult = await check.promise
+    const pid = tunnelPidFrom(checkResult.stdout)
+    if (pid !== undefined) {
+      tunnelPid = pid
+      break
+    }
+    if (checkResult.code !== 0 && attempt < 2) {
+      await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 50 * (attempt + 1)))
+      continue
+    }
+    tunnelPid = tunnelPidFrom(tunnelResult.stdout)
+    break
+  }
   const entry: CodebaseEntry = {
     id: spec.slug,
     slug: spec.slug,
@@ -481,17 +499,19 @@ export async function deleteCodebase(
       const stop = deps.sshRunner([entry.host ?? '', 'vectr', 'stop', '--port', String(entry.localPort)])
       await stop.promise
     }
-    if (entry.tunnelPid !== undefined) {
-      // Prefer a clean control-socket exit when we recorded the master socket;
-      // fall back to a direct SIGTERM on the recorded PID (e.g. a tunnel built
-      // by an older revision that stored no socket).
-      if (entry.tunnelCtl !== undefined) {
-        try {
-          await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
-        } catch {
-          // control-socket exit failed; rely on the PID kill below.
-        }
+    // Teardown must NOT depend solely on tunnelPid: a transient `-O check` race
+    // at create time can leave tunnelPid undefined while the master (and its
+    // control socket) is still alive. When tunnelCtl exists we ALWAYS attempt a
+    // clean `ssh -O exit`; the PID kill is only a best-effort fallback for
+    // entries built by older revisions that stored no socket.
+    if (entry.tunnelCtl !== undefined) {
+      try {
+        await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
+      } catch {
+        // control-socket exit failed; fall through to the PID kill below.
       }
+    }
+    if (entry.tunnelPid !== undefined) {
       try {
         process.kill(entry.tunnelPid, 'SIGTERM')
       } catch {
