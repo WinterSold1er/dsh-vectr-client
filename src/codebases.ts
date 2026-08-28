@@ -429,9 +429,31 @@ async function createCodebaseCore(
   }
   // 4) resolve the remote daemon port. Preferred: read the remote
   // `~/.vectr/instances.json` over ssh and match by workspace (the daemon writes
-  // its real port there). Fallback: scrape `vectr start` stdout, then the
-  // conventional default — never guess silently.
-  const remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(startResult.stdout) ?? 8760
+  // its real port there). Fallback: scrape `vectr start` stdout. There is NO
+  // silent magic default: if both resolvers fail the daemon's real port is
+  // genuinely unknown, so we clean up what was already allocated and fail loud
+  // (改动3) instead of binding the tunnel to a dead port.
+  //
+  // NOTE (C4, retry semantics): the remote vectr daemon is intentionally LEFT
+  // RESIDENT — it is a long-lived service, NOT a per-create ephemeral process.
+  // On a retried `create` for the same workspace we must NOT start a second
+  // daemon; instead `resolveRemotePort` reads the remote `instances.json` FIRST
+  // and reuses the already-assigned port (the `vectr start` in step 3 is a
+  // no-op/idempotent when the daemon is already up). Querying the registry before
+  // falling back to stdout is what makes a retry safe rather than a duplicate.
+  const remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(startResult.stdout)
+  if (remotePort === undefined) {
+    // The tunnel/port steps below must not run with an undefined port. Roll back
+    // the already-reserved server name and any stored credential, then throw with
+    // a self-diagnosing message naming the host and workspace (no 8760 fallback).
+    takenServerNames.delete(serverName)
+    if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
+    throw new Error(
+      `could not resolve remote vectr daemon port on ${spec.host} for workspace ${spec.path}: `
+      + `~/.vectr/instances.json had no matching entry and 'vectr start' reported no port. `
+      + `Verify the remote daemon is running and writing its registry.`,
+    )
+  }
   // 5) open the tunnel; pick the first free local port in the reserved range.
   const localPort = await findFreePort(8760, 8799, inProgressLocalPorts)
   if (localPort === undefined) {

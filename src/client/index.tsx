@@ -1,8 +1,9 @@
 /**
  * Browser half of the vectr workspace console (feature A / C1).
  *
- * A thin React view mounted into the Settings → Plugins tab via the shared
- * `settings.plugins.tab` slot. All data lives on the host: this half only
+ * A thin React view mounted as the top-level **Settings → Vectr** section via the
+ * `settings.section` slot (hosted by the VectrSettings shell, which also renders the
+ * codebase manager under a tab bar). All data lives on the host: this half only
  * fetches the same-origin relative endpoints the host registered
  * (`/api/vectr/workspaces`, `/api/vectr/trigger-index`) and renders the table
  * plus a per-row "re-index" action and a global "refresh".
@@ -17,7 +18,9 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { apply as applyCodebases } from './codebases'
+import { VectrSettings } from './vectr-settings'
+import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
+import { BTN } from './buttons'
 
 /** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
 interface WorkspaceView {
@@ -73,23 +76,24 @@ function WorkspaceRow(props: {
   const s = view.status
   return (
     <tr>
-      <td title={view.workspace}>{view.workspace.split('/').slice(-2).join('/')}</td>
-      <td>{view.live
-        ? <span style={{ color: 'green' }}>online</span>
-        : <span style={{ color: 'red' }}>offline</span>}</td>
-      <td title={view.error ?? ''}>{view.reason ?? view.error ?? '—'}</td>
-      <td>{view.port}</td>
-      <td>{view.pid ?? '—'}</td>
-      <td>{view.mode ?? '—'}</td>
-      <td>{s?.indexed_files ?? '—'}</td>
-      <td>{s?.total_chunks ?? '—'}</td>
-      <td>{s?.languages?.join(', ') ?? '—'}</td>
-      <td>{s?.last_indexed ?? '—'}</td>
-      <td>{s?.notes_count ?? '—'}</td>
-      <td>{(s?.fully_ready ?? false) ? 'yes' : 'no'}</td>
-      <td>
+      <td style={tdStyle} title={view.workspace}><span style={ellipsisStyle}>{view.workspace.split('/').slice(-2).join('/')}</span></td>
+      <td style={tdStyle}>{view.live
+        ? <span style={{ color: 'var(--dsw-alias-state-success-primary)' }}>online</span>
+        : <span style={{ color: 'var(--dsw-alias-state-error-primary)' }}>offline</span>}</td>
+      <td style={tdStyle} title={view.error ?? ''}><span style={ellipsisStyle}>{view.reason ?? view.error ?? '—'}</span></td>
+      <td style={tdStyle}>{view.port}</td>
+      <td style={tdStyle}>{view.pid ?? '—'}</td>
+      <td style={tdStyle}>{view.mode ?? '—'}</td>
+      <td style={tdStyle}>{s?.indexed_files ?? '—'}</td>
+      <td style={tdStyle}>{s?.total_chunks ?? '—'}</td>
+      <td style={tdStyle}><span style={ellipsisStyle}>{s?.languages?.join(', ') ?? '—'}</span></td>
+      <td style={tdStyle}><span style={ellipsisStyle}>{s?.last_indexed ?? '—'}</span></td>
+      <td style={tdStyle}>{s?.notes_count ?? '—'}</td>
+      <td style={tdStyle}>{(s?.fully_ready ?? false) ? 'yes' : 'no'}</td>
+      <td style={tdStyle}>
         <button
           type="button"
+          className={BTN.action}
           disabled={disabled}
           title={disabledReason ?? 'Re-index this workspace'}
           onClick={() => onReindex(view.port)}
@@ -102,7 +106,7 @@ function WorkspaceRow(props: {
 }
 
 /** The full console panel. */
-function WorkspaceConsole(): ReactNode {
+export function WorkspaceConsole(): ReactNode {
   const [views, setViews] = useState<WorkspaceView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -145,29 +149,33 @@ function WorkspaceConsole(): ReactNode {
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-        <button type="button" disabled={loading} onClick={refresh}>refresh</button>
+        <button type="button" className={BTN.secondary} disabled={loading} onClick={refresh}>refresh</button>
         <span>{loading ? 'loading…' : views === null ? '' : `${views.length} workspace(s)`}</span>
-        {flash !== null ? <span style={{ color: 'gray' }}>{flash}</span> : null}
+        {flash !== null ? <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{flash}</span> : null}
       </div>
       {error !== null
-        ? <p style={{ color: 'red' }}>failed to load workspaces: {error}</p>
+        ? <p style={{ color: 'var(--dsw-alias-state-error-primary)' }}>failed to load workspaces: {error}</p>
         : null}
-      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+      {views !== null && views.length === 0
+        ? <p style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>暂无工作区</p>
+        : (
+      <div style={scrollWrap}>
+      <table style={tableStyleWorkspaces}>
         <thead>
           <tr>
-            <th>workspace</th>
-            <th>status</th>
-            <th>reason</th>
-            <th>port</th>
-            <th>pid</th>
-            <th>mode</th>
-            <th>files</th>
-            <th>chunks</th>
-            <th>languages</th>
-            <th>last indexed</th>
-            <th>notes</th>
-            <th>ready</th>
-            <th>action</th>
+            <th style={thStyle}>workspace</th>
+            <th style={thStyle}>status</th>
+            <th style={thStyle}>reason</th>
+            <th style={thStyle}>port</th>
+            <th style={thStyle}>pid</th>
+            <th style={thStyle}>mode</th>
+            <th style={thStyle}>files</th>
+            <th style={thStyle}>chunks</th>
+            <th style={thStyle}>languages</th>
+            <th style={thStyle}>last indexed</th>
+            <th style={thStyle}>notes</th>
+            <th style={thStyle}>ready</th>
+            <th style={thStyle}>action</th>
           </tr>
         </thead>
         <tbody>
@@ -176,6 +184,8 @@ function WorkspaceConsole(): ReactNode {
           ))}
         </tbody>
       </table>
+      </div>
+      )}
     </div>
   )
 }
@@ -183,17 +193,25 @@ function WorkspaceConsole(): ReactNode {
 /** Services required by the client half (informational; host resolves them). */
 export const inject = ['slots']
 
-/** Mount the workspace console into the Settings → Plugins tab. */
+/** Order of the Vectr top-level Settings section in the host nav. The built-in
+ * General/Models/Presets sections use 0–20; 200 keeps Vectr after them. */
+const VECTR_SECTION_ORDER = 200
+
+/** Mount the Vectr shell as a top-level **Settings → Vectr** section. The shell
+ * owns the Workspaces/Codebases tab bar and renders {@link WorkspaceConsole} and
+ * the codebase manager; neither panel self-registers anymore. `slots.inject`
+ * runs its callback as a Cordis effect, so the callback returns the disposer
+ * `slots.register` yields (not a plain descriptor) or the loader rejects it. */
 export function apply(ctx: ClientContext): void {
-  // `slots.inject` runs its callback as a Cordis effect: the callback must
-  // return a disposer (here, the one `slots.register` yields), not a plain
-  // descriptor object — otherwise the loader rejects it as `Invalid effect`.
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
-    id: 'vectr-workspaces',
-    order: 20,
-    label: () => 'Vectr Workspaces',
-  }, WorkspaceConsole))
-  // Feature B: mount the codebase manager in the same tab (separate panel).
-  applyCodebases(ctx)
+  // Vectr ships a fixed English section/label by design (product terminology is
+  // not user-localizable), so we do NOT wire `locale`/`i18n` here. The host's
+  // `settings.section` slot accepts a `label` FUNCTION (not just a string), which
+  // is the supported hook for i18n when a plugin needs it; we simply return the
+  // constant. No `locale` key is passed because there is nothing to translate.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'vectr',
+    order: VECTR_SECTION_ORDER,
+    label: () => 'Vectr',
+  }, VectrSettings))
 }

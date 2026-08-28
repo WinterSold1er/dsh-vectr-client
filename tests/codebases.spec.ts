@@ -307,12 +307,10 @@ describe('create remote', () => {
     expect(catCall?.[2]).toBe('~/.vectr/instances.json')
   })
 
-  it('falls back to the 8760 default when cat fails AND stdout carries no port (H6)', async () => {
-    // P2-adjacent / H6: both resolvers fail -> the magic `?? 8760` default must
-    // fire. This pins the constant so a silent change (e.g. to 0 or NaN) cannot
-    // stay green. cat exits non-zero AND `vectr start` stdout has no parseable
-    // port line, so resolveRemotePort() and parseRemotePort() both return
-    // undefined and the conventional default is used.
+  it('rejects (no silent 8760) when cat fails AND stdout carries no port (改动3)', async () => {
+    // Both resolvers fail -> the create must REJECT with an explicit error that
+    // names host + workspace, and must NOT silently bind remotePort 8760 (which
+    // would create a tunnel to a port with no daemon).
     const ssh = makeSshRunner([
       { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
       { match: (a) => a.includes('uv'), proc: { code: 0, stdout: '', stderr: '' } },
@@ -326,8 +324,33 @@ describe('create remote', () => {
       sshRunner: ssh,
       credStore: makeCredStore(),
     }
-    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb8760' })
-    expect(entry.remotePort).toBe(8760)
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb8760' }))
+      .rejects.toThrow(/could not resolve remote vectr daemon port on h for workspace \/w/)
+    // The tunnel/port step never ran, so nothing was persisted.
+    expect(loadCodebases(metaPath)).toEqual([])
+  })
+
+  it('rejects and unsets the stored credential when port cannot be resolved (改动3)', async () => {
+    // Password-auth path: if the port cannot be resolved, the already-stored
+    // secret must be unset and the create must reject (no orphaned credential).
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('uv'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: 'vectr started ok', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 1, stdout: '', stderr: 'No such file or directory' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=7)', stderr: '' } },
+    ])
+    const creds = makeCredStore()
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: creds,
+    }
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5cred', auth: 'password', password: 'secret123' }))
+      .rejects.toThrow(/could not resolve remote vectr daemon port on h for workspace \/w/)
+    expect(creds.get('VECTR_SSH_P5CRED')).toBeUndefined()
+    expect(loadCodebases(metaPath)).toEqual([])
   })
 
   it('retries ssh -O check once on transient failure and still captures PID', async () => {

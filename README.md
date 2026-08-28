@@ -26,7 +26,7 @@ The bundle is **discovery-ready** out of the box — its `package.json` declares
 
 1. The package must be an installed dependency of the target profile (the `dsh plugin --profile web add` command above does this; a manual `pnpm add` into the profile package also works).
 2. The profile's `package.json` must list it in `dsh.profile.bundles` — again done by `dsh plugin add`. The loader (`apps/cli/src/plugin.ts` → `reconcileBundles`) scans installed dependencies that declare `dsh.bundle` and composes their `cordis.patch.yml` layers over the profile tree.
-3. Restart the host. The server row (MCP binding + `/api/vectr/*` routes) and the web console both register at boot; the tab appears under **Settings → Plugins** only after restart.
+3. Restart the host. The server row (MCP binding + `/api/vectr/*` routes) and the web console both register at boot; the section appears under **Settings → Vectr** (a top-level entry, alongside Plugins) only after restart.
 
 **Verify:** after restart, `GET /api/vectr/workspaces` answers, and an agent whose workspace has a live vectr daemon registers `mcp__vectr__*` tools. No code change in this repo is required to enable it — only the host-side one-time `dsh plugin add` + restart.
 
@@ -74,7 +74,7 @@ No match logs `vectr-client: no vectr daemon for <cwd>, skipping` and the agent 
 
 ## Workspace console (feature A / C1)
 
-The bundle also ships a **host data plane + browser console** for inspecting and re-indexing every vectr daemon in `~/.vectr/instances.json`. This is the "C1 同包双面" (same-bundle Node + web faces) implementation: the Node half registers HTTP routes and the web half mounts a React view into the **Settings → Plugins** tab.
+The bundle also ships a **host data plane + browser console** for inspecting and re-indexing every vectr daemon in `~/.vectr/instances.json`. This is the "C1 同包双面" (same-bundle Node + web faces) implementation: the Node half registers HTTP routes and the web half mounts a React view as the top-level **Settings → Vectr** section (a tab bar hosts the workspace console and the codebase manager).
 
 ### Host routes (registered in the plugin's root scope)
 
@@ -85,7 +85,7 @@ Both handlers are Cordis effects, disposed with the plugin fiber. All data logic
 
 ### Browser view
 
-The `dsh.client` dual-face declaration (`platform: 'web'`) makes the host load `lib/client.js` and mount `WorkspaceConsole` into the `settings.plugins.tab` slot. It renders a table (workspace, online/offline + reason, port, pid, mode, indexed files, chunks, languages, last indexed, notes, fully_ready) with a per-row **re-index** button (disabled with a reason when offline / `memory_only` / `search_only` / `fully_ready === false` / `reindex_in_progress`) and a global **refresh** button.
+The `dsh.client` dual-face declaration (`platform: 'web'`) makes the host load `lib/client.js` and mount `VectrSettings` into the `settings.section` slot (id `vectr`); the shell hosts `WorkspaceConsole` and the codebase manager behind a tab bar. It renders a table (workspace, online/offline + reason, port, pid, mode, indexed files, chunks, languages, last indexed, notes, fully_ready) with a per-row **re-index** button (disabled with a reason when offline / `memory_only` / `search_only` / `fully_ready === false` / `reindex_in_progress`) and a global **refresh** button.
 
 ### Deployment note
 
@@ -128,7 +128,7 @@ On startup each `status === 'up'` codebase is also connected as its own `startCo
 
 ### Browser view
 
-The `dsh.client` web face mounts a second panel, **Codebase Manager**, into the same Settings → Plugins tab (alongside the workspace console). It renders a create form (type / path / host / slug / auth key|password + password field — the password is never read back or displayed) and a table with per-row **test** / **delete** actions.
+The `dsh.client` web face mounts the **Codebase Manager** as the second tab inside the top-level **Settings → Vectr** section (alongside the workspace console). It renders a create form (type / path / host / slug / auth key|password + password field — the password is never read back or displayed) and a table with per-row **test** / **delete** actions.
 
 ### Configuration
 
@@ -177,4 +177,4 @@ Prefix-stable while the vectr daemon's advertised tool set and schemas are uncha
 - **Daemon absent/dead → silent skip (now diagnosed)** — an agent whose workspace has no vectr entry, or whose entry points at a dead pid/unlistening port, simply has no vectr tools; the skip is a warn carrying workspace/cwd/port/pid, so a missing or crashed daemon is at least diagnosable in logs rather than invisible.
 - **Same `serverName` across agents is legal** — every agent's tools live in its own scope layer; there is no global `mcp__vectr__*` reservation and no conflict.
 - **Tools are the only bridged capability** — vectr Resources/Prompts (if any appear) have no harness consumer; this bundle bridges only the tool set, consistent with `dsh-mcp-client`.
-- **Console routes/tab need a host restart** — the `dsh.client` declaration and the `/api/vectr/*` route registration run at boot; loading this bundle into an already-running host shows no console until the host is restarted. The route registration is also a no-op in harness compositions that do not provide `ctx.webServer` (it degrades with a warn, and the MCP-binding path is unaffected). End-to-end verification of the routes and the Settings → Plugins tab is therefore pending a host restart, not a code gap.
+- **Console routes/tab need a host restart** — the `dsh.client` declaration and the `/api/vectr/*` route registration run at boot; loading this bundle into an already-running host shows no console until the host is restarted. The route registration is also a no-op in harness compositions that do not provide `ctx.webServer` (it degrades with a warn, and the MCP-binding path is unaffected). End-to-end verification of the routes and the Settings → Vectr section is therefore pending a host restart, not a code gap.

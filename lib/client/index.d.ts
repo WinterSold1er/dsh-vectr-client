@@ -1,8 +1,9 @@
 /**
  * Browser half of the vectr workspace console (feature A / C1).
  *
- * A thin React view mounted into the Settings → Plugins tab via the shared
- * `settings.plugins.tab` slot. All data lives on the host: this half only
+ * A thin React view mounted as the top-level **Settings → Vectr** section via the
+ * `settings.section` slot (hosted by the VectrSettings shell, which also renders the
+ * codebase manager under a tab bar). All data lives on the host: this half only
  * fetches the same-origin relative endpoints the host registered
  * (`/api/vectr/workspaces`, `/api/vectr/trigger-index`) and renders the table
  * plus a per-row "re-index" action and a global "refresh".
@@ -15,6 +16,7 @@
  *
  * @module dsh-vectr-client/client
  */
+import { type ReactNode } from 'react';
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
     slots: {
@@ -31,9 +33,15 @@ interface ClientContext {
     };
     effect(disposer: () => void, name?: string): void;
 }
+/** The full console panel. */
+export declare function WorkspaceConsole(): ReactNode;
 /** Services required by the client half (informational; host resolves them). */
 export declare const inject: string[];
-/** Mount the workspace console into the Settings → Plugins tab. */
+/** Mount the Vectr shell as a top-level **Settings → Vectr** section. The shell
+ * owns the Workspaces/Codebases tab bar and renders {@link WorkspaceConsole} and
+ * the codebase manager; neither panel self-registers anymore. `slots.inject`
+ * runs its callback as a Cordis effect, so the callback returns the disposer
+ * `slots.register` yields (not a plain descriptor) or the loader rejects it. */
 export declare function apply(ctx: ClientContext): void;
 export {};
 //# sourceMappingURL=index.d.ts.map

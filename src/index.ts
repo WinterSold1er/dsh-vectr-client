@@ -612,6 +612,23 @@ export function buildCodebaseDeps(
 }
 
 /**
+ * Extract the codebase slug from a request pathname. Strips the codebase route
+ * prefix and keeps only the first path segment, so `/api/vectr/codebases/demo`
+ * and `/api/vectr/codebases/demo/test` both yield `demo` — the `/test` suffix is
+ * an action, not part of the slug. This was the root cause of
+ * `POST /api/vectr/codebases/:slug/test` returning 404: the slug was derived as
+ * `demo/test` and never matched a persisted entry (改动3).
+ * @param pathname - request pathname (e.g. `/api/vectr/codebases/demo/test`).
+ * @returns the bare slug, or `''` when the pathname carries no slug segment.
+ */
+export function slugFromPathname(pathname: string): string {
+  // C3 asked to drop `?? ''`, but this repo enables `noUncheckedIndexedAccess`,
+  // so `String.split(...)[0]` is typed `string | undefined`; the coalesce is
+  // load-bearing (an empty array access must resolve to `''`), not redundant.
+  return decodeURIComponent(pathname.replace('/api/vectr/codebases/', '')).split('/')[0] ?? ''
+}
+
+/**
  * Register the feature-B codebase management HTTP routes:
  *
  * - `GET  /api/vectr/codebases` → list persisted entries (no secrets).
@@ -674,7 +691,7 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
     path: '/api/vectr/codebases',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '', 'http://localhost')
-      const slug = decodeURIComponent(url.pathname.replace('/api/vectr/codebases/', ''))
+      const slug = slugFromPathname(url.pathname)
       if (slug.length === 0) {
         sendJson(res, 400, { error: 'missing codebase slug' })
         return

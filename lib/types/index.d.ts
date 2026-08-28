@@ -143,8 +143,18 @@ export declare function buildCodebaseDeps(ctx: Context, secretsPath: string): {
     spawnRunner: SpawnRunner;
     sshRunner: SshRunner;
     credStore: CredentialStore;
-    instancesPath: string;
 };
+/**
+ * Extract the codebase slug from a request pathname. Strips the codebase route
+ * prefix and keeps only the first path segment, so `/api/vectr/codebases/demo`
+ * and `/api/vectr/codebases/demo/test` both yield `demo` — the `/test` suffix is
+ * an action, not part of the slug. This was the root cause of
+ * `POST /api/vectr/codebases/:slug/test` returning 404: the slug was derived as
+ * `demo/test` and never matched a persisted entry (改动3).
+ * @param pathname - request pathname (e.g. `/api/vectr/codebases/demo/test`).
+ * @returns the bare slug, or `''` when the pathname carries no slug segment.
+ */
+export declare function slugFromPathname(pathname: string): string;
 /**
  * Register the feature-B codebase management HTTP routes:
  *
