@@ -14,6 +14,11 @@
 import { homedir, tmpdir } from 'node:os'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { isPortListening } from './probe'
+
+/** Default TCP budget for tunnel-liveness probes (ms). Below the known ssh
+ * `-O check` latency so a dead master is judged down fast. */
+export const DEFAULT_TUNNEL_PROBE_MS = 800
 
 /** Discriminant for where a codebase's vectr daemon runs. */
 export type CodebaseType = 'local' | 'remote'
@@ -653,9 +658,216 @@ export async function deleteCodebase(
  * @param entry - the entry to test (uses `localPort`).
  * @returns `{ ok, status? }` on success or `{ ok: false, error }` on failure.
  */
-export async function testCodebase(entry: CodebaseEntry): Promise<{ ok: boolean; status?: unknown; error?: string }> {
+/**
+ * Result of probing a remote codebase's SSH tunnel for liveness.
+ */
+export interface TunnelHealth {
+  /** `true` when the ssh master is alive (control socket answers, or the
+   * forwarded local port accepts a TCP connection). */
+  alive: boolean
+  /** Why the tunnel is judged dead (present only when `alive === false`). */
+  reason?: string
+}
+
+/**
+ * Probe whether a remote codebase's SSH tunnel is currently live — without
+ * mutating anything. Liveness is derived from the AUTHORITATIVE signal only:
+ *
+ *  `ssh -O check -S <tunnelCtl> <host>` — asks the ssh control master directly.
+ *  A 0 exit means the master process is alive; any other result (including a
+ *  missing control socket) means the tunnel is down.
+ *
+ * The forwarded local port's TCP state is deliberately NOT used as a liveness
+ * signal here: a listening port only proves *some* process holds `localPort`,
+ * not that the ssh master is up, so it would both lie about status and make the
+ * `findFreePort` reallocation in {@link ensureTunnelUp} unreachable. The bind
+ * availability of `localPort` is checked separately, inside `ensureTunnelUp`,
+ * purely to decide reuse-vs-reallocate. Treating `status:'up'` as "the master is
+ * alive" is exactly the 问题1B truth-correction.
+ *
+ * Local (`type === 'local'`) entries have no tunnel and return
+ * `{ alive: false, reason: 'not-remote' }` so callers treat them as "nothing to
+ * heal" rather than "dead tunnel".
+ *
+ * @param entry - the remote entry to probe.
+ * @param deps - injected ssh runner.
+ */
+export async function probeTunnel(entry: CodebaseEntry, deps: CodebaseDeps): Promise<TunnelHealth> {
+  if (entry.type !== 'remote') return { alive: false, reason: 'not-remote' }
+  if (entry.tunnelCtl === undefined && entry.localPort === undefined) {
+    return { alive: false, reason: 'no-tunnel-config' }
+  }
+  // Authoritative: ask the ssh control master via its socket. A missing socket
+  // (the real vnm_gui case) makes ssh exit non-zero -> tunnel down.
+  if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
+    const check = deps.sshRunner(['-O', 'check', '-S', entry.tunnelCtl, entry.host])
+    const result = await check.promise
+    if (result.code === 0) return { alive: true }
+  }
+  return { alive: false, reason: 'tunnel-down' }
+}
+
+/** Result of {@link ensureTunnelUp}. */
+export interface EnsureTunnelResult {
+  /** The (possibly updated) entry — `localPort`/`tunnelCtl`/`status` may change. */
+  entry: CodebaseEntry
+  /** `true` when a dead tunnel was actually reopened. */
+  healed: boolean
+  /** Diagnostic when the tunnel could not be brought up (and status was downgraded). */
+  error?: string
+}
+
+/**
+ * Ensure a remote codebase's SSH tunnel is up, reopening it when dead. This is
+ * the self-healing fix for the "tunnel died, `status:'up'` lied" production
+ * defect (问题1B):
+ *
+ *  - If {@link probeTunnel} reports the tunnel alive, return the entry unchanged
+ *    (`healed: false`) — no churn.
+ *  - If dead, reopen `ssh -f -N -M -S <ctl> -L 127.0.0.1:<localPort>:127.0.0.1:
+ *    <remotePort> <host>` — the SAME `localPort` is reused when still free
+ *    (so the persisted MCP endpoint URL stays stable), otherwise
+ *    {@link findFreePort} allocates a fresh one and the meta is updated so every
+ *    consumer (routes, binds) sees the new port.
+ *  - On any reopen failure the persisted `status` is downgraded to `'error'`
+ *    with a self-diagnosing `error` message instead of being left claiming
+ *    `'up'` (no more lying). The same message is returned as `error` so callers
+ *    (e.g. `testCodebase`) can surface it directly.
+ *
+ * Password-auth codebases resolve their secret from `credentialRef` so the
+ * reopen feeds it back to the ssh runner (via sshpass) exactly like the initial
+ * create. Key-auth entries pass `undefined` auth.
+ *
+ * NOTE (forwarding semantics): `localPort` is the LOCAL bind on this machine;
+ * `remotePort` is the conan daemon port the tunnel forwards to. A local daemon
+ * listening on 8767 does NOT conflict with a local tunnel bind on 8760 — they
+ * are different addresses (ponytail: comment only, the ssh `-L` tuple is
+ * authoritative).
+ *
+ * @param deps - injected runners / store.
+ * @param metaPath - metadata file to persist status/port changes into.
+ * @param entry - the (persisted) remote entry to bring up.
+ */
+export async function ensureTunnelUp(
+  deps: CodebaseDeps,
+  metaPath: string,
+  entry: CodebaseEntry,
+): Promise<EnsureTunnelResult> {
+  if (entry.type !== 'remote') return { entry, healed: false }
+
+  const health = await probeTunnel(entry, deps)
+  if (health.alive) return { entry, healed: false }
+
+  // Resolve auth (password hosts store the secret under credentialRef).
+  let auth: SshAuthContext | undefined
+  if (entry.credentialRef !== undefined) {
+    const pw = await deps.credStore.get(entry.credentialRef)
+    if (typeof pw === 'string' && pw.length > 0) auth = { password: pw }
+  }
+  const ssh = (args: string[]): SpawnHandle => deps.sshRunner(args, auth)
+
+  if (entry.remotePort === undefined) {
+    const msg = 'tunnel down: no remotePort recorded; cannot reopen forward'
+    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
+    persist(metaPath, downgraded)
+    return { entry: downgraded, healed: false, error: msg }
+  }
+
+  // Reuse the existing localPort when still free; otherwise allocate a fresh
+  // one and record it so every consumer sees the new endpoint.
+  let localPort = entry.localPort
+  if (localPort === undefined || await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS)) {
+    const fresh = await findFreePort(8760, 8799, localPort !== undefined ? new Set([localPort]) : undefined)
+    if (fresh === undefined) {
+      const msg = 'tunnel down: no free local port in range 8760-8799'
+      const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
+      persist(metaPath, downgraded)
+      return { entry: downgraded, healed: false, error: msg }
+    }
+    localPort = fresh
+  }
+
+  const ctl = entry.tunnelCtl ?? join(tmpdir(), `vectr-tunnel-${entry.slug}-${process.pid}.sock`)
+  const host = entry.host ?? ''
+  const tunnel = ssh(['-f', '-N', '-M', '-S', ctl, '-L', `127.0.0.1:${localPort}:127.0.0.1:${entry.remotePort}`, host])
+  const result = await tunnel.promise
+  if (result.code !== 0) {
+    const msg = `tunnel down: ssh tunnel open failed (exit ${result.code}): ${result.stderr || result.stdout}`
+    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
+    persist(metaPath, downgraded)
+    return { entry: downgraded, healed: false, error: msg }
+  }
+
+  // Confirm the master came up (it may not have finished the handshake the
+  // instant `ssh -f` returned), capturing its PID for clean teardown later.
+  let alive = false
+  let tunnelPid: number | undefined
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const check = ssh(['-O', 'check', '-S', ctl, host])
+    const checkResult = await check.promise
+    const pid = tunnelPidFrom(checkResult.stdout)
+    if (pid !== undefined) { tunnelPid = pid }
+    if (checkResult.code === 0) { alive = true; break }
+    if (attempt < 2) await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 50 * (attempt + 1)))
+  }
+  if (!alive) {
+    const msg = 'tunnel down: ssh master did not come up after reopen'
+    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
+    persist(metaPath, downgraded)
+    return { entry: downgraded, healed: false, error: msg }
+  }
+
+  // Drop any prior downgrade reason now that the tunnel is up again.
+  const { error: _omit, ...entryWithoutError } = entry
+  void _omit
+  const updated: CodebaseEntry = {
+    ...entryWithoutError,
+    localPort,
+    tunnelCtl: ctl,
+    status: 'up',
+    ...(tunnelPid !== undefined ? { tunnelPid } : {}),
+  }
+  persist(metaPath, updated)
+  return { entry: updated, healed: true }
+}
+
+/** Options for {@link testCodebase}. */
+export interface TestCodebaseOpts {
+  /** Injected runners/store — required when `heal` is set. */
+  deps?: CodebaseDeps
+  /** Metadata file path — required when `heal` is set (to persist any reopen). */
+  metaPath?: string
+  /** Self-heal the tunnel before probing (问题1B): a dead tunnel is reopened
+   * rather than producing a bare ECONNREFUSED fetch error. Heal failure yields a
+   * diagnostic `{ ok: false, error: 'tunnel down: ...' }`. */
+  heal?: boolean
+}
+
+/**
+ * Probe a codebase's local MCP endpoint for liveness. When `opts.heal` is set
+ * and the entry is a remote whose tunnel is down, the tunnel is brought back up
+ * first (see {@link ensureTunnelUp}); a heal that fails short-circuits with the
+ * diagnostic instead of hitting `fetch`.
+ * @param entry - the entry to test (uses `localPort`).
+ * @param opts - optional self-heal / injection.
+ * @returns `{ ok, status? }` on success or `{ ok: false, error }` on failure.
+ */
+export async function testCodebase(
+  entry: CodebaseEntry,
+  opts?: TestCodebaseOpts,
+): Promise<{ ok: boolean; status?: unknown; error?: string }> {
   if (entry.localPort === undefined) {
     return { ok: false, error: 'no local port configured' }
+  }
+  // Self-heal the tunnel before probing (问题1B). A dead tunnel must not surface
+  // as a bare fetch error — surface a diagnostic, or reopen and proceed.
+  if (opts?.heal && opts.deps !== undefined && opts.metaPath !== undefined) {
+    const res = await ensureTunnelUp(opts.deps, opts.metaPath, entry)
+    if (!res.healed && res.error !== undefined) {
+      return { ok: false, error: res.error }
+    }
+    entry = res.entry
+    if (entry.localPort === undefined) return { ok: false, error: 'no local port configured' }
   }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 3000)

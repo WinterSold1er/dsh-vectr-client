@@ -10,6 +10,9 @@
  *
  * @module dsh-vectr-client/codebases
  */
+/** Default TCP budget for tunnel-liveness probes (ms). Below the known ssh
+ * `-O check` latency so a dead master is judged down fast. */
+export declare const DEFAULT_TUNNEL_PROBE_MS = 800;
 /** Discriminant for where a codebase's vectr daemon runs. */
 export type CodebaseType = 'local' | 'remote';
 /** How a remote host authenticates (informational; the secret lives in the store). */
@@ -103,8 +106,6 @@ export interface CodebaseDeps {
     sshRunner: SshRunner;
     /** Secret store. */
     credStore: CredentialStore;
-    /** Path of the vectr daemon registry (passed through; not read here). */
-    instancesPath: string;
 }
 /** Validation regex for a slug (also used to derive `serverName`). */
 export declare const SLUG_PATTERN: RegExp;
@@ -147,7 +148,7 @@ export declare function saveCodebases(metaPath: string, list: CodebaseEntry[]): 
  * @param max - last candidate port (inclusive).
  * @returns the first free port, or `undefined` when none are free.
  */
-export declare function findFreePort(min?: number, max?: number): Promise<number | undefined>;
+export declare function findFreePort(min?: number, max?: number, exclude?: Set<number>): Promise<number | undefined>;
 /**
  * Create a codebase: spawn (local) or ssh-provision + tunnel (remote), then
  * persist the entry. Any partial failure cleans up what was already built.
@@ -170,7 +171,102 @@ export declare function deleteCodebase(deps: CodebaseDeps, metaPath: string, ent
  * @param entry - the entry to test (uses `localPort`).
  * @returns `{ ok, status? }` on success or `{ ok: false, error }` on failure.
  */
-export declare function testCodebase(entry: CodebaseEntry): Promise<{
+/**
+ * Result of probing a remote codebase's SSH tunnel for liveness.
+ */
+export interface TunnelHealth {
+    /** `true` when the ssh master is alive (control socket answers, or the
+     * forwarded local port accepts a TCP connection). */
+    alive: boolean;
+    /** Why the tunnel is judged dead (present only when `alive === false`). */
+    reason?: string;
+}
+/**
+ * Probe whether a remote codebase's SSH tunnel is currently live — without
+ * mutating anything. Liveness is derived from the AUTHORITATIVE signal only:
+ *
+ *  `ssh -O check -S <tunnelCtl> <host>` — asks the ssh control master directly.
+ *  A 0 exit means the master process is alive; any other result (including a
+ *  missing control socket) means the tunnel is down.
+ *
+ * The forwarded local port's TCP state is deliberately NOT used as a liveness
+ * signal here: a listening port only proves *some* process holds `localPort`,
+ * not that the ssh master is up, so it would both lie about status and make the
+ * `findFreePort` reallocation in {@link ensureTunnelUp} unreachable. The bind
+ * availability of `localPort` is checked separately, inside `ensureTunnelUp`,
+ * purely to decide reuse-vs-reallocate. Treating `status:'up'` as "the master is
+ * alive" is exactly the 问题1B truth-correction.
+ *
+ * Local (`type === 'local'`) entries have no tunnel and return
+ * `{ alive: false, reason: 'not-remote' }` so callers treat them as "nothing to
+ * heal" rather than "dead tunnel".
+ *
+ * @param entry - the remote entry to probe.
+ * @param deps - injected ssh runner.
+ */
+export declare function probeTunnel(entry: CodebaseEntry, deps: CodebaseDeps): Promise<TunnelHealth>;
+/** Result of {@link ensureTunnelUp}. */
+export interface EnsureTunnelResult {
+    /** The (possibly updated) entry — `localPort`/`tunnelCtl`/`status` may change. */
+    entry: CodebaseEntry;
+    /** `true` when a dead tunnel was actually reopened. */
+    healed: boolean;
+    /** Diagnostic when the tunnel could not be brought up (and status was downgraded). */
+    error?: string;
+}
+/**
+ * Ensure a remote codebase's SSH tunnel is up, reopening it when dead. This is
+ * the self-healing fix for the "tunnel died, `status:'up'` lied" production
+ * defect (问题1B):
+ *
+ *  - If {@link probeTunnel} reports the tunnel alive, return the entry unchanged
+ *    (`healed: false`) — no churn.
+ *  - If dead, reopen `ssh -f -N -M -S <ctl> -L 127.0.0.1:<localPort>:127.0.0.1:
+ *    <remotePort> <host>` — the SAME `localPort` is reused when still free
+ *    (so the persisted MCP endpoint URL stays stable), otherwise
+ *    {@link findFreePort} allocates a fresh one and the meta is updated so every
+ *    consumer (routes, binds) sees the new port.
+ *  - On any reopen failure the persisted `status` is downgraded to `'error'`
+ *    with a self-diagnosing `error` message instead of being left claiming
+ *    `'up'` (no more lying). The same message is returned as `error` so callers
+ *    (e.g. `testCodebase`) can surface it directly.
+ *
+ * Password-auth codebases resolve their secret from `credentialRef` so the
+ * reopen feeds it back to the ssh runner (via sshpass) exactly like the initial
+ * create. Key-auth entries pass `undefined` auth.
+ *
+ * NOTE (forwarding semantics): `localPort` is the LOCAL bind on this machine;
+ * `remotePort` is the conan daemon port the tunnel forwards to. A local daemon
+ * listening on 8767 does NOT conflict with a local tunnel bind on 8760 — they
+ * are different addresses (ponytail: comment only, the ssh `-L` tuple is
+ * authoritative).
+ *
+ * @param deps - injected runners / store.
+ * @param metaPath - metadata file to persist status/port changes into.
+ * @param entry - the (persisted) remote entry to bring up.
+ */
+export declare function ensureTunnelUp(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<EnsureTunnelResult>;
+/** Options for {@link testCodebase}. */
+export interface TestCodebaseOpts {
+    /** Injected runners/store — required when `heal` is set. */
+    deps?: CodebaseDeps;
+    /** Metadata file path — required when `heal` is set (to persist any reopen). */
+    metaPath?: string;
+    /** Self-heal the tunnel before probing (问题1B): a dead tunnel is reopened
+     * rather than producing a bare ECONNREFUSED fetch error. Heal failure yields a
+     * diagnostic `{ ok: false, error: 'tunnel down: ...' }`. */
+    heal?: boolean;
+}
+/**
+ * Probe a codebase's local MCP endpoint for liveness. When `opts.heal` is set
+ * and the entry is a remote whose tunnel is down, the tunnel is brought back up
+ * first (see {@link ensureTunnelUp}); a heal that fails short-circuits with the
+ * diagnostic instead of hitting `fetch`.
+ * @param entry - the entry to test (uses `localPort`).
+ * @param opts - optional self-heal / injection.
+ * @returns `{ ok, status? }` on success or `{ ok: false, error }` on failure.
+ */
+export declare function testCodebase(entry: CodebaseEntry, opts?: TestCodebaseOpts): Promise<{
     ok: boolean;
     status?: unknown;
     error?: string;
@@ -193,4 +289,20 @@ export declare class FileCredentialStore implements CredentialStore {
 }
 /** Remove a metadata file entirely (used in tests / reset). */
 export declare function _removeMeta(metaPath: string): void;
+/**
+ * Best-effort cleanup of stale tunnel control sockets left behind when a
+ * previous plugin process crashed (the master ssh process is gone but its
+ * `vectr-tunnel-*.sock` remains in tmpdir). A socket is considered stale when
+ * the node process that created it (pid encoded in the filename) is no longer
+ * alive; live tunnels of the current process are left untouched. Every error is
+ * swallowed — this is a startup hygiene step, never fatal.
+ *
+ * ponytail: pid-based heuristic — it verifies only that the *owning node process*
+ * is dead, not that the ssh master itself is gone. If a node process dies while
+ * its ssh master somehow outlives it, the socket would be skipped. To tighten,
+ * attempt `ssh -O check -S <sock> <host>` once host is known, but that needs the
+ * remote host which this function does not have, so the pid heuristic is the
+ * pragmatic default.
+ */
+export declare function cleanupStaleTunnelSockets(dir?: string): number;
 //# sourceMappingURL=codebases.d.ts.map

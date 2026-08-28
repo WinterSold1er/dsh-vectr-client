@@ -29,8 +29,8 @@ interface CodebaseView {
   error?: string
 }
 
-/** One table row with test / delete actions. */
-function CodebaseRow(props: {
+/** One table row with test / delete actions. Exported for layout-regression tests. */
+export function CodebaseRow(props: {
   view: CodebaseView
   onTest: (slug: string) => void
   onDelete: (slug: string) => void
@@ -51,9 +51,14 @@ function CodebaseRow(props: {
         ? <span style={{ color: 'var(--dsw-alias-state-success-primary)' }}>up</span>
         : <span style={{ color: 'var(--dsw-alias-state-error-primary)' }}>{view.status}{view.error ? ` (${view.error})` : ''}</span>}</td>
       <td style={tdStyle}>{view.tunnelPid !== undefined ? String(view.tunnelPid) : '—'}</td>
-      <td style={tdStyle}>
-        <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug)}>test</button>
-        <button type="button" className={BTN.danger} disabled={busy} onClick={() => onDelete(view.slug)} style={{ marginLeft: 4 }}>delete</button>
+      <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
+        {/* Flex + nowrap keeps the two inline buttons on one line; `gap` replaces
+            the old marginLeft so they never wrap to a second row when the column
+            is squeezed (问题2). */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+          <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug)}>test</button>
+          <button type="button" className={BTN.danger} disabled={busy} onClick={() => onDelete(view.slug)}>delete</button>
+        </div>
       </td>
     </tr>
   )
@@ -216,7 +221,7 @@ export function CodebaseManager(): ReactNode {
             <th style={thStyle}>local port</th>
             <th style={thStyle}>status</th>
             <th style={thStyle}>tunnel</th>
-            <th style={thStyle}>actions</th>
+            <th style={{ ...thStyle, minWidth: 110, whiteSpace: 'nowrap' }}>actions</th>
           </tr>
         </thead>
         <tbody>

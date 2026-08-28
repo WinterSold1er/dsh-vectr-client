@@ -25,6 +25,8 @@ import { type CredentialStore, type SpawnRunner, type SshRunner } from './codeba
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
+export { ensureTunnelUp, probeTunnel, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codebases';
 /**
  * Local structural view of the host `webServer` service this plugin registers
  * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is

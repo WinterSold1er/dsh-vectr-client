@@ -42,6 +42,7 @@ import {
   cleanupStaleTunnelSockets,
   createCodebase,
   deleteCodebase,
+  ensureTunnelUp,
   FileCredentialStore,
   loadCodebases,
   testCodebase,
@@ -70,6 +71,11 @@ import {
 export { isDaemonAlive, isPortListening } from './probe'
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry'
 export type { InstanceEntry, InstancesFile } from './registry'
+
+// Re-export the tunnel self-heal surface (问题1B) so callers/tests resolve it
+// from the plugin root, and so the built artifact provably contains it.
+export { ensureTunnelUp, probeTunnel, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codebases'
 
 /** Return a shallow copy with the credential ref omitted (no secret leaks). */
 function stripSecret(entry: CodebaseEntry): CodebaseEntry {
@@ -356,6 +362,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   const codebasesPath = isAbsolute(resolved.codebasesPath)
     ? resolved.codebasesPath
     : resolve(process.cwd(), resolved.codebasesPath)
+  // 问题1B: bring every persisted 'up' remote tunnel back up at startup. A
+  // tunnel can die while the host stays up (ssh master crash, network blip); the
+  // meta keeps `status: 'up'` but the endpoint is unreachable. Re-probe and
+  // reopen each here (fire-and-forget, bounded by ssh's quick return) so the
+  // endpoint comes back without blocking host startup. Each entry heals
+  // independently so one failure cannot block the others. `apply` is sync in the
+  // host contract, so this runs concurrently rather than awaited.
+  try {
+    const deps = buildCodebaseDeps(ctx, resolved.secretsPath)
+    for (const entry of loadCodebases(codebasesPath)) {
+      if (entry.type === 'remote' && entry.status === 'up') {
+        void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
+          ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
+        })
+      }
+    }
+  } catch (err) {
+    ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
+  }
   const handles = new Map<Agent, ConnectionHandle>()
 
   // The registry is read inside install() on every call (D-7), so seed and
@@ -719,7 +744,10 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
           sendJson(res, 404, { ok: false, error: 'no such codebase' })
           return
         }
-        const result = await testCodebase(entry)
+        // 问题1B: self-heal the tunnel before probing. A dead tunnel is reopened
+        // (or yields a diagnostic 'tunnel down: ...' instead of a bare fetch
+        // error) rather than silently reporting the persisted-but-false 'up'.
+        const result = await testCodebase(entry, { deps, metaPath: codebasesPath, heal: true })
         sendJson(res, result.ok ? 200 : 503, result)
         return
       }
