@@ -586,15 +586,13 @@ export async function deleteCodebase(
       await stop.promise
     }
   } else {
-    if (entry.localPort !== undefined) {
-      const stop = deps.sshRunner(remoteShellCmd(entry.host ?? '', `vectr stop --port ${entry.localPort}`))
-      await stop.promise
-    }
-    // Teardown must NOT depend solely on tunnelPid: a transient `-O check` race
-    // at create time can leave tunnelPid undefined while the master (and its
-    // control socket) is still alive. When tunnelCtl exists we ALWAYS attempt a
-    // clean `ssh -O exit`; the PID kill is only a best-effort fallback for
-    // entries built by older revisions that stored no socket.
+    // 1) Tear down the SSH tunnel FIRST. Teardown keys off the control socket
+    //    (`ssh -O exit -S <ctl>`) so it never depends solely on `tunnelPid`; a
+    //    transient `-O check` race at create time can leave `tunnelPid` unset
+    //    while the master (and its socket) is still alive. The PID kill is only a
+    //    best-effort fallback for entries built by older revisions that stored no
+    //    socket. The tunnel is a transport only — its teardown is independent of
+    //    the remote stop below, which opens its OWN ssh connection to the host.
     if (entry.tunnelCtl !== undefined) {
       try {
         await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
@@ -608,6 +606,18 @@ export async function deleteCodebase(
       } catch {
         // tunnel already gone; ignore.
       }
+    }
+    // 2) Stop the REMOTE daemon. It listens on `entry.remotePort` (the port the
+    //    conan daemon actually binds), NOT `entry.localPort` (our local tunnel
+    //    endpoint). Stopping via `localPort` is a silent no-op: `vectr stop
+    //    --port <localPort>` reaches nothing on the remote host, leaving the
+    //    remote daemon (pid on conan) and its `~/.vectr/instances.json` entry
+    //    orphaned. The PATH export makes `vectr` resolve under non-interactive
+    //    ssh (whose PATH lacks `~/.local/bin`). The daemon's own `stop` removes
+    //    its instances.json entry — the plugin must NEVER hand-write that file.
+    if (entry.remotePort !== undefined) {
+      const stop = deps.sshRunner(remoteShellCmd(entry.host ?? '', `vectr stop --port ${entry.remotePort}`))
+      await stop.promise
     }
   }
   const list = loadCodebases(metaPath).filter(e => e.slug !== entry.slug)
