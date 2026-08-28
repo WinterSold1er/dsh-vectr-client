@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type Mock } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { startConnection } from '@deepseek-ai/dsh-mcp-client'
+import { startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   install,
@@ -31,8 +31,13 @@ import { diagnoseDaemon, fetchStatus, type HttpProbe } from '../src/probe.ts'
 
 // Mock startConnection so no real MCP/HTTP connection is ever attempted; the
 // test asserts call/non-call directly.
-vi.mock('@deepseek-ai/dsh-mcp-client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-mcp-client')>()
+// The plugin sources `startConnection` (and `resolveReconnectPolicy`) from the
+// `@deepseek-ai/dsh-mcp-client/src/connection.ts` subpath (the only export surface
+// rc.2 exposes for these symbols — the package root only re-exports
+// {Config, apply, inject, name}). The mock MUST therefore target that subpath,
+// not the package root, or the real binding is called and the call count stays 0.
+vi.mock('@deepseek-ai/dsh-mcp-client/src/connection.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-mcp-client/src/connection.ts')>()
   return {
     ...actual,
     startConnection: vi.fn(() => ({ ready: Promise.resolve({}), dispose: vi.fn() })),
