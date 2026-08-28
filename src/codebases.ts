@@ -11,7 +11,7 @@
  * @module dsh-vectr-client/codebases
  */
 
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -57,6 +57,8 @@ export interface CodebaseEntry {
   remotePort?: number
   /** PID of the ssh tunnel process for `type === 'remote'`. */
   tunnelPid?: number
+  /** Control-socket path of the ssh tunnel master (`-M -S`); reliable PID query + clean teardown. */
+  tunnelCtl?: string
   /** Reference into the credential store (never the value). */
   credentialRef?: string
   /** Connection status. */
@@ -103,8 +105,14 @@ export interface SpawnHandle {
 /** Function that spawns a local vectr command. */
 export type SpawnRunner = (command: string, args: string[]) => SpawnHandle
 
+/** Auth context the ssh runner may need to satisfy (e.g. password hosts). */
+export interface SshAuthContext {
+  /** Plaintext password for password-auth hosts; the runner feeds it to ssh (e.g. via sshpass). */
+  password?: string
+}
+
 /** Function that spawns an ssh command (used for remote probe / install / start / tunnel). */
-export type SshRunner = (args: string[]) => SpawnHandle
+export type SshRunner = (args: string[], auth?: SshAuthContext) => SpawnHandle
 
 /** Dependencies injected into the management functions (kept minimal / faked in tests). */
 export interface CodebaseDeps {
@@ -293,24 +301,35 @@ export async function createCodebase(
     takenServerNames.delete(serverName)
     throw new Error('remote codebase requires a host')
   }
-  // 1) connectivity probe
-  const probe = deps.sshRunner(['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', spec.host, 'true'])
+  // 1) connectivity probe. For password-auth hosts the password is threaded
+  // through the injected ssh runner (which feeds it to ssh via sshpass), and
+  // `BatchMode=yes` is dropped (it would disable password auth); key-auth hosts
+  // keep `BatchMode=yes` to fail fast when no key is configured.
+  let credentialRef: string | undefined
+  let sshPassword: string | undefined
+  if (spec.auth === 'password') {
+    // Store the secret under a ref BEFORE issuing any command, so a later step
+    // failure can unset it. The plaintext is also resolved back out for injection
+    // into the ssh session (password-auth hosts need it; key-auth hosts ignore it).
+    credentialRef = `VECTR_SSH_${spec.slug.toUpperCase()}`
+    if (spec.password !== undefined) await deps.credStore.set(credentialRef, spec.password)
+    const resolved = await deps.credStore.get(credentialRef)
+    sshPassword = typeof resolved === 'string' ? resolved : spec.password
+  }
+  const sshAuth: SshAuthContext | undefined = sshPassword !== undefined ? { password: sshPassword } : undefined
+  const ssh = (args: string[]): SpawnHandle => deps.sshRunner(args, sshAuth)
+
+  const probe = ssh(sshPassword !== undefined
+    ? ['-o', 'ConnectTimeout=5', spec.host, 'true']
+    : ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', spec.host, 'true'])
   const probeResult = await probe.promise
   if (probeResult.code !== 0) {
     takenServerNames.delete(serverName)
+    if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error(`cannot reach ${spec.host}: ${probeResult.stderr || `exit ${probeResult.code}`}`)
   }
-  // password auth: store the secret under a ref BEFORE issuing commands. The
-  // actual ssh session uses the host's already-configured key auth (per the
-  // "store first, commands run over configured key" convention); the password
-  // lives in credStore and is available for environments that wire it through.
-  let credentialRef: string | undefined
-  if (spec.auth === 'password') {
-    credentialRef = `VECTR_SSH_${spec.slug.toUpperCase()}`
-    if (spec.password !== undefined) await deps.credStore.set(credentialRef, spec.password)
-  }
   // 2) install vectr remotely (best-effort; failure tells the user to install)
-  const install = deps.sshRunner([spec.host, 'uv', 'tool', 'install', 'vectr'])
+  const install = ssh([spec.host, 'uv', 'tool', 'install', 'vectr'])
   const installResult = await install.promise
   if (installResult.code !== 0) {
     takenServerNames.delete(serverName)
@@ -318,34 +337,42 @@ export async function createCodebase(
     throw new Error(`failed to install vectr on ${spec.host} (install manually): ${installResult.stderr}`)
   }
   // 3) start remote daemon bound to loopback
-  const start = deps.sshRunner([spec.host, 'vectr', 'start', spec.path, '--host', '127.0.0.1'])
+  const start = ssh([spec.host, 'vectr', 'start', spec.path, '--host', '127.0.0.1'])
   const startResult = await start.promise
   if (startResult.code !== 0) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error(`failed to start vectr on ${spec.host}: ${startResult.stderr}`)
   }
-  // Derive the remote port: prefer parsed stdout, else fall back to a fixed
-  // default the remote `vectr start` exposes (we cannot read instances.json
-  // remotely here, so the caller's convention supplies it).
-  const remotePort = parseRemotePort(startResult.stdout) ?? 8760
-  // 4) open the tunnel; pick the first free local port in the reserved range.
+  // 4) resolve the remote daemon port. Preferred: read the remote
+  // `~/.vectr/instances.json` over ssh and match by workspace (the daemon writes
+  // its real port there). Fallback: scrape `vectr start` stdout, then the
+  // conventional default — never guess silently.
+  const remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(startResult.stdout) ?? 8760
+  // 5) open the tunnel; pick the first free local port in the reserved range.
   const localPort = await findFreePort()
   if (localPort === undefined) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error('no free local tunnel port in range 8760-8799')
   }
-  const tunnel = deps.sshRunner([
-    '-f', '-N', '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, spec.host,
-  ])
+  // 6) open the SSH tunnel as a control master (`-M -S <ctl>`). The control
+  // socket lets us read the master PID reliably (`ssh -O check`) and tear the
+  // tunnel down cleanly later (`ssh -O exit`), instead of relying on the
+  // unreliable "Process ID <pid>" line that `ssh -f` sometimes prints.
+  const ctl = join(tmpdir(), `vectr-tunnel-${spec.slug}-${process.pid}.sock`)
+  const tunnel = ssh(['-f', '-N', '-M', '-S', ctl, '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, spec.host])
   const tunnelResult = await tunnel.promise
   if (tunnelResult.code !== 0) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error(`failed to open tunnel to ${spec.host}: ${tunnelResult.stderr}`)
   }
-  const tunnelPid = tunnelPidFrom(tunnelResult.stdout, spec.host)
+  // Query the master PID through the control socket (reliable), falling back to
+  // the legacy "Process ID <pid>" scrape if the socket check is unavailable.
+  const check = ssh(['-O', 'check', '-S', ctl, spec.host])
+  const checkResult = await check.promise
+  const tunnelPid = tunnelPidFrom(checkResult.stdout) ?? tunnelPidFrom(tunnelResult.stdout)
   const entry: CodebaseEntry = {
     id: spec.slug,
     slug: spec.slug,
@@ -356,6 +383,7 @@ export async function createCodebase(
     localPort,
     remotePort,
     ...(tunnelPid !== undefined ? { tunnelPid } : {}),
+    ...(ctl !== undefined ? { tunnelCtl: ctl } : {}),
     ...(credentialRef !== undefined ? { credentialRef } : {}),
     status: 'up',
   }
@@ -365,13 +393,44 @@ export async function createCodebase(
 }
 
 /**
- * Extract a tunnel PID from ssh `-f` stdout when present, else `undefined`.
- * `-f` forks to background and prints `Process ID <pid>` on some builds; we
- * parse defensively and never fail when absent (the host keeps the tunnel).
+ * Extract a tunnel master PID from ssh output. Preferred: `ssh -O check` prints
+ * `Master running (pid=<pid>)`. Fallback: some `ssh -f` builds print
+ * `Process ID <pid>` on fork — parsed defensively and never fails when absent.
  */
-function tunnelPidFrom(stdout: string, _host: string): number | undefined {
-  const match = /Process ID (\d+)/.exec(stdout)
-  if (match !== null && match[1] !== undefined) return Number(match[1])
+function tunnelPidFrom(stdout: string): number | undefined {
+  const master = /Master running \(pid=(\d+)\)/.exec(stdout)
+  if (master !== null && master[1] !== undefined) return Number(master[1])
+  const legacy = /Process ID (\d+)/.exec(stdout)
+  if (legacy !== null && legacy[1] !== undefined) return Number(legacy[1])
+  return undefined
+}
+
+/**
+ * Resolve a remote vectr daemon's port by reading its `~/.vectr/instances.json`
+ * over ssh and matching the entry by workspace path. Returns `undefined` when
+ * the file is unreadable or has no matching entry, so the caller can fall back
+ * to scraping `vectr start` stdout.
+ * @param ssh - injected ssh runner (already carrying auth context).
+ * @param host - `user@host` remote target.
+ * @param workspace - absolute workspace path the remote daemon serves.
+ */
+async function resolveRemotePort(
+  ssh: (args: string[]) => SpawnHandle,
+  host: string,
+  workspace: string,
+): Promise<number | undefined> {
+  const cat = ssh([host, 'cat', join(homedir(), '.vectr', 'instances.json')])
+  const result = await cat.promise
+  if (result.code !== 0) return undefined
+  try {
+    const registry = JSON.parse(result.stdout) as Record<string, { workspace?: string; port?: number }>
+    const match = Object.values(registry).find(
+      e => e !== null && typeof e === 'object' && e.workspace === workspace,
+    )
+    if (match?.port !== undefined) return match.port
+  } catch {
+    // malformed remote registry; fall through to stdout parse
+  }
   return undefined
 }
 
@@ -418,6 +477,16 @@ export async function deleteCodebase(
       await stop.promise
     }
     if (entry.tunnelPid !== undefined) {
+      // Prefer a clean control-socket exit when we recorded the master socket;
+      // fall back to a direct SIGTERM on the recorded PID (e.g. a tunnel built
+      // by an older revision that stored no socket).
+      if (entry.tunnelCtl !== undefined) {
+        try {
+          await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
+        } catch {
+          // control-socket exit failed; rely on the PID kill below.
+        }
+      }
       try {
         process.kill(entry.tunnelPid, 'SIGTERM')
       } catch {

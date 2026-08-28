@@ -66,10 +66,12 @@ function makeSpawnRunner(scripts: Map<string, FakeProc>): SpawnRunner & { procs:
 /** Build a fake ssh runner that matches by a key token in the args (e.g. 'true', 'uv', host). */
 function makeSshRunner(
   scripts: Array<{ match: (args: string[]) => boolean; proc: Omit<FakeProc, 'command' | 'args'> }>,
-): SshRunner & { calls: string[][] } {
+): SshRunner & { calls: string[][]; auths: Array<SshAuthContext | undefined> } {
   const calls: string[][] = []
-  const runner = ((args: string[]): SpawnHandle => {
+  const auths: Array<SshAuthContext | undefined> = []
+  const runner = ((args: string[], auth?: SshAuthContext): SpawnHandle => {
     calls.push(args)
+    auths.push(auth)
     const hit = scripts.find((s) => s.match(args))
     if (hit === undefined) {
       throw new Error(`unexpected ssh: ${args.join(' ')}`)
@@ -79,8 +81,9 @@ function makeSshRunner(
       kill() {},
     }
     return handle
-  }) as SshRunner & { calls: string[][] }
+  }) as SshRunner & { calls: string[][]; auths: Array<SshAuthContext | undefined> }
   ;(runner as { calls: string[][] }).calls = calls
+  ;(runner as { auths: Array<SshAuthContext | undefined> }).auths = auths
   return runner
 }
 
@@ -211,12 +214,14 @@ describe('create remote', () => {
       .rejects.toThrow(/install vectr/)
   })
 
-  it('records tunnel PID and stores password ref (never in meta)', async () => {
+  it('records tunnel PID + ctl and stores password ref (never in meta)', async () => {
     const ssh = makeSshRunner([
       { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
       { match: (a) => a.includes('uv'), proc: { code: 0, stdout: 'installed', stderr: '' } },
       { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":8760}', stderr: '' } },
-      { match: (a) => a.includes('-L'), proc: { code: 0, stdout: 'Process ID 12345', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=12345)', stderr: '' } },
     ])
     const creds = makeCredStore()
     const deps: CodebaseDeps = {
@@ -228,12 +233,35 @@ describe('create remote', () => {
     const spec: CodebaseSpec = { type: 'remote', path: '/w', host: 'h', slug: 'r', auth: 'password', password: 'secret123' }
     const entry = await createCodebase(deps, metaPath, spec)
     expect(entry.tunnelPid).toBe(12345)
+    expect(entry.tunnelCtl).toBeDefined()
     expect(entry.credentialRef).toBe('VECTR_SSH_R')
+    // password is injected into every ssh call (consumed via sshpass in prod)
+    expect(ssh.auths.some((a) => a?.password === 'secret123')).toBe(true)
     // secret stored under ref, not in metadata file
     expect(creds.get('VECTR_SSH_R')).toBe('secret123')
     const metaText = JSON.stringify(loadCodebases(metaPath))
     expect(metaText).not.toContain('secret123')
     expect(metaText).toContain('VECTR_SSH_R')
+  })
+
+  it('resolves remote port from instances.json (cat), not stdout', async () => {
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('uv'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":9999}', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: JSON.stringify({ k2: { workspace: '/w', port: 8762 } }), stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=7)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+      instancesPath: '',
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5' })
+    expect(entry.remotePort).toBe(8762) // from instances.json, overrides stdout 9999
+    expect(entry.localPort).toBeGreaterThan(0)
   })
 })
 
@@ -259,6 +287,27 @@ describe('delete', () => {
     expect(ssh.calls.some((c) => c.includes('stop'))).toBe(true)
     expect(loadCodebases(metaPath)).toEqual([])
     killSpy.mockRestore()
+  })
+
+  it('exits tunnel via control socket when present', async () => {
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('stop'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+      instancesPath: '',
+    }
+    const entry: CodebaseEntry = {
+      id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
+      localPort: 8761, remotePort: 8760, tunnelPid: 999, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+    }
+    saveCodebases(metaPath, [entry])
+    await deleteCodebase(deps, metaPath, entry)
+    expect(ssh.calls.some((c) => c.includes('-O') && c.includes('exit'))).toBe(true)
+    expect(loadCodebases(metaPath)).toEqual([])
   })
 
   it('stops local daemon via vectr stop --port', async () => {

@@ -497,7 +497,8 @@ export function registerManagementRoutes(ctx: Context, instancesPath: string, co
 /**
  * Build the runtime dependencies for the codebase manager from the host
  * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`
- * wraps `spawn('ssh', args)`; `credStore` prefers the host `credentials`
+ * wraps `spawn('ssh', args)` and, for password-auth codebases, injects the
+ * password via `sshpass` (`-o PreferredAuthentications=password`); `credStore` prefers the host `credentials`
  * service (when present) and otherwise falls back to a file-backed store.
  *
  * When the host `credentials` service exists, its async `set`/`unset` are
@@ -534,7 +535,16 @@ export function buildCodebaseDeps(
       },
     } satisfies SpawnHandle
   }
-  const sshRunner: SshRunner = (args) => spawnRunner('ssh', args)
+  const sshRunner: SshRunner = (args, auth) => {
+    if (auth?.password !== undefined) {
+      // Password-auth hosts: feed the password through sshpass and force
+      // password-only auth. Requires `sshpass` on the host PATH (documented in
+      // README). Key-auth hosts (auth absent) run plain `ssh`.
+      return spawnRunner('sshpass', ['-p', auth.password, 'ssh',
+        '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...args])
+    }
+    return spawnRunner('ssh', args)
+  }
 
   const hostCreds = ctx.get('credentials') as
     | { set: (ref: string, v: string) => Promise<void>; unset: (ref: string) => Promise<void>; resolve: (ref: string) => Promise<{ value: string } | undefined> }
@@ -554,7 +564,7 @@ export function buildCodebaseDeps(
     spawnRunner,
     sshRunner,
     credStore,
-    instancesPath: '',
+    instancesPath: DEFAULT_INSTANCES_FILE,
   }
 }
 
