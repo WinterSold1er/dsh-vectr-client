@@ -13,6 +13,7 @@ import {
   createCodebase,
   deleteCodebase,
   FileCredentialStore,
+  findFreePort,
   loadCodebases,
   saveCodebases,
   testCodebase,
@@ -475,6 +476,38 @@ describe('serverName validation + uniqueness', () => {
     await createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'dup' })
     await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w2', slug: 'dup' }))
       .rejects.toThrow(/already in use/)
+  })
+})
+
+describe('concurrency + port guards (P4)', () => {
+  it('only one concurrent create of the same slug succeeds; the other fails', async () => {
+    const scripts = new Map<string, FakeProc>([
+      ['vectr', { command: 'vectr', args: [], code: 0, stdout: JSON.stringify({ status: 'ok', port: 8731 }), stderr: '' }],
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(scripts),
+      sshRunner: makeSshRunner([]),
+      credStore: makeCredStore(),
+    }
+    const spec: CodebaseSpec = { type: 'local', path: '/w', slug: 'dupslug' }
+    const results = await Promise.allSettled([
+      createCodebase(deps, metaPath, spec),
+      createCodebase(deps, metaPath, spec),
+    ])
+    const fulfilled = results.filter(r => r.status === 'fulfilled')
+    const rejected = results.filter(r => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    // exactly one entry persisted (no double registration / serverName clash)
+    expect(loadCodebases(metaPath)).toHaveLength(1)
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/already in use|conflicts/)
+  })
+
+  it('findFreePort skips ports listed in the exclude set', async () => {
+    const all = new Set<number>()
+    for (let p = 8760; p <= 8799; p++) all.add(p)
+    expect(await findFreePort(8760, 8799, all)).toBeUndefined()
+    expect(await findFreePort(8760, 8799, new Set([8760]))).not.toBe(8760)
   })
 })
 

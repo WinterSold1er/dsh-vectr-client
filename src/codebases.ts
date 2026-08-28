@@ -145,6 +145,17 @@ export function _resetServerNameRegistry(): void {
 }
 
 /**
+ * In-progress create locks keyed by slug. A second concurrent `createCodebase`
+ * for the same slug awaits the in-flight one and then re-validates the slug, so
+ * two simultaneous creates of the same slug cannot both register (which would
+ * collide on the derived `serverName` / daemon registration).
+ */
+const createLocks = new Map<string, Promise<CodebaseEntry>>()
+
+/** Ports reserved by in-flight `createCodebase` calls (TOCTOU guard for `findFreePort`). */
+const inProgressLocalPorts = new Set<number>()
+
+/**
  * Derive the MCP server name from a slug.
  * @param slug - the codebase slug.
  * @returns `vectr_<slug>`.
@@ -229,9 +240,10 @@ export function saveCodebases(metaPath: string, list: CodebaseEntry[]): void {
  * @param max - last candidate port (inclusive).
  * @returns the first free port, or `undefined` when none are free.
  */
-export async function findFreePort(min = 8760, max = 8799): Promise<number | undefined> {
+export async function findFreePort(min = 8760, max = 8799, exclude?: Set<number>): Promise<number | undefined> {
   const { createServer } = await import('node:net')
   for (let port = min; port <= max; port++) {
+    if (exclude?.has(port)) continue
     const free = await new Promise<boolean>((resolveFree) => {
       const server = createServer()
       server.once('error', () => resolveFree(false))
@@ -253,6 +265,31 @@ export async function findFreePort(min = 8760, max = 8799): Promise<number | und
  * @returns the created entry.
  */
 export async function createCodebase(
+  deps: CodebaseDeps,
+  metaPath: string,
+  spec: CodebaseSpec,
+): Promise<CodebaseEntry> {
+  // P4: serialize concurrent creates for the same slug via a per-slug lock.
+  // If a create for this slug is already in flight, wait for it to settle and
+  // re-validate the slug (the winner may have claimed the server name), so two
+  // concurrent creates of the same slug cannot both register.
+  const prev = createLocks.get(spec.slug)
+  if (prev !== undefined) {
+    await prev
+    assertSlugAvailable(spec.slug)
+  }
+  const run = (async () => {
+    try {
+      return await createCodebaseCore(deps, metaPath, spec)
+    } finally {
+      createLocks.delete(spec.slug)
+    }
+  })()
+  createLocks.set(spec.slug, run)
+  return run
+}
+
+async function createCodebaseCore(
   deps: CodebaseDeps,
   metaPath: string,
   spec: CodebaseSpec,
@@ -350,12 +387,17 @@ export async function createCodebase(
   // conventional default — never guess silently.
   const remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(startResult.stdout) ?? 8760
   // 5) open the tunnel; pick the first free local port in the reserved range.
-  const localPort = await findFreePort()
+  const localPort = await findFreePort(8760, 8799, inProgressLocalPorts)
   if (localPort === undefined) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error('no free local tunnel port in range 8760-8799')
   }
+  // Reserve the port for the duration of this create so a concurrent create in
+  // the same process cannot probe-and-bind the same port (TOCTOU between
+  // findFreePort's probe and the tunnel's actual bind).
+  inProgressLocalPorts.add(localPort)
+  try {
   // 6) open the SSH tunnel as a control master (`-M -S <ctl>`). The control
   // socket lets us read the master PID reliably (`ssh -O check`) and tear the
   // tunnel down cleanly later (`ssh -O exit`), instead of relying on the
@@ -408,6 +450,9 @@ export async function createCodebase(
   takenServerNames.add(serverName)
   persist(metaPath, entry)
   return entry
+  } finally {
+    inProgressLocalPorts.delete(localPort)
+  }
 }
 
 /**
