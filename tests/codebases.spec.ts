@@ -451,6 +451,123 @@ describe('delete', () => {
   })
 })
 
+describe('remote vectr PATH + idempotent install', () => {
+  /** Capture all ssh calls whose command words include `vectr` as a token. */
+  const vectrCalls = (calls: string[][]) =>
+    calls.filter((c) => c.includes('vectr'))
+
+  it('injects PATH so remote vectr resolves without the remote shell PATH', async () => {
+    // Regression for the conan trial: non-interactive ssh PATH lacks
+    // ~/.local/bin, so a bare `vectr` failed with 'command not found'.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('tool'), proc: { code: 0, stdout: 'vectr v1.11.0', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":8760}', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=12345)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p' })
+    const calls = vectrCalls(ssh.calls)
+    expect(calls.length).toBeGreaterThan(0)
+    for (const call of calls) {
+      // PATH export present as explicit tokens; `vectr` must NOT be the bare
+      // 2nd element (that was the broken form [host, 'vectr', ...]).
+      expect(call).toContain('export')
+      expect(call).toContain('PATH=$HOME/.local/bin:$PATH')
+      expect(call).toContain('&&')
+      expect(call[1]).toBe('export')
+    }
+    // No call is the old bare `vectr` invocation.
+    expect(ssh.calls.some((c) => c.length >= 3 && c[0] === 'h' && c[1] === 'vectr')).toBe(false)
+  })
+
+  it('stops the remote daemon with a PATH-injected vectr stop', async () => {
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('stop'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry: CodebaseEntry = {
+      id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
+      localPort: 8761, remotePort: 8760, tunnelPid: 999, tunnelCtl: '/tmp/vectr-tunnel-r.sock', credentialRef: 'VECTR_SSH_R', status: 'up',
+    }
+    saveCodebases(metaPath, [entry])
+    await deleteCodebase(deps, metaPath, entry)
+    const stopCall = vectrCalls(ssh.calls).find((c) => c.includes('stop'))
+    expect(stopCall).toBeDefined()
+    expect(stopCall).toContain('PATH=$HOME/.local/bin:$PATH')
+    expect(stopCall?.[1]).toBe('export')
+    expect(loadCodebases(metaPath)).toEqual([])
+  })
+
+  it('skips install when uv tool list already reports vectr (idempotent)', async () => {
+    // Retried create must not re-run `uv tool install` (which fails when
+    // already installed) — it should detect the existing install and proceed.
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('tool') && a.includes('list'), proc: { code: 0, stdout: 'vectr v1.11.0\n', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":8760}', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=12345)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'idem' })
+    expect(entry.status).toBe('up')
+    // `uv tool install` must NOT have been issued (only `uv tool list`).
+    expect(ssh.calls.some((c) => c.join(' ').includes('uv tool install'))).toBe(false)
+  })
+
+  it('tolerates uv tool install non-zero exit that means already installed', async () => {
+    // When vectr is absent per `uv tool list` but install still exits non-zero
+    // with an 'already installed' message, the create must proceed (not throw).
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('tool') && a.includes('list'), proc: { code: 0, stdout: 'other-tool v0.1', stderr: '' } },
+      { match: (a) => a.includes('tool') && a.includes('install'), proc: { code: 1, stdout: '', stderr: 'ERROR: package vectr is already installed' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: '{"port":8760}', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=12345)', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'tol' })
+    expect(entry.status).toBe('up')
+  })
+
+  it('still throws on a genuine install failure (not already-installed)', async () => {
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('tool'), proc: { code: 1, stdout: '', stderr: 'some real network error' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(),
+    }
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'fail' }))
+      .rejects.toThrow(/install vectr/)
+  })
+})
+
 describe('test', () => {
   it('returns ok on 200 with status json', async () => {
     const server = await startProbe(200, { ready: true })

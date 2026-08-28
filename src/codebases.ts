@@ -287,6 +287,32 @@ export async function createCodebase(
   return run
 }
 
+/**
+ * Build argv for a remote shell command that must resolve the uv-installed
+ * `vectr` binary WITHOUT depending on the remote non-interactive ssh PATH.
+ *
+ * Non-interactive ssh exposes only `/usr/local/sbin:/usr/local/bin:/usr/bin`
+ * (no `~/.local/bin`), so a bare `vectr` fails with "command not found"
+ * (confirmed on the conan trial host: `bash: line 1: vectr: command not
+ * found`). We prepend an explicit PATH export to a single remote-shell command
+ * string; `$HOME`/`$PATH` are expanded by the remote login shell. `uv` itself
+ * lives at `/usr/bin/uv` (on the default PATH), so wrapping it here is
+ * harmless and keeps every remote tool invocation uniform.
+ *
+ * ponytail: single-string form; workspace paths without spaces assumed (this
+ * plugin serves absolute workspace paths that do not contain spaces in
+ * practice). If quoted-path support is ever needed, switch to per-arg quoting.
+ */
+function remoteShellCmd(host: string, command: string): string[] {
+  // Tokenize into shell words (paths without spaces assumed) and prepend an
+  // explicit PATH export so `vectr` resolves under non-interactive ssh. Kept
+  // as a token list (not a single string) so callers/tests can still match
+  // individual command words. The remote shell joins the words with spaces,
+  // yielding `export PATH=... && <command>` — equivalent to the single-string
+  // form.
+  return [host, 'export', 'PATH=$HOME/.local/bin:$PATH', '&&', ...command.split(' ')]
+}
+
 async function createCodebaseCore(
   deps: CodebaseDeps,
   metaPath: string,
@@ -370,16 +396,31 @@ async function createCodebaseCore(
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
     throw new Error(`cannot reach ${spec.host}: ${probeResult.stderr || `exit ${probeResult.code}`}`)
   }
-  // 2) install vectr remotely (best-effort; failure tells the user to install)
-  const install = ssh([spec.host, 'uv', 'tool', 'install', 'vectr'])
-  const installResult = await install.promise
-  if (installResult.code !== 0) {
-    takenServerNames.delete(serverName)
-    if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
-    throw new Error(`failed to install vectr on ${spec.host} (install manually): ${installResult.stderr}`)
+  // 2) install vectr remotely (idempotent). `uv tool install` returns non-zero
+  // when vectr is ALREADY installed (known uv behavior), which previously
+  // aborted a retried create at this step. Probe first with `uv tool list` and
+  // skip the install when vectr is present; only then attempt the install, and
+  // tolerate uv's "already installed" non-zero exit instead of failing the
+  // whole create.
+  const list = ssh(remoteShellCmd(spec.host, 'uv tool list'))
+  const listResult = await list.promise
+  const alreadyInstalled = listResult.code === 0 && /\bvectr\b/i.test(listResult.stdout)
+  if (!alreadyInstalled) {
+    const install = ssh(remoteShellCmd(spec.host, 'uv tool install vectr'))
+    const installResult = await install.promise
+    if (installResult.code !== 0) {
+      const msg = `${installResult.stdout}\n${installResult.stderr}`
+      // Tolerate uv's "already installed" exit; only hard-fail on a real error.
+      if (!/\balready installed\b|\bup to date\b|\brequirements already satisfied\b/i.test(msg)) {
+        takenServerNames.delete(serverName)
+        if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
+        throw new Error(`failed to install vectr on ${spec.host} (install manually): ${installResult.stderr}`)
+      }
+    }
   }
-  // 3) start remote daemon bound to loopback
-  const start = ssh([spec.host, 'vectr', 'start', spec.path, '--host', '127.0.0.1'])
+  // 3) start remote daemon bound to loopback (PATH-injected so non-interactive
+  // ssh, whose PATH lacks ~/.local/bin, can still resolve the uv-installed binary)
+  const start = ssh(remoteShellCmd(spec.host, `vectr start ${spec.path} --host 127.0.0.1`))
   const startResult = await start.promise
   if (startResult.code !== 0) {
     takenServerNames.delete(serverName)
@@ -546,7 +587,7 @@ export async function deleteCodebase(
     }
   } else {
     if (entry.localPort !== undefined) {
-      const stop = deps.sshRunner([entry.host ?? '', 'vectr', 'stop', '--port', String(entry.localPort)])
+      const stop = deps.sshRunner(remoteShellCmd(entry.host ?? '', `vectr stop --port ${entry.localPort}`))
       await stop.promise
     }
     // Teardown must NOT depend solely on tunnelPid: a transient `-O check` race
