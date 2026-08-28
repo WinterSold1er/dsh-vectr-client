@@ -282,13 +282,22 @@ describe('install liveness gate (D-2 / R3)', () => {
       daemonHttpTimeoutMs: 30,
       daemonTcpTimeoutMs: 30,
     }, agent)
-    // The HTTP probe aborts after daemonHttpTimeoutMs (30ms); wait past it so
-    // the graceful skip warn has been emitted before we assert.
-    await new Promise(resolve => setTimeout(resolve, 100))
+    // The HTTP probe aborts after daemonHttpTimeoutMs (30ms) and install() then
+    // emits the graceful-skip warn from its async liveness IIFE. A fixed
+    // `setTimeout(100)` flaked under event-loop load — the fetch→abort→warn
+    // chain can take longer than 100ms to settle, so the warn had not been
+    // emitted yet when the assertions ran. Poll for the REAL warn to appear
+    // (up to a generous 2s budget) instead of sleeping a fixed window.
+    // Semantic unchanged: we still assert the daemon was judged not alive via
+    // HTTP_PROBE_UNREACHABLE and that no connection was ever attempted.
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some(
+        c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=HTTP_PROBE_UNREACHABLE'),
+      )).toBe(true)
+    }, { timeout: 2000, interval: 25 })
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
-    expect(warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=HTTP_PROBE_UNREACHABLE'))).toBe(true)
     spy.mockRestore()
     await new Promise<void>((r) => hangServer.close(() => r()))
   })
