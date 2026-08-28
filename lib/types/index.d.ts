@@ -127,7 +127,8 @@ export declare function registerManagementRoutes(ctx: Context, instancesPath: st
 /**
  * Build the runtime dependencies for the codebase manager from the host
  * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`
- * wraps `spawn('ssh', args)`; `credStore` prefers the host `credentials`
+ * wraps `spawn('ssh', args)` and, for password-auth codebases, injects the
+ * password via `sshpass` (`-o PreferredAuthentications=password`); `credStore` prefers the host `credentials`
  * service (when present) and otherwise falls back to a file-backed store.
  *
  * When the host `credentials` service exists, its async `set`/`unset` are

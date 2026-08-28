@@ -49,6 +49,8 @@ export interface CodebaseEntry {
     remotePort?: number;
     /** PID of the ssh tunnel process for `type === 'remote'`. */
     tunnelPid?: number;
+    /** Control-socket path of the ssh tunnel master (`-M -S`); reliable PID query + clean teardown. */
+    tunnelCtl?: string;
     /** Reference into the credential store (never the value). */
     credentialRef?: string;
     /** Connection status. */
@@ -86,8 +88,13 @@ export interface SpawnHandle {
 }
 /** Function that spawns a local vectr command. */
 export type SpawnRunner = (command: string, args: string[]) => SpawnHandle;
+/** Auth context the ssh runner may need to satisfy (e.g. password hosts). */
+export interface SshAuthContext {
+    /** Plaintext password for password-auth hosts; the runner feeds it to ssh (e.g. via sshpass). */
+    password?: string;
+}
 /** Function that spawns an ssh command (used for remote probe / install / start / tunnel). */
-export type SshRunner = (args: string[]) => SpawnHandle;
+export type SshRunner = (args: string[], auth?: SshAuthContext) => SpawnHandle;
 /** Dependencies injected into the management functions (kept minimal / faked in tests). */
 export interface CodebaseDeps {
     /** Local vectr runner. */
