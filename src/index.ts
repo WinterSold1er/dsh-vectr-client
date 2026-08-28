@@ -671,7 +671,7 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
 
   ctx.effect(() => webServer.register({
     kind: 'prefix',
-    path: '/api/vectr/codebases/',
+    path: '/api/vectr/codebases',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '', 'http://localhost')
       const slug = decodeURIComponent(url.pathname.replace('/api/vectr/codebases/', ''))
