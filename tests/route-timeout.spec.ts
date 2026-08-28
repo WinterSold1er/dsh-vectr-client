@@ -4,14 +4,15 @@
  * Asserts that the `/api/vectr/workspaces` management route honors
  * `daemonHttpTimeoutMs` from the resolved Config: a daemon whose `/v1/status`
  * answers *after* the configured budget must be judged not-alive by the route,
- * proving the timeout is truly externalized (not a hardcoded 3000ms default).
+ * proving the timeout is truly externalized (not a hardcoded default).
  *
- * Marked `it.fails` because, at time of writing, `registerManagementRoutes`
- * calls `scanWorkspaces(ctx, instancesPath)` without forwarding
- * `config.daemonHttpTimeoutMs`, so the console route silently uses the
- * hardcoded `DEFAULT_STATUS_TIMEOUT_MS` (3000) and ignores the configuration.
- * Once the route forwards the configured timeout (fix for F5), drop `it.fails`
- * and this becomes a normal passing assertion.
+ * This is a NORMAL passing assertion (not `it.fails`): `registerManagementRoutes`
+ * forwards `config.daemonHttpTimeoutMs` to `scanWorkspaces(ctx, instancesPath,
+ * { statusTimeoutMs: config.daemonHttpTimeoutMs })` (src/index.ts), so a daemon
+ * slower than the configured budget is correctly judged `live: false`. The
+ * assertion is real, not inverted: a regression that stops forwarding the
+ * configured timeout (reverting to a hardcoded value) makes this test FAIL,
+ * not pass.
  */
 import { createServer, type Server } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
