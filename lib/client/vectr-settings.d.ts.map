@@ -1,1 +1,1 @@
-{"version":3,"file":"vectr-settings.d.ts","sourceRoot":"","sources":["../../src/client/vectr-settings.tsx"],"names":[],"mappings":"AAAA;;;;;;;;;;;;;;GAcG;AAEH,OAAO,EAAgC,KAAK,SAAS,EAAE,MAAM,OAAO,CAAA;AAwBpE,kEAAkE;AAClE,wBAAgB,aAAa,IAAI,SAAS,CA8BzC"}
+{"version":3,"file":"vectr-settings.d.ts","sourceRoot":"","sources":["../../src/client/vectr-settings.tsx"],"names":[],"mappings":"AAAA;;;;;;;;;GASG;AAKH,kEAAkE;AAClE,wBAAgB,aAAa,gCAO5B"}

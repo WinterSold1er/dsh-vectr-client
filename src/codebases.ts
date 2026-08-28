@@ -717,6 +717,87 @@ export async function deleteCodebase(
   if (entry.credentialRef !== undefined) await deps.credStore.unset(entry.credentialRef)
 }
 
+/** Error carrying an HTTP status so the route layer can map it directly.
+ * Pure domain errors (missing slug, unregistered workspace, serverName
+ * collision) surface as {@link CodebaseError} from {@link patchCodebase}. */
+export class CodebaseError extends Error {
+  /** HTTP status to respond with. */
+  readonly status: number
+  /** @param status - HTTP status. @param message - diagnostic. */
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+/** Options for {@link patchCodebase}. */
+export interface PatchCodebaseOptions {
+  /** Parsed vectr daemon registry (from `readInstancesFile`). When `undefined`
+   * or the target workspace does not resolve to a known daemon workspace, the
+   * assignment is rejected — a reassign target must be a real vectr workspace. */
+  instances?: InstancesFile
+}
+
+/**
+ * Reassign an existing codebase's owning `workspace` and recompute its
+ * composite `serverName` (`deriveServerName(workspace, slug)`), rejecting a
+ * serverName collision with another entry, then persist and re-hydrate the
+ * in-process uniqueness registry. Pure logic: no spawning, no HTTP, no body
+ * parsing — the route validates the request shape and reads the registry.
+ *
+ * The route's `assign` action calls this to move a (typically remote) codebase
+ * to a different owning workspace and keep `serverName` globally unique across
+ * workspaces. Local entries are not special-cased: the same recompute runs.
+ *
+ * @param metaPath - codebase metadata file.
+ * @param slug - entry slug to reassign.
+ * @param workspace - target absolute workspace path (route must validate this).
+ * @param options - optional parsed daemon registry for target validation.
+ * @returns the updated entry.
+ * @throws {CodebaseError} 404 when the slug is unknown; 409 when the target
+ *   workspace is unregistered, or the recomputed serverName collides.
+ */
+export function patchCodebase(
+  metaPath: string,
+  slug: string,
+  workspace: string,
+  options: PatchCodebaseOptions = {},
+): CodebaseEntry {
+  const list = loadCodebases(metaPath)
+  const idx = list.findIndex(e => e.slug === slug)
+  if (idx === -1) {
+    throw new CodebaseError(404, `no such codebase: ${slug}`)
+  }
+  const entry = list[idx]!
+  // B4: the reassign target must be a known vectr daemon workspace, not an
+  // arbitrary path. A missing/unparseable registry or a target that matches no
+  // daemon record is rejected loudly (the composite serverName is derived from
+  // the workspace, so binding to an unregistered one would silently mis-scope
+  // the MCP registration). Uses the same resolveInstance convention vectr
+  // itself uses, so a workspace prefix still resolves.
+  if (options.instances === undefined || resolveInstance(options.instances, workspace) === undefined) {
+    throw new CodebaseError(409, `workspace "${workspace}" is not registered with a vectr daemon`)
+  }
+  const newServerName = deriveServerName(workspace, entry.slug)
+  // Cross-entry composite collision: another (different-slug) entry already
+  // owns this (workspace + slug) serverName. Equivalent to the create-time
+  // assertServerNameAvailable guard, but scoped to OTHER entries so a no-op
+  // reassign to the same workspace does not flag its own current serverName.
+  const collision = list.find((e, i) => i !== idx && e.serverName === newServerName)
+  if (collision !== undefined) {
+    throw new CodebaseError(409, `server name "${newServerName}" already in use by "${collision.slug}"`)
+  }
+  const updated: CodebaseEntry = { ...entry, workspace, serverName: newServerName }
+  list[idx] = updated
+  saveCodebases(metaPath, list)
+  // Keep the in-process uniqueness registry consistent with the new serverName
+  // so a subsequent createCodebase sees the reassigned entry (loadCodebases
+  // re-hydrates takenServerNames from disk; reset first to drop the old name).
+  _resetServerNameRegistry()
+  loadCodebases(metaPath)
+  return updated
+}
+
 /**
  * Probe a codebase's local MCP endpoint for liveness.
  * @param entry - the entry to test (uses `localPort`).

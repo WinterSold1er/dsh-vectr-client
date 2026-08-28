@@ -46,6 +46,8 @@ import {
   FileCredentialStore,
   loadCodebases,
   migrateCodebases,
+  patchCodebase,
+  CodebaseError,
   testCodebase,
   type CodebaseEntry,
   type CodebaseSpec,
@@ -461,7 +463,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Registered in the root plugin scope (not per-agent) so a single pair of
   // management endpoints serves every workspace; disposed with this fiber.
   registerManagementRoutes(ctx, instancesPath, resolved)
-  registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath)
+  registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath, instancesPath)
 }
 
 /**
@@ -703,7 +705,7 @@ export function slugFromPathname(pathname: string): string {
  * @param codebasesPath - absolute path of the codebase metadata file.
  * @param secretsPath - fallback secret file path.
  */
-export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string): void {
+export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath: string = DEFAULT_INSTANCES_FILE): void {
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
     ctx.logger.warn('vectr-client: webServer service unavailable; skipping /api/vectr/codebases* routes')
@@ -789,6 +791,52 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
         // error) rather than silently reporting the persisted-but-false 'up'.
         const result = await testCodebase(entry, { deps, metaPath: codebasesPath, heal: true })
         sendJson(res, result.ok ? 200 : 503, result)
+        return
+      }
+      if (req.method === 'PATCH') {
+        const entry = find()
+        if (entry === undefined) {
+          sendJson(res, 404, { ok: false, error: 'no such codebase' })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch (error) {
+          sendJson(res, 400, { error: String(error) })
+          return
+        }
+        // Body shape: `{ workspace: string }` — the absolute target workspace.
+        const { workspace } = (body ?? {}) as { workspace?: unknown }
+        if (typeof workspace !== 'string' || workspace.length === 0 || !isAbsolute(workspace)) {
+          sendJson(res, 400, { error: 'PATCH body must include an absolute "workspace" path' })
+          return
+        }
+        // Validate the target against the live daemon registry (assign only
+        // moves a codebase to a real vectr workspace). A missing/unreadable
+        // registry is a 500 (misconfiguration), not a silent pass.
+        let instances: InstancesFile | undefined
+        try {
+          instances = readInstancesFile(ctx, instancesPath)
+        } catch (error) {
+          sendJson(res, 500, { error: String(error) })
+          return
+        }
+        try {
+          const updated = patchCodebase(
+            codebasesPath,
+            entry.slug,
+            workspace,
+            instances === undefined ? {} : { instances },
+          )
+          sendJson(res, 200, stripSecret(updated))
+        } catch (error) {
+          if (error instanceof CodebaseError) {
+            sendJson(res, error.status, { ok: false, error: error.message })
+          } else {
+            sendJson(res, 500, { ok: false, error: String(error) })
+          }
+        }
         return
       }
       sendJson(res, 405, { error: 'method not allowed' })

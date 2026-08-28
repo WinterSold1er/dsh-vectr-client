@@ -186,5 +186,5 @@ export declare function slugFromPathname(pathname: string): string;
  * @param codebasesPath - absolute path of the codebase metadata file.
  * @param secretsPath - fallback secret file path.
  */
-export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string): void;
+export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath?: string): void;
 //# sourceMappingURL=index.d.ts.map
