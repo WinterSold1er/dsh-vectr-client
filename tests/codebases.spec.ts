@@ -245,6 +245,21 @@ describe('create remote', () => {
     expect(metaText).toContain('VECTR_SSH_R')
   })
 
+  it('throws when password auth is requested but no password provided (P8)', async () => {
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+    ])
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: makeCredStore(), // empty: get() returns undefined
+    }
+    await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p8', auth: 'password' }))
+      .rejects.toThrow(/no password was provided/)
+    // Must NOT silently downgrade to key auth and probe — no ssh issued at all.
+    expect(ssh.calls).toHaveLength(0)
+  })
+
   it('resolves remote port from instances.json (cat), not stdout', async () => {
     const ssh = makeSshRunner([
       { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },

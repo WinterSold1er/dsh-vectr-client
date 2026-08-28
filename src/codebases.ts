@@ -353,6 +353,13 @@ async function createCodebaseCore(
     const resolved = await deps.credStore.get(credentialRef)
     sshPassword = typeof resolved === 'string' ? resolved : spec.password
   }
+  // P8: password auth but no resolvable password must fail loud, NOT silently
+  // downgrade to key auth (which would then fail the probe with a misleading
+  // "cannot reach" error). The caller must supply a password for password-auth.
+  if (spec.auth === 'password' && sshPassword === undefined) {
+    takenServerNames.delete(serverName)
+    throw new Error(`password auth requested for ${spec.host ?? spec.slug} but no password was provided`)
+  }
   const sshAuth: SshAuthContext | undefined = sshPassword !== undefined ? { password: sshPassword } : undefined
   const ssh = (args: string[]): SpawnHandle => deps.sshRunner(args, sshAuth)
 
