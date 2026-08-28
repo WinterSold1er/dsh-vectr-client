@@ -20,6 +20,17 @@ From a git host (the repo commits its compiled `lib/`, so no build step runs on 
 dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
 ```
 
+### Host bundle enablement (one-time, host side)
+
+The bundle is **discovery-ready** out of the box — its `package.json` declares both `dsh.bundle.patch` (→ `cordis.patch.yml`, which inserts the `vectr-client` server row) and `dsh.client` (`platform: 'web'`, which the host's `dsh-client-modules` loader mounts as the browser console). It is not loaded until a profile *enumerates* it:
+
+1. The package must be an installed dependency of the target profile (the `dsh plugin --profile web add` command above does this; a manual `pnpm add` into the profile package also works).
+2. The profile's `package.json` must list it in `dsh.profile.bundles` — again done by `dsh plugin add`. The loader (`apps/cli/src/plugin.ts` → `reconcileBundles`) scans installed dependencies that declare `dsh.bundle` and composes their `cordis.patch.yml` layers over the profile tree.
+3. Restart the host. The server row (MCP binding + `/api/vectr/*` routes) and the web console both register at boot; the tab appears under **Settings → Plugins** only after restart.
+
+**Verify:** after restart, `GET /api/vectr/workspaces` answers, and an agent whose workspace has a live vectr daemon registers `mcp__vectr__*` tools. No code change in this repo is required to enable it — only the host-side one-time `dsh plugin add` + restart.
+
+> Constraints honored: this plugin does **not** modify the DSH harness source, `~/.dsh/profiles/web`, or the vectr binary; enablement is purely additive bundle configuration on the host profile.
 ## Config
 
 | Field | Required | Description |
@@ -100,7 +111,9 @@ Core operations:
 - `createCodebase(deps, metaPath, spec)`:
   - **local** — `vectr start --path <path> --json`; parses `{ status, port, pid, mcp_url }`; `status === 'failed'` → throw; exit ≠ 0 → throw; the derived `serverName` is `vectr_<slug>` and must match `^[A-Za-z0-9_-]{1,32}$` and be process-unique.
   - **remote** — ssh probe → `uv tool install vectr` (failure throws "install manually") → remote `vectr start <path> --host 127.0.0.1` → local `ssh -f -N -L …` tunnel; the password is stored via `credStore.set` *before* commands run; `tunnelPid` is recorded; any step failing cleans up what was already built (and unsets the stored secret).
-- `deleteCodebase(deps, metaPath, entry)` — `vectr stop --port` (local) or ssh remote `vectr stop --port` + `process.kill(tunnelPid, 'SIGTERM')` + remove from metadata + `credStore.unset`.
+- `deleteCodebase(deps, metaPath, entry)` — `vectr stop --port` (local) or ssh remote `vectr stop --port` + `ssh -O exit` on the tunnel control socket (fallback `process.kill(tunnelPid, 'SIGTERM')`) + remove from metadata + `credStore.unset`.
+
+**Remote password auth** requires `sshpass` on the host PATH: password-auth codebases resolve the secret from `credStore` and the host `sshRunner` feeds it via `sshpass -p <pw> ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no …`. Key-auth hosts (the default `auth: 'key'`) run plain `ssh` using already-configured keys and never touch the password. The tunnel is opened as an ssh control master (`-M -S <ctl>`); its PID is read reliably via `ssh -O check` (`Master running (pid=…)`) rather than the unreliable `Process ID <pid>` line, and the remote daemon port is read from the remote `~/.vectr/instances.json` (matched by workspace) with `vectr start` stdout scrape as fallback.
 - `testCodebase(entry)` — `GET http://127.0.0.1:<localPort>/v1/status` with a 3s AbortController timeout.
 - `CredentialStore` — `{ set, get, unset }`; `FileCredentialStore` is the 0600 fallback.
 
