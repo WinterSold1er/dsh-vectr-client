@@ -18,7 +18,9 @@
  */
 
 import { spawn } from 'node:child_process'
-import { homedir } from 'node:os'
+import { randomBytes } from 'node:crypto'
+import { homedir, tmpdir } from 'node:os'
+import { rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -537,11 +539,21 @@ export function buildCodebaseDeps(
   }
   const sshRunner: SshRunner = (args, auth) => {
     if (auth?.password !== undefined) {
-      // Password-auth hosts: feed the password through sshpass and force
-      // password-only auth. Requires `sshpass` on the host PATH (documented in
-      // README). Key-auth hosts (auth absent) run plain `ssh`.
-      return spawnRunner('sshpass', ['-p', auth.password, 'ssh',
+      // Password-auth hosts: feed the password to sshpass via a 0600 temp file
+      // (`-f`) so the plaintext never lands in argv (visible in `ps` /proc) or
+      // the process environment. The file is unlinked once the ssh process has
+      // exited (success or failure); the file is written before spawn so sshpass
+      // can read it at startup. Key-auth hosts (auth absent) run plain `ssh`.
+      const passFile = join(tmpdir(), `vectr-sshpass-${process.pid}-${randomBytes(6).toString('hex')}`)
+      writeFileSync(passFile, auth.password, { mode: 0o600 })
+      const handle = spawnRunner('sshpass', ['-f', passFile,
         '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...args])
+      void handle.promise.finally(() => {
+        try { rmSync(passFile) } catch {
+          // best-effort cleanup; a stale 0600 temp file only holds a password.
+        }
+      })
+      return handle
     }
     return spawnRunner('ssh', args)
   }
