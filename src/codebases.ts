@@ -479,11 +479,11 @@ async function createCodebaseCore(
     )
   }
   // 5) open the tunnel; pick the first free local port in the reserved range.
-  const localPort = await findFreePort(8760, 8799, inProgressLocalPorts)
+  const localPort = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, inProgressLocalPorts)
   if (localPort === undefined) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
-    throw new Error('no free local tunnel port in range 8760-8799')
+    throw new Error(`no free local tunnel port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`)
   }
   // Reserve the port for the duration of this create so a concurrent create in
   // the same process cannot probe-and-bind the same port (TOCTOU between
@@ -829,7 +829,7 @@ async function healTunnelOnce(
   // one and record it so every consumer sees the new endpoint.
   let localPort = entry.localPort
   if (localPort === undefined || await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS)) {
-    const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, localPort !== undefined ? new Set([localPort]) : undefined)
+    const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, new Set([...inProgressLocalPorts, ...(localPort !== undefined ? [localPort] : [])]))
     if (fresh === undefined) {
       const msg = `tunnel down: no free local port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`
       downgrade(metaPath, entry, msg)
