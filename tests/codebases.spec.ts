@@ -145,7 +145,6 @@ describe('create local', () => {
       spawnRunner: makeSpawnRunner(scripts),
       sshRunner: makeSshRunner([]),
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const spec: CodebaseSpec = { type: 'local', path: '/work', slug: 'alpha' }
     const entry = await createCodebase(deps, metaPath, spec)
@@ -163,7 +162,6 @@ describe('create local', () => {
       spawnRunner: makeSpawnRunner(scripts),
       sshRunner: makeSshRunner([]),
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'x' }))
       .rejects.toThrow(/exit 1/)
@@ -178,7 +176,6 @@ describe('create local', () => {
       spawnRunner: makeSpawnRunner(scripts),
       sshRunner: makeSshRunner([]),
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'x' }))
       .rejects.toThrow(/failed status/)
@@ -194,7 +191,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'r' }))
       .rejects.toThrow(/cannot reach/)
@@ -209,7 +205,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     await expect(createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'r' }))
       .rejects.toThrow(/install vectr/)
@@ -229,7 +224,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: creds,
-      instancesPath: '',
     }
     const spec: CodebaseSpec = { type: 'remote', path: '/w', host: 'h', slug: 'r', auth: 'password', password: 'secret123' }
     const entry = await createCodebase(deps, metaPath, spec)
@@ -273,7 +267,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5' })
     expect(entry.remotePort).toBe(8762) // from instances.json, overrides stdout 9999
@@ -303,7 +296,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'p5fb' })
     // cat failed -> resolveRemotePort returns undefined -> falls back to the
@@ -332,7 +324,6 @@ describe('create remote', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry = await createCodebase(deps, metaPath, { type: 'remote', path: '/w', host: 'h', slug: 'retry' })
     expect(checkCalls).toBeGreaterThanOrEqual(2) // retried after the first failure
@@ -351,7 +342,6 @@ describe('delete', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry: CodebaseEntry = {
       id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
@@ -374,7 +364,6 @@ describe('delete', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry: CodebaseEntry = {
       id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
@@ -397,7 +386,6 @@ describe('delete', () => {
       spawnRunner: makeSpawnRunner(new Map()),
       sshRunner: ssh,
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry: CodebaseEntry = {
       id: 'r', slug: 'r', type: 'remote', path: '/w', host: 'h', serverName: 'vectr_r',
@@ -425,7 +413,6 @@ describe('delete', () => {
       spawnRunner: capturingSpawn,
       sshRunner: makeSshRunner([]),
       credStore: makeCredStore(),
-      instancesPath: '',
     }
     const entry: CodebaseEntry = {
       id: 'a', slug: 'a', type: 'local', path: '/w', serverName: 'vectr_a', localPort: 8731, status: 'up',
@@ -475,7 +462,7 @@ describe('test', () => {
 describe('serverName validation + uniqueness', () => {
   it('rejects invalid slug', async () => {
     const deps: CodebaseDeps = {
-      spawnRunner: makeSpawnRunner(new Map()), sshRunner: makeSshRunner([]), credStore: makeCredStore(), instancesPath: '',
+      spawnRunner: makeSpawnRunner(new Map()), sshRunner: makeSshRunner([]), credStore: makeCredStore(),
     }
     await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'bad slug!' }))
       .rejects.toThrow(/invalid slug/)
@@ -486,7 +473,7 @@ describe('serverName validation + uniqueness', () => {
       ['vectr', { command: 'vectr', args: [], code: 0, stdout: JSON.stringify({ status: 'ok', port: 8731 }), stderr: '' }],
     ])
     const deps: CodebaseDeps = {
-      spawnRunner: makeSpawnRunner(scripts), sshRunner: makeSshRunner([]), credStore: makeCredStore(), instancesPath: '',
+      spawnRunner: makeSpawnRunner(scripts), sshRunner: makeSshRunner([]), credStore: makeCredStore(),
     }
     await createCodebase(deps, metaPath, { type: 'local', path: '/w', slug: 'dup' })
     await expect(createCodebase(deps, metaPath, { type: 'local', path: '/w2', slug: 'dup' }))

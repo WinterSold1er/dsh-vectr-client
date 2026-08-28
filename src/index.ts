@@ -529,7 +529,6 @@ export function buildCodebaseDeps(
     spawnRunner: SpawnRunner
     sshRunner: SshRunner
     credStore: CredentialStore
-    instancesPath: string
   } {
   const spawnRunner: SpawnRunner = (command, args) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -587,7 +586,6 @@ export function buildCodebaseDeps(
     spawnRunner,
     sshRunner,
     credStore,
-    instancesPath: DEFAULT_INSTANCES_FILE,
   }
 }
 

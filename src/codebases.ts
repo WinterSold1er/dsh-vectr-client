@@ -122,8 +122,6 @@ export interface CodebaseDeps {
   sshRunner: SshRunner
   /** Secret store. */
   credStore: CredentialStore
-  /** Path of the vectr daemon registry (passed through; not read here). */
-  instancesPath: string
 }
 
 /** Validation regex for a slug (also used to derive `serverName`). */
