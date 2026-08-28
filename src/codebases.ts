@@ -16,9 +16,19 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join } from 'node:path'
 import { isPortListening } from './probe'
 
-/** Default TCP budget for tunnel-liveness probes (ms). Below the known ssh
- * `-O check` latency so a dead master is judged down fast. */
+/** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
+ * local port (ms) — used by `ensureTunnelUp` purely to decide
+ * reuse-vs-reallocate of `localPort`. This is NOT the ssh control-master
+ * liveness path: `ssh -O check` (the authoritative up/down signal) has its own
+ * `-o ConnectTimeout=5` and is independent of this budget. */
 export const DEFAULT_TUNNEL_PROBE_MS = 800
+
+/** Reserved local tunnel-bind port range (inclusive). Both `createCodebase` and
+ * `ensureTunnelUp` allocate from this same window so the forwarded
+ * Streamable-HTTP endpoints stay in one predictable band. Shared as a constant
+ * so the two call sites cannot drift apart. */
+export const TUNNEL_PORT_MIN = 8760
+export const TUNNEL_PORT_MAX = 8799
 
 /** Discriminant for where a codebase's vectr daemon runs. */
 export type CodebaseType = 'local' | 'remote'
@@ -159,6 +169,15 @@ const createLocks = new Map<string, Promise<CodebaseEntry>>()
 const inProgressLocalPorts = new Set<number>()
 
 /**
+ * Per-slug self-heal locks. A second concurrent `ensureTunnelUp` for the same
+ * slug awaits the in-flight one and returns its result, so a startup
+ * `void ensureTunnelUp` and a user-initiated `testCodebase` heal racing on the
+ * same slug cannot both reopen the tunnel and collide on the bound `localPort`
+ * (EADDRINUSE / ctl-exists -> spurious `'error'`). See {@link ensureTunnelUp}.
+ */
+const healLocks = new Map<string, Promise<EnsureTunnelResult>>()
+
+/**
  * Derive the MCP server name from a slug.
  * @param slug - the codebase slug.
  * @returns `vectr_<slug>`.
@@ -243,7 +262,7 @@ export function saveCodebases(metaPath: string, list: CodebaseEntry[]): void {
  * @param max - last candidate port (inclusive).
  * @returns the first free port, or `undefined` when none are free.
  */
-export async function findFreePort(min = 8760, max = 8799, exclude?: Set<number>): Promise<number | undefined> {
+export async function findFreePort(min = TUNNEL_PORT_MIN, max = TUNNEL_PORT_MAX, exclude?: Set<number>): Promise<number | undefined> {
   const { createServer } = await import('node:net')
   for (let port = min; port <= max; port++) {
     if (exclude?.has(port)) continue
@@ -476,7 +495,7 @@ async function createCodebaseCore(
   // tunnel down cleanly later (`ssh -O exit`), instead of relying on the
   // unreliable "Process ID <pid>" line that `ssh -f` sometimes prints.
   const ctl = join(tmpdir(), `vectr-tunnel-${spec.slug}-${process.pid}.sock`)
-  const tunnel = ssh(['-f', '-N', '-M', '-S', ctl, '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, spec.host])
+  const tunnel = ssh(['-o', 'ConnectTimeout=5', '-o', 'ExitOnForwardFailure=yes', '-f', '-N', '-M', '-S', ctl, '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, spec.host])
   const tunnelResult = await tunnel.promise
   if (tunnelResult.code !== 0) {
     takenServerNames.delete(serverName)
@@ -492,7 +511,7 @@ async function createCodebaseCore(
   // (see deleteCodebase), so a failed read never orphans the tunnel.
   let tunnelPid: number | undefined
   for (let attempt = 0; attempt < 3; attempt++) {
-    const check = ssh(['-O', 'check', '-S', ctl, spec.host])
+    const check = ssh(['-o', 'ConnectTimeout=5', '-O', 'check', '-S', ctl, spec.host])
     const checkResult = await check.promise
     const pid = tunnelPidFrom(checkResult.stdout)
     if (pid !== undefined) {
@@ -662,8 +681,9 @@ export async function deleteCodebase(
  * Result of probing a remote codebase's SSH tunnel for liveness.
  */
 export interface TunnelHealth {
-  /** `true` when the ssh master is alive (control socket answers, or the
-   * forwarded local port accepts a TCP connection). */
+  /** `true` only when the ssh control master answers `ssh -O check` (the
+   * AUTHORITATIVE liveness signal). The forwarded local port's TCP state is
+   * deliberately NOT a fallback here — see {@link probeTunnel}. */
   alive: boolean
   /** Why the tunnel is judged dead (present only when `alive === false`). */
   reason?: string
@@ -700,7 +720,7 @@ export async function probeTunnel(entry: CodebaseEntry, deps: CodebaseDeps): Pro
   // Authoritative: ask the ssh control master via its socket. A missing socket
   // (the real vnm_gui case) makes ssh exit non-zero -> tunnel down.
   if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
-    const check = deps.sshRunner(['-O', 'check', '-S', entry.tunnelCtl, entry.host])
+    const check = deps.sshRunner(['-o', 'ConnectTimeout=5', '-O', 'check', '-S', entry.tunnelCtl, entry.host])
     const result = await check.promise
     if (result.code === 0) return { alive: true }
   }
@@ -754,7 +774,32 @@ export async function ensureTunnelUp(
   entry: CodebaseEntry,
 ): Promise<EnsureTunnelResult> {
   if (entry.type !== 'remote') return { entry, healed: false }
+  // Serialize concurrent heals for the same slug (A1): a second in-flight heal
+  // is awaited and its result shared, so the loser gets the winner's
+  // already-up entry instead of colliding on the bound localPort.
+  const inFlight = healLocks.get(entry.slug)
+  if (inFlight !== undefined) return inFlight
+  const run = (async () => {
+    try {
+      return await healTunnelOnce(deps, metaPath, entry)
+    } finally {
+      healLocks.delete(entry.slug)
+    }
+  })()
+  healLocks.set(entry.slug, run)
+  return run
+}
 
+/**
+ * Bring a single dead tunnel back up. No concurrency guard — callers go through
+ * {@link ensureTunnelUp}, which serializes by slug. This worker does probe +
+ * reopen + persist.
+ */
+async function healTunnelOnce(
+  deps: CodebaseDeps,
+  metaPath: string,
+  entry: CodebaseEntry,
+): Promise<EnsureTunnelResult> {
   const health = await probeTunnel(entry, deps)
   if (health.alive) return { entry, healed: false }
 
@@ -768,67 +813,104 @@ export async function ensureTunnelUp(
 
   if (entry.remotePort === undefined) {
     const msg = 'tunnel down: no remotePort recorded; cannot reopen forward'
-    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
-    persist(metaPath, downgraded)
-    return { entry: downgraded, healed: false, error: msg }
+    downgrade(metaPath, entry, msg)
+    return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
+  }
+
+  // B1: a tunnel forwards to a host; an undefined host would hand ssh a bogus
+  // target and fail the reopen with a cryptic error instead of a clear one.
+  if (entry.host === undefined) {
+    const msg = 'tunnel down: no host recorded; cannot reopen forward'
+    downgrade(metaPath, entry, msg)
+    return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
   }
 
   // Reuse the existing localPort when still free; otherwise allocate a fresh
   // one and record it so every consumer sees the new endpoint.
   let localPort = entry.localPort
   if (localPort === undefined || await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS)) {
-    const fresh = await findFreePort(8760, 8799, localPort !== undefined ? new Set([localPort]) : undefined)
+    const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, localPort !== undefined ? new Set([localPort]) : undefined)
     if (fresh === undefined) {
-      const msg = 'tunnel down: no free local port in range 8760-8799'
-      const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
-      persist(metaPath, downgraded)
-      return { entry: downgraded, healed: false, error: msg }
+      const msg = `tunnel down: no free local port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`
+      downgrade(metaPath, entry, msg)
+      return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
     }
     localPort = fresh
   }
 
-  const ctl = entry.tunnelCtl ?? join(tmpdir(), `vectr-tunnel-${entry.slug}-${process.pid}.sock`)
-  const host = entry.host ?? ''
-  const tunnel = ssh(['-f', '-N', '-M', '-S', ctl, '-L', `127.0.0.1:${localPort}:127.0.0.1:${entry.remotePort}`, host])
-  const result = await tunnel.promise
-  if (result.code !== 0) {
-    const msg = `tunnel down: ssh tunnel open failed (exit ${result.code}): ${result.stderr || result.stdout}`
-    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
-    persist(metaPath, downgraded)
-    return { entry: downgraded, healed: false, error: msg }
-  }
+  // Reserve the port for the duration of the reopen so a concurrent
+  // heal/create in this process cannot probe-and-bind the same port (A1, TOCTOU
+  // guard). Cleared in finally even when a downgrade path returns early.
+  inProgressLocalPorts.add(localPort)
+  try {
+    const ctl = entry.tunnelCtl ?? join(tmpdir(), `vectr-tunnel-${entry.slug}-${process.pid}.sock`)
+    const host = entry.host
+    // A2: bound the reopen with ConnectTimeout (unreachable host fails fast
+    // instead of hanging /test for minutes) and ExitOnForwardFailure (a failed
+    // local bind surfaces as a non-zero exit rather than a silent dead master).
+    const tunnel = ssh([
+      '-o', 'ConnectTimeout=5', '-o', 'ExitOnForwardFailure=yes',
+      '-f', '-N', '-M', '-S', ctl,
+      '-L', `127.0.0.1:${localPort}:127.0.0.1:${entry.remotePort}`, host,
+    ])
+    const result = await tunnel.promise
+    if (result.code !== 0) {
+      const msg = `tunnel down: ssh tunnel open failed (exit ${result.code}): ${result.stderr || result.stdout}`
+      downgrade(metaPath, entry, msg)
+      return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
+    }
 
-  // Confirm the master came up (it may not have finished the handshake the
-  // instant `ssh -f` returned), capturing its PID for clean teardown later.
-  let alive = false
-  let tunnelPid: number | undefined
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const check = ssh(['-O', 'check', '-S', ctl, host])
-    const checkResult = await check.promise
-    const pid = tunnelPidFrom(checkResult.stdout)
-    if (pid !== undefined) { tunnelPid = pid }
-    if (checkResult.code === 0) { alive = true; break }
-    if (attempt < 2) await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 50 * (attempt + 1)))
-  }
-  if (!alive) {
-    const msg = 'tunnel down: ssh master did not come up after reopen'
-    const downgraded: CodebaseEntry = { ...entry, status: 'error', error: msg }
-    persist(metaPath, downgraded)
-    return { entry: downgraded, healed: false, error: msg }
-  }
+    // Confirm the master came up (it may not have finished the handshake the
+    // instant `ssh -f` returned), capturing its PID for clean teardown later.
+    let alive = false
+    let tunnelPid: number | undefined
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // A2: the confirm `ssh -O check` also gets ConnectTimeout so a dead
+      // control socket fails fast instead of blocking.
+      const check = ssh(['-o', 'ConnectTimeout=5', '-O', 'check', '-S', ctl, host])
+      const checkResult = await check.promise
+      const pid = tunnelPidFrom(checkResult.stdout)
+      if (pid !== undefined) { tunnelPid = pid }
+      if (checkResult.code === 0) { alive = true; break }
+      if (attempt < 2) await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 50 * (attempt + 1)))
+    }
+    if (!alive) {
+      const msg = 'tunnel down: ssh master did not come up after reopen'
+      downgrade(metaPath, entry, msg)
+      return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
+    }
 
-  // Drop any prior downgrade reason now that the tunnel is up again.
-  const { error: _omit, ...entryWithoutError } = entry
-  void _omit
-  const updated: CodebaseEntry = {
-    ...entryWithoutError,
-    localPort,
-    tunnelCtl: ctl,
-    status: 'up',
-    ...(tunnelPid !== undefined ? { tunnelPid } : {}),
+    // Drop any prior downgrade reason now that the tunnel is up again.
+    const { error: _omit, ...entryWithoutError } = entry
+    void _omit
+    const updated: CodebaseEntry = {
+      ...entryWithoutError,
+      localPort,
+      tunnelCtl: ctl,
+      status: 'up',
+      ...(tunnelPid !== undefined ? { tunnelPid } : {}),
+    }
+    persist(metaPath, updated)
+    return { entry: updated, healed: true }
+  } finally {
+    inProgressLocalPorts.delete(localPort)
   }
-  persist(metaPath, updated)
-  return { entry: updated, healed: true }
+}
+
+/**
+ * Downgrade a persisted entry's `status` to `'error'` with a diagnostic, but
+ * NEVER let a persistence failure mask the real diagnostic (B3). The reopen
+ * already failed; a `saveCodebases` throw must not turn the caller's
+ * `try/catch` (testCodebase route has none) into a bare 500. We swallow the
+ * persist error and still return the in-memory downgraded entry + diagnostic.
+ */
+function downgrade(metaPath: string, entry: CodebaseEntry, msg: string): void {
+  try {
+    persist(metaPath, { ...entry, status: 'error', error: msg })
+  } catch {
+    // Persistence failed, but the diagnostic is the return value's `error`;
+    // do not rethrow (B3).
+  }
 }
 
 /** Options for {@link testCodebase}. */

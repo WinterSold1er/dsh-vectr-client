@@ -8,7 +8,7 @@
  * findFreePort reallocate" branch is covered deterministically.
  */
 import { createServer, type Server } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, chmod, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -261,5 +261,76 @@ describe('testCodebase heal (问题1B route path)', () => {
     const entry = remoteEntry({ localPort: undefined })
     const result = await testCodebase(entry)
     expect(result).toEqual({ ok: false, error: 'no local port configured' })
+  })
+})
+
+describe('ensureTunnelUp defect regressions', () => {
+  it('A2: reopen argv carries ConnectTimeout=5 + ExitOnForwardFailure=yes', async () => {
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 1 })
+    const entry = remoteEntry()
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+    expect(res.healed).toBe(true)
+    const open = ssh.opens[0]
+    expect(open).toContain('ConnectTimeout=5')
+    expect(open).toContain('ExitOnForwardFailure=yes')
+    // confirm `ssh -O check` also carries ConnectTimeout=5
+    const checkCall = ssh.calls.find((c) => c.includes('-O') && c.includes('check'))
+    expect(checkCall).toBeDefined()
+    expect(checkCall).toContain('ConnectTimeout=5')
+  })
+
+  it('A1: two concurrent heals of the same slug open the tunnel only once', async () => {
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 42 })
+    const entry = remoteEntry() // localPort 8760 free in test env
+    saveCodebases(metaPath, [entry])
+    const [a, b] = await Promise.all([
+      ensureTunnelUp(deps(ssh), metaPath, entry),
+      ensureTunnelUp(deps(ssh), metaPath, entry),
+    ])
+    // Only one reopen was ever attempted (the loser shared the winner's result).
+    expect(ssh.opens).toHaveLength(1)
+    expect(a.healed).toBe(true)
+    expect(a.error).toBeUndefined()
+    expect(b.healed).toBe(true)
+    expect(b.error).toBeUndefined()
+    const meta = loadCodebases(metaPath)
+    expect(meta[0]?.status).toBe('up')
+  })
+
+  it('reopen succeeds but master never comes up -> diagnostic, status error', async () => {
+    // Reopen exits 0, but all 3 `ssh -O check` confirms are non-zero.
+    const ssh = makeSsh({ openCode: 0, checkSequence: [1, 1, 1] })
+    const entry = remoteEntry()
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+    expect(res.healed).toBe(false)
+    expect(res.error).toBe('tunnel down: ssh master did not come up after reopen')
+    expect(res.entry.status).toBe('error')
+    expect(loadCodebases(metaPath)[0]?.status).toBe('error')
+  })
+
+  it('B3: persist failure (read-only dir) returns diagnostic instead of throwing', async () => {
+    const roDir = join(dir, 'ro')
+    await mkdir(roDir, { recursive: true })
+    await chmod(roDir, 0o444)
+    const roMeta = join(roDir, 'codebases.json')
+    const ssh = makeSsh()
+    // remotePort missing -> downgrade path that must survive a persist throw.
+    const entry = remoteEntry({ remotePort: undefined })
+    let threw = false
+    let res
+    try {
+      res = await ensureTunnelUp(deps(ssh), roMeta, entry)
+    } catch (err) {
+      threw = true
+      // eslint-disable-next-line no-console
+      console.error(err)
+    } finally {
+      await chmod(roDir, 0o755) // restore so afterEach can rm
+    }
+    expect(threw).toBe(false)
+    expect(res?.error).toMatch(/^tunnel down:/)
+    expect(res?.entry.status).toBe('error')
   })
 })

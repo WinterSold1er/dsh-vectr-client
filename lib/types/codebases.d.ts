@@ -10,9 +10,18 @@
  *
  * @module dsh-vectr-client/codebases
  */
-/** Default TCP budget for tunnel-liveness probes (ms). Below the known ssh
- * `-O check` latency so a dead master is judged down fast. */
+/** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
+ * local port (ms) — used by `ensureTunnelUp` purely to decide
+ * reuse-vs-reallocate of `localPort`. This is NOT the ssh control-master
+ * liveness path: `ssh -O check` (the authoritative up/down signal) has its own
+ * `-o ConnectTimeout=5` and is independent of this budget. */
 export declare const DEFAULT_TUNNEL_PROBE_MS = 800;
+/** Reserved local tunnel-bind port range (inclusive). Both `createCodebase` and
+ * `ensureTunnelUp` allocate from this same window so the forwarded
+ * Streamable-HTTP endpoints stay in one predictable band. Shared as a constant
+ * so the two call sites cannot drift apart. */
+export declare const TUNNEL_PORT_MIN = 8760;
+export declare const TUNNEL_PORT_MAX = 8799;
 /** Discriminant for where a codebase's vectr daemon runs. */
 export type CodebaseType = 'local' | 'remote';
 /** How a remote host authenticates (informational; the secret lives in the store). */
@@ -175,8 +184,9 @@ export declare function deleteCodebase(deps: CodebaseDeps, metaPath: string, ent
  * Result of probing a remote codebase's SSH tunnel for liveness.
  */
 export interface TunnelHealth {
-    /** `true` when the ssh master is alive (control socket answers, or the
-     * forwarded local port accepts a TCP connection). */
+    /** `true` only when the ssh control master answers `ssh -O check` (the
+     * AUTHORITATIVE liveness signal). The forwarded local port's TCP state is
+     * deliberately NOT a fallback here — see {@link probeTunnel}. */
     alive: boolean;
     /** Why the tunnel is judged dead (present only when `alive === false`). */
     reason?: string;
