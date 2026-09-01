@@ -22,10 +22,11 @@ import { randomBytes } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
   resolveReconnectPolicy,
   startConnection,
@@ -98,6 +99,11 @@ function stripSecret(entry: CodebaseEntry): CodebaseEntry {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     webServer: WebServerLike
+    /** Provided by `@deepseek-ai/dsh-system-prompt` at host runtime (same
+     * optional-augmentation pattern as `webServer` above). Declared here so
+     * `agent.ctx.systemPrompt.section(...)` type-checks without a build
+     * dependency on the system-prompt package. */
+    systemPrompt: SystemPrompt
   }
 }
 
@@ -197,6 +203,18 @@ export const Config: z<Config> = z.object({
 })
 
 /**
+ * System-prompt section contributed to each agent when its vectr daemon is
+ * verified alive: nudges the agent to use the vectr MCP tools for code queries
+ * instead of blind file reads. Static English text (matches the official
+ * prompt style). Order 95 sits after the deployment persona (0) and before the
+ * tool-guidance band (100–199); see `@deepseek-ai/dsh-system-prompt`.
+ */
+export const VECTR_GUIDANCE_SECTION_NAME = 'vectr:mcp-guidance'
+export const VECTR_GUIDANCE_SECTION_ORDER = 95
+export const VECTR_GUIDANCE_SECTION_TEXT =
+  'When answering code-query or codebase-navigation questions, prefer the vectr MCP tools (mcp__vectr__*) over blind file reads. Use them to search, retrieve, and reason over the indexed workspace.'
+
+/**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
  * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
  * These were migrated out of this file; it re-exports them above and only
@@ -208,6 +226,7 @@ export const Config: z<Config> = z.object({
  * `agent/created` or seed without a Host reload.
  * @param ctx - plugin context (the loader fiber) providing agents and logger.
  * @param handles - live connection handles keyed by agent.
+ * @param promptFibers - live system-prompt injection fibers keyed by agent.
  * @param instancesPath - absolute path of the vectr daemon registry.
  * @param config - resolved plugin configuration.
  * @param agent - the agent whose workspace resolves the daemon port.
@@ -215,6 +234,7 @@ export const Config: z<Config> = z.object({
 export function install(
   ctx: Context,
   handles: Map<Agent, ConnectionHandle>,
+  promptFibers: Map<Agent, Fiber>,
   instancesPath: string,
   config: Required<Config>,
   agent: Agent,
@@ -297,6 +317,22 @@ export function install(
       }
     })
     handles.set(agent, conn)
+    // (a) Inject the vectr MCP usage-guidance section into THIS agent's scope
+    // ONLY now that the daemon is verified alive (same gate as the tool bind).
+    // `agent.ctx.inject(['systemPrompt'], ...)` opens a scope-targeted fiber so
+    // the section shadows only for this agent; its disposer is the fiber itself.
+    // The early `handles.has(agent)` guard at the top already prevents a
+    // duplicate same-name registration (which would throw).
+    if (!promptFibers.has(agent)) {
+      const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
+        scope.systemPrompt.section({
+          name: VECTR_GUIDANCE_SECTION_NAME,
+          order: VECTR_GUIDANCE_SECTION_ORDER,
+          text: VECTR_GUIDANCE_SECTION_TEXT,
+        })
+      })
+      promptFibers.set(agent, fiber)
+    }
   })()
 
   // Feature B: also bind every persisted codebase whose status is 'up'. These
@@ -463,19 +499,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
   }
   const handles = new Map<Agent, ConnectionHandle>()
+  // Per-agent system-prompt injection fibers (feature A-2): the guidance
+  // section is contributed only when the daemon is verified alive, and disposed
+  // together with the agent. Keyed separately from `handles` because the fiber
+  // opens a dependency scope rather than an MCP connection.
+  const promptFibers = new Map<Agent, Fiber>()
 
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
   // metadata path is passed so install also binds up codebases.
-  for (const agent of ctx.agents.list()) install(ctx, handles, instancesPath, resolved, agent, codebasesPath)
-  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, instancesPath, resolved, agent, codebasesPath) })
+  for (const agent of ctx.agents.list()) install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath)
+  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath) })
   ctx.on('agent/disposed', ({ agent }) => {
     void handles.get(agent)?.dispose()
     handles.delete(agent)
+    const fiber = promptFibers.get(agent)
+    if (fiber !== undefined) {
+      void fiber.dispose().catch((error: unknown) => {
+        // A failed prompt-fiber disposal must not veto the rest of agent
+        // teardown; log and continue (same posture as the connection dispose).
+        ctx.logger.warn(`vectr-client: prompt-section cleanup failed for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      promptFibers.delete(agent)
+    }
   })
   ctx.effect(() => async () => {
     for (const conn of handles.values()) void conn.dispose()
     handles.clear()
+    for (const fiber of promptFibers.values()) void fiber.dispose().catch(() => {})
+    promptFibers.clear()
     // Kill any surviving ssh tunnels recorded in the codebase metadata so a
     // host teardown does not leave orphaned port-forward processes.
     //

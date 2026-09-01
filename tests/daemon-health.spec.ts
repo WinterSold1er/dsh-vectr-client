@@ -103,6 +103,7 @@ function portOf(server: Server): number {
 
 const roots: string[] = []
 const handles = new Map<Agent, unknown>()
+const promptFibers = new Map<Agent, unknown>()
 let statusServer: Server
 let statusPort: number
 
@@ -119,6 +120,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
   startConnectionMock.mockClear()
   handles.clear()
+  promptFibers.clear()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -186,7 +188,7 @@ describe('install liveness gate (D-2 / R3)', () => {
     })
 
     const agent = makeAgent('dead-pid-agent', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -221,7 +223,7 @@ describe('install liveness gate (D-2 / R3)', () => {
     const ctx = new Context()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const agent = makeAgent('dead-port-agent', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -251,7 +253,7 @@ describe('install liveness gate (D-2 / R3)', () => {
     const ctx = new Context()
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
     const agent = makeAgent('alive-pid-agent', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -285,7 +287,7 @@ describe('install liveness gate (D-2 / R3)', () => {
     const warn = vi.spyOn(ctx.logger, 'warn')
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
     const agent = makeAgent('hang-daemon-agent', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -325,7 +327,7 @@ describe('missing session cwd (D-4)', () => {
     const ctx = new Context()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const agent = makeAgent('no-cwd-agent', undefined)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -366,7 +368,7 @@ describe('registry re-read on every call (D-7)', () => {
     const spy = vi.spyOn(process, 'kill').mockImplementation(() => true) // treat pid as alive
 
     const agent1 = makeAgent('reread-agent-1', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -385,7 +387,7 @@ describe('registry re-read on every call (D-7)', () => {
     // Rewrite the registry with a NEW port (simulating a daemon restart).
     await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, p2, 1) }))
     const agent2 = makeAgent('reread-agent-2', cwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -431,7 +433,7 @@ describe('subagent / multi-agent scenario (D-2 / R4)', () => {
 
     const parent = makeAgent('parent-agent', parentCwd)
     const child = makeAgent('child-agent', childCwd)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
@@ -439,7 +441,7 @@ describe('subagent / multi-agent scenario (D-2 / R4)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, parent)
-    install(ctx, handles as Map<Agent, never>, file, {
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,

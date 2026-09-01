@@ -79,6 +79,7 @@ function startStatusServer(): Promise<Server> {
 
 const roots: string[] = []
 const handles = new Map<Agent, unknown>()
+const promptFibers = new Map<Agent, unknown>()
 let statusServer: Server
 let statusPort: number
 
@@ -95,6 +96,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
   startConnectionMock.mockClear()
   handles.clear()
+  promptFibers.clear()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -131,7 +133,7 @@ describe('install connection-failure routing (H2) + reconnect policy (H5)', () =
     // about the failure routing / reconnect wiring, not the liveness gate.
     vi.spyOn(process, 'kill').mockImplementation(() => true)
 
-    install(ctx, handles as Map<Agent, never>, file, requiredConfig(file, join(dir, 'none.json')), agent)
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, requiredConfig(file, join(dir, 'none.json')), agent)
     await vi.waitFor(() => expect(startConnectionMock).toHaveBeenCalled(), { timeout: 5000 })
     // The error outcome is delivered via conn.ready.then; wait for it.
     await vi.waitFor(() => expect(warn).toHaveBeenCalled(), { timeout: 5000 })
@@ -155,7 +157,7 @@ describe('install connection-failure routing (H2) + reconnect policy (H5)', () =
     const config = requiredConfig(file, join(dir, 'none.json'))
     vi.spyOn(process, 'kill').mockImplementation(() => true)
 
-    install(ctx, handles as Map<Agent, never>, file, config, agent)
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, config, agent)
     await vi.waitFor(() => expect(startConnectionMock).toHaveBeenCalled(), { timeout: 5000 })
 
     const call = startConnectionMock.mock.calls[0]
