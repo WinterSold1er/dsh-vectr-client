@@ -39,6 +39,7 @@ import {
 // lost at build time (rc.2 constraint; revisit if upstream adds root exports).
 import { scanWorkspaces, triggerIndex } from './workspaces'
 import {
+  cleanupOrphanedTunnelsForCodebases,
   cleanupStaleTunnelSockets,
   createCodebase,
   deleteCodebase,
@@ -153,6 +154,29 @@ export const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5_000
 
 /** Default TCP port-listening probe budget (ms). */
 export const DEFAULT_DAEMON_TCP_TIMEOUT_MS = DEFAULT_TCP_TIMEOUT_MS
+
+/** (b) Minimum interval between startup-time heal attempts for the same slug.
+ * Prevents a persistently-unreachable host from being hammered on every host
+ * restart while still leaving room for transient blips to recover. */
+export const STARTUP_HEAL_COOLDOWN_MS = 30_000
+
+/** Per-slug timestamp of the last startup-heal attempt. Process-local — a
+ * restart resets the map (one fresh attempt per slug per host lifetime). */
+const startupHealCooldown = new Map<string, number>()
+
+/** (b) Startup-heal scope: which persisted entries get an automatic
+ * `ensureTunnelUp` attempt at host startup. `up` keeps its legacy behavior;
+ * `down` and `error` are the previously-deadlocked states that were only
+ * surfaced to the user and never automatically recovered. `local` entries
+ * have no tunnel to heal. */
+export function startupHealEligible(
+  entry: Pick<CodebaseEntry, 'type' | 'status'>,
+): boolean {
+  return (
+    entry.type === 'remote' &&
+    (entry.status === 'up' || entry.status === 'down' || entry.status === 'error')
+  )
+}
 
 const Reconnect: z<ReconnectConfig> = z.object({
   enabled: z.boolean().default(false),
@@ -381,14 +405,21 @@ export function apply(ctx: Context, config: Config = {}): void {
   const instancesPath = isAbsolute(resolved.instancesPath)
     ? resolved.instancesPath
     : resolve(process.cwd(), resolved.instancesPath)
-  // P6: best-effort cleanup of stale tunnel control sockets from a crashed
-  // prior process before we (re)establish live tunnels.
-  try { cleanupStaleTunnelSockets() } catch {
-    // best-effort startup hygiene; never fatal.
-  }
   const codebasesPath = isAbsolute(resolved.codebasesPath)
     ? resolved.codebasesPath
     : resolve(process.cwd(), resolved.codebasesPath)
+  // P6: best-effort cleanup of stale tunnel control sockets from a crashed
+  // prior process before we (re)establish live tunnels. (a) Narrow the scan
+  // to OUR codebases' slug prefixes so a host restart with a different pid
+  // does not touch unrelated plugins/users sharing tmpdir.
+  try {
+    const startupSlugs = loadCodebases(codebasesPath)
+      .filter((e) => e.type === 'remote' && typeof e.slug === 'string')
+      .map((e) => e.slug)
+    cleanupStaleTunnelSockets(undefined, startupSlugs)
+  } catch {
+    // best-effort startup hygiene; never fatal.
+  }
   // 阶段1: idempotently backfill `workspace` + recompute the composite
   // `serverName` on existing meta (no-op once migrated). A2: skip entirely when
   // no registry is present (writing would poison the sticky UNASSIGNED field).
@@ -406,14 +437,27 @@ export function apply(ctx: Context, config: Config = {}): void {
   // endpoint comes back without blocking host startup. Each entry heals
   // independently so one failure cannot block the others. `apply` is sync in the
   // host contract, so this runs concurrently rather than awaited.
+  //
+  // (b) Heal-scope fix: a tunnel persisted as `status: 'error'` (or `'down'`)
+  // was a permanent deadlock — the user-facing route surfaced the diagnostic
+  // but no automatic recovery was ever attempted. Widen the predicate to also
+  // include 'down' and 'error' entries (legacy 'up' behavior preserved),
+  // gated by a per-slug cooldown so a persistently-unreachable host is not
+  // hammered on every host restart.
   try {
     const deps = buildCodebaseDeps(ctx, resolved.secretsPath)
+    const now = Date.now()
     for (const entry of loadCodebases(codebasesPath)) {
-      if (entry.type === 'remote' && entry.status === 'up') {
-        void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
-          ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
-        })
-      }
+      if (!startupHealEligible(entry)) continue
+      // Cooldown: skip if we already attempted this slug too recently. The
+      // timestamp is kept in-process; it does not survive a restart, which is
+      // fine — a fresh process starts with a clean slate and one attempt.
+      const lastAttempt = startupHealCooldown.get(entry.slug)
+      if (lastAttempt !== undefined && now - lastAttempt < STARTUP_HEAL_COOLDOWN_MS) continue
+      startupHealCooldown.set(entry.slug, now)
+      void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
+        ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
+      })
     }
   } catch (err) {
     ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
@@ -429,34 +473,58 @@ export function apply(ctx: Context, config: Config = {}): void {
     void handles.get(agent)?.dispose()
     handles.delete(agent)
   })
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     for (const conn of handles.values()) void conn.dispose()
     handles.clear()
     // Kill any surviving ssh tunnels recorded in the codebase metadata so a
     // host teardown does not leave orphaned port-forward processes.
+    //
+    // First pass: per recorded entry, prefer the recorded control-socket
+    // exit (works even when tunnelPid was never recorded), then best-effort
+    // SIGTERM the recorded PID. If NEITHER could reach the master (no
+    // tunnelCtl, ssh missing, pid recycled), queue the entry for the slug-
+    // prefix fallback so the host teardown does not leak an orphan master
+    // when the host pid has changed.
+    let fallbackNeeded: CodebaseEntry[] = []
     try {
       for (const entry of loadCodebases(codebasesPath)) {
-        if (entry.type === 'remote' && (entry.tunnelPid !== undefined || entry.tunnelCtl !== undefined)) {
-          // Prefer a clean control-socket exit (works even when tunnelPid was
-          // never recorded), then best-effort SIGTERM the recorded PID.
-          if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
-            try {
-              spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host])
-            } catch {
-              // best-effort: control-socket exit unavailable at teardown.
-            }
-          }
-          if (entry.tunnelPid !== undefined) {
-            try {
-              process.kill(entry.tunnelPid, 'SIGTERM')
-            } catch {
-              // tunnel already gone.
-            }
+        if (entry.type !== 'remote') continue
+        const hasRecorded = entry.tunnelPid !== undefined || entry.tunnelCtl !== undefined
+        if (!hasRecorded) continue
+        let recordedOk = false
+        if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
+          try {
+            spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host])
+            recordedOk = true
+          } catch {
+            // best-effort: control-socket exit unavailable at teardown.
           }
         }
+        if (entry.tunnelPid !== undefined) {
+          try {
+            process.kill(entry.tunnelPid, 'SIGTERM')
+            recordedOk = true
+          } catch {
+            // tunnel already gone.
+          }
+        }
+        // (a) Recorded teardown could not reach the master -> sweep tmpdir
+        // for any /tmp/vectr-tunnel-<slug>-*.sock the entry left behind.
+        if (!recordedOk) fallbackNeeded.push(entry)
       }
     } catch {
       // metadata unreadable; nothing to clean up.
+    }
+    // Second pass: slug-prefix fallback for the orphans the recorded path
+    // could not reach. Uses the existing ssh runner via deps so the
+    // password is injected (mirrors deleteCodebase's fallback path).
+    if (fallbackNeeded.length > 0) {
+      try {
+        const teardownDeps = buildCodebaseDeps(ctx, resolved.secretsPath)
+        await cleanupOrphanedTunnelsForCodebases(teardownDeps, fallbackNeeded)
+      } catch {
+        // best-effort; teardown must never throw out of the disposer.
+      }
     }
   }, 'vectr-client.connections')
 
@@ -602,6 +670,7 @@ export function buildCodebaseDeps(
     spawnRunner: SpawnRunner
     sshRunner: SshRunner
     credStore: CredentialStore
+    warn: (message: string) => void
   } {
   const spawnRunner: SpawnRunner = (command, args) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -670,6 +739,11 @@ export function buildCodebaseDeps(
     spawnRunner,
     sshRunner,
     credStore,
+    // (c) warn sink: findFreePort's preferred-port-migration warning surfaces
+    // in the host log instead of being silently swallowed inside the module.
+    warn: (message: string) => {
+      ctx.logger.warn(message)
+    },
   }
 }
 

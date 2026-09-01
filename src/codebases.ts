@@ -143,6 +143,10 @@ export interface CodebaseDeps {
   sshRunner: SshRunner
   /** Secret store. */
   credStore: CredentialStore
+  /** Optional warn sink for observable non-fatal events (e.g. (c) preferred
+   * tunnel-port migration). Injected by the host so this module stays
+   * logger-free; may be absent in tests and direct use. */
+  warn?: (message: string) => void
 }
 
 /** Validation regex for a slug (also used to derive `serverName`). */
@@ -294,10 +298,22 @@ export function saveCodebases(metaPath: string, list: CodebaseEntry[]): void {
  * here we bind the candidate to detect occupancy.
  * @param min - first candidate port (inclusive).
  * @param max - last candidate port (inclusive).
+ * @param exclude - ports to skip (e.g. reserved by an in-flight create / heal).
+ * @param warn - optional warn sink used to surface port migration (c). When the
+ *   preferred `min` port is occupied and a LATER port in the window is
+ *   selected, `warn(message)` is invoked with a self-diagnosing message so the
+ *   migration is visible in the host log. The preferred-port-available case
+ *   never warns (a silent hit would just be noise).
  * @returns the first free port, or `undefined` when none are free.
  */
-export async function findFreePort(min = TUNNEL_PORT_MIN, max = TUNNEL_PORT_MAX, exclude?: Set<number>): Promise<number | undefined> {
+export async function findFreePort(
+  min = TUNNEL_PORT_MIN,
+  max = TUNNEL_PORT_MAX,
+  exclude?: Set<number>,
+  warn?: (message: string) => void,
+): Promise<number | undefined> {
   const { createServer } = await import('node:net')
+  let firstAttempt = true
   for (let port = min; port <= max; port++) {
     if (exclude?.has(port)) continue
     const free = await new Promise<boolean>((resolveFree) => {
@@ -307,7 +323,17 @@ export async function findFreePort(min = TUNNEL_PORT_MIN, max = TUNNEL_PORT_MAX,
         server.close(() => resolveFree(true))
       })
     })
-    if (free) return port
+    if (free) {
+      // (c) Surface port migration only when we skipped the preferred port.
+      if (!firstAttempt && warn !== undefined) {
+        warn(
+          `vectr-client: preferred tunnel port ${min} occupied; using ${port} ` +
+          `(range ${min}-${max}). MCP endpoint URL will reflect the new port.`,
+        )
+      }
+      return port
+    }
+    firstAttempt = false
   }
   return undefined
 }
@@ -523,7 +549,7 @@ async function createCodebaseCore(
     )
   }
   // 5) open the tunnel; pick the first free local port in the reserved range.
-  const localPort = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, inProgressLocalPorts)
+  const localPort = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, inProgressLocalPorts, deps.warn)
   if (localPort === undefined) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
@@ -684,9 +710,11 @@ export async function deleteCodebase(
     //    best-effort fallback for entries built by older revisions that stored no
     //    socket. The tunnel is a transport only — its teardown is independent of
     //    the remote stop below, which opens its OWN ssh connection to the host.
+    let recordedTeardownOk = false
     if (entry.tunnelCtl !== undefined) {
       try {
         await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
+        recordedTeardownOk = true
       } catch {
         // control-socket exit failed; fall through to the PID kill below.
       }
@@ -694,9 +722,19 @@ export async function deleteCodebase(
     if (entry.tunnelPid !== undefined) {
       try {
         process.kill(entry.tunnelPid, 'SIGTERM')
+        recordedTeardownOk = true
       } catch {
         // tunnel already gone; ignore.
       }
+    }
+    // (d) Slug-prefix fallback: when there is no recorded ctl / pid (legacy
+    // entries, or the recorded teardown above failed silently), an orphaned
+    // ssh master whose socket matches `vectr-tunnel-<slug>-*.sock` may still
+    // be alive on this host. Sweep tmpdir for prefix-matched sockets, ask
+    // ssh to exit each control master cleanly, and unlink the socket file
+    // (safeRemove keeps us under tmpdir). Best-effort: every step is caught.
+    if (!recordedTeardownOk) {
+      await cleanupOrphanedTunnelBySlug(deps, entry)
     }
     // 2) Stop the REMOTE daemon. It listens on `entry.remotePort` (the port the
     //    conan daemon actually binds), NOT `entry.localPort` (our local tunnel
@@ -715,6 +753,78 @@ export async function deleteCodebase(
   saveCodebases(metaPath, list)
   takenServerNames.delete(entry.serverName)
   if (entry.credentialRef !== undefined) await deps.credStore.unset(entry.credentialRef)
+}
+
+/**
+ * (d) Fallback orphan cleanup used by {@link deleteCodebase} when no recorded
+ * `tunnelCtl` / `tunnelPid` exists OR the recorded teardown failed silently.
+ * Scans tmpdir for any `vectr-tunnel-<slug>-*.sock` and asks ssh to exit each
+ * control master cleanly via `ssh -O exit -S <sock> <host>`. When ssh itself
+ * is unavailable, the socket file is simply unlinked (the underlying master
+ * will not answer to `-O exit` either way). Every error is swallowed — this is
+ * a best-effort hygiene step that must not veto the delete.
+ *
+ * Exported as `cleanupOrphanedTunnelsForCodebases` so the effect disposer in
+ * `index.ts` can sweep the same set of orphans when the host pid changes and
+ * the recorded `tunnelPid` / `tunnelCtl` no longer points at a live master.
+ * Entries that are not `type === 'remote'` or whose slug is empty are
+ * silently skipped.
+ */
+export async function cleanupOrphanedTunnelsForCodebases(
+  deps: CodebaseDeps,
+  entries: readonly CodebaseEntry[],
+): Promise<void> {
+  for (const entry of entries) {
+    if (entry.type !== 'remote') continue
+    if (typeof entry.slug !== 'string' || entry.slug.length === 0) continue
+    await cleanupOrphanedTunnelBySlug(deps, entry)
+  }
+}
+
+async function cleanupOrphanedTunnelBySlug(
+  deps: CodebaseDeps,
+  entry: CodebaseEntry,
+): Promise<void> {
+  const dir = tmpdir()
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return
+  }
+  const re = new RegExp(`^vectr-tunnel-${escapeRe(entry.slug)}-(\\d+)\\.sock$`)
+  // Resolve the password once so the ssh runner injects it for the exit call.
+  let auth: SshAuthContext | undefined
+  if (entry.credentialRef !== undefined) {
+    try {
+      const pw = await deps.credStore.get(entry.credentialRef)
+      if (typeof pw === 'string' && pw.length > 0) auth = { password: pw }
+    } catch {
+      // ignore — key-auth fallback.
+    }
+  }
+  for (const name of names) {
+    const m = re.exec(name)
+    if (m === null || m[1] === undefined) continue
+    const sock = join(dir, name)
+    // Try a clean `-O exit` first (kills the master through its control socket).
+    try {
+      const handle = deps.sshRunner(
+        ['-o', 'ConnectTimeout=2', '-O', 'exit', '-S', sock, entry.host ?? ''],
+        auth,
+      )
+      await handle.promise
+    } catch {
+      // best-effort; fall through to the raw unlink below.
+    }
+    // C2: only remove a socket resolved strictly inside tmpdir; a meta-polluted
+    // slug with '..' is collapsed by resolve() and rejected by safeRemove.
+    try {
+      safeRemove(sock, dir)
+    } catch {
+      // best-effort; missing / out-of-bounds sockets are skipped.
+    }
+  }
 }
 
 /** Error carrying an HTTP status so the route layer can map it directly.
@@ -989,7 +1099,7 @@ async function healTunnelOnce(
   // reallocated.
   let localPort = entry.localPort
   if (localPort === undefined || (!masterUp && await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS))) {
-    const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, new Set([...inProgressLocalPorts, ...(localPort !== undefined ? [localPort] : [])]))
+    const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, new Set([...inProgressLocalPorts, ...(localPort !== undefined ? [localPort] : [])]), deps.warn)
     if (fresh === undefined) {
       const msg = `tunnel down: no free local port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`
       downgrade(metaPath, entry, msg)
@@ -1302,26 +1412,51 @@ export function _removeMeta(metaPath: string): void {
  * alive; live tunnels of the current process are left untouched. Every error is
  * swallowed — this is a startup hygiene step, never fatal.
  *
- * ponytail: pid-based heuristic — it verifies only that the *owning node process*
- * is dead, not that the ssh master itself is gone. If a node process dies while
- * its ssh master somehow outlives it, the socket would be skipped. To tighten,
- * attempt `ssh -O check -S <sock> <host>` once host is known, but that needs the
- * remote host which this function does not have, so the pid heuristic is the
- * pragmatic default.
+ * (a) Host-restart case: when the host process restarts with a DIFFERENT pid
+ * the old socket's encoded pid is no longer alive, so the pid heuristic still
+ * removes the stale socket — but only if its slug prefix matches one of OUR
+ * codebases. Without the slug-prefix filter the function also touches unrelated
+ * plugins/users on the same host. The new `slugs` argument narrows the scope
+ * to OUR codebases, fixing the false-positive problem the survey flagged.
+ *
+ * @param dir - directory to scan (defaults to tmpdir).
+ * @param slugs - optional whitelist of codebase slugs whose prefix-matched
+ *   sockets should be cleaned. When omitted, the legacy pid-only heuristic
+ *   runs across every `vectr-tunnel-*.sock` (kept for back-compat with the
+ *   pre-isolate startup hygiene path).
+ * @returns the number of sockets removed.
  */
-export function cleanupStaleTunnelSockets(dir: string = tmpdir()): number {
+export function cleanupStaleTunnelSockets(
+  dir: string = tmpdir(),
+  slugs?: readonly string[],
+): number {
   let names: string[]
   try {
     names = readdirSync(dir)
   } catch {
     return 0
   }
-  const re = /^vectr-tunnel-.*-(\d+)\.sock$/
+  // Match by codebase slug prefix when provided, otherwise fall back to the
+  // legacy pid-only match (any `vectr-tunnel-*-<pid>.sock`).
+  const slugSet = slugs !== undefined ? new Set(slugs) : undefined
+  const reSlug = slugSet !== undefined
+    ? new RegExp(`^vectr-tunnel-(${Array.from(slugSet).map(escapeRe).join('|')})-(\\d+)\\.sock$`)
+    : null
+  const reLegacy = /^vectr-tunnel-.*-(\d+)\.sock$/
   let removed = 0
   for (const name of names) {
-    const m = re.exec(name)
-    if (m === null || m[1] === undefined) continue
-    const pid = Number(m[1])
+    let m: RegExpExecArray | null
+    let pid: number | undefined
+    if (reSlug !== null) {
+      m = reSlug.exec(name)
+      if (m === null || m[1] === undefined || m[2] === undefined) continue
+      pid = Number(m[2])
+    } else {
+      m = reLegacy.exec(name)
+      if (m === null || m[1] === undefined) continue
+      pid = Number(m[1])
+    }
+    if (pid === undefined) continue
     if (pid === process.pid) continue
     // Owning process alive -> its tunnel is still in use; leave it.
     try {
@@ -1341,4 +1476,9 @@ export function cleanupStaleTunnelSockets(dir: string = tmpdir()): number {
     }
   }
   return removed
+}
+
+/** Escape a literal for use inside a RegExp. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
