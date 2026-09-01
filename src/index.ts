@@ -493,9 +493,22 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (!hasRecorded) continue
         let recordedOk = false
         if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
+          // Capture narrowed values before the closure (property narrowing
+          // does not flow into the Promise executor callback).
+          const ctl = entry.tunnelCtl
+          const host = entry.host
           try {
-            spawn('ssh', ['-O', 'exit', '-S', entry.tunnelCtl, entry.host])
-            recordedOk = true
+            // F2: the old fire-and-forget `spawn` marked teardown ok before
+            // ssh had even started, and an async 'error' event (missing ssh
+            // binary) was unhandled and could crash the host teardown. Await
+            // the exit and only count a clean exit (code 0, no signal) as ok;
+            // otherwise the slug-prefix fallback sweep below takes over.
+            const result = await new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolveExit) => {
+              const child = spawn('ssh', ['-O', 'exit', '-S', ctl, host])
+              child.on('error', () => { resolveExit({ code: 1, signal: null }) })
+              child.on('close', (code, signal) => { resolveExit({ code: code ?? 1, signal }) })
+            })
+            recordedOk = result.code === 0 && result.signal === null
           } catch {
             // best-effort: control-socket exit unavailable at teardown.
           }
@@ -678,9 +691,11 @@ export function buildCodebaseDeps(
     let stderr = ''
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
-    const promise = new Promise<{ code: number; stdout: string; stderr: string }>((resolveExit) => {
-      child.on('error', (err) => { resolveExit({ code: 1, stdout, stderr: `${stderr}\n${String(err)}` }) })
-      child.on('close', (code) => { resolveExit({ code: code ?? 1, stdout, stderr }) })
+    const promise = new Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>((resolveExit) => {
+      child.on('error', (err) => { resolveExit({ code: 1, stdout, stderr: `${stderr}\n${String(err)}`, signal: null }) })
+      // F2: capture the signal so success gating can distinguish a clean exit
+      // from a kill (a signaled "exit" is not a success).
+      child.on('close', (code, signal) => { resolveExit({ code: code ?? 1, stdout, stderr, signal }) })
     })
     return {
       promise,

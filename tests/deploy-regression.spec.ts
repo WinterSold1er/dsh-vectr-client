@@ -72,15 +72,15 @@ describe('built ensureTunnelUp self-heals (functional, fakes)', () => {
         const spec = lIdx >= 0 ? (args[lIdx + 1] ?? '') : ''
         const m = /127\.0\.0\.1:(\d+):/.exec(spec)
         const port = m !== null ? Number(m[1]) : undefined
-        const p = new Promise<{ code: number; stdout: string; stderr: string }>((resolveOpen) => {
+        const p = new Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>((resolveOpen) => {
           if (port !== undefined) {
             const s = createServer((_q, res) => res.end())
             s.listen(port, '127.0.0.1', () => {
               boundServers.push(s)
-              resolveOpen({ code: 0, stdout: '', stderr: '' })
+              resolveOpen({ code: 0, stdout: '', stderr: '', signal: null })
             })
           } else {
-            resolveOpen({ code: 0, stdout: '', stderr: '' })
+            resolveOpen({ code: 0, stdout: '', stderr: '', signal: null })
           }
         })
         return { promise: p, kill() {} }
@@ -88,9 +88,9 @@ describe('built ensureTunnelUp self-heals (functional, fakes)', () => {
       if (args.includes('-O') && args.includes('check')) {
         // first -O check = dead (probe), second = alive (confirm)
         const code = opens.length === 0 ? 1 : 0
-        return { promise: Promise.resolve({ code, stdout: code === 0 ? 'Master running (pid=1)' : '', stderr: '' }), kill() {} }
+        return { promise: Promise.resolve({ code, stdout: code === 0 ? 'Master running (pid=1)' : '', stderr: '', signal: null }), kill() {} }
       }
-      return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }
+      return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }
     }) as import('../src/codebases.ts').SshRunner
     return { runner, opens }
   }
@@ -98,7 +98,7 @@ describe('built ensureTunnelUp self-heals (functional, fakes)', () => {
   it('reopens a dead tunnel using the built artifact', async () => {
     const { runner, opens } = makeSsh()
     const deps = {
-      spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }),
+      spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }),
       sshRunner: runner,
       credStore: { set() {}, get: () => undefined, unset() {} },
     }

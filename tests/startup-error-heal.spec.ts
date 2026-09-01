@@ -49,28 +49,28 @@ function makeSsh(): SshRunner & { opens: string[][]; checks: number[] } {
       const m = /127\.0\.0\.1:(\d+):/.exec(spec)
       const port = m !== null ? Number(m[1]) : undefined
       if (port !== undefined && !boundServers.some((s) => (s.address() as { port: number } | null)?.port === port)) {
-        const p = new Promise<{ code: number; stdout: string; stderr: string }>((resolveOpen) => {
+        const p = new Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>((resolveOpen) => {
           const s = createServer((_q, res) => res.end())
           s.listen(port, '127.0.0.1', () => {
             boundServers.push(s)
-            resolveOpen({ code: 0, stdout: '', stderr: '' })
+            resolveOpen({ code: 0, stdout: '', stderr: '', signal: null })
           })
-          s.once('error', () => resolveOpen({ code: 0, stdout: '', stderr: '' }))
+          s.once('error', () => resolveOpen({ code: 0, stdout: '', stderr: '', signal: null }))
         })
         return { promise: p, kill() {} }
       }
-      return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }
+      return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }
     }
     if (args.includes('-O') && args.includes('check')) {
       const code = codes[Math.min(checkIdx, codes.length - 1)] ?? 1
       checks.push(code)
       checkIdx += 1
       return {
-        promise: Promise.resolve({ code, stdout: code === 0 ? 'Master running (pid=7)' : '', stderr: '' }),
+        promise: Promise.resolve({ code, stdout: code === 0 ? 'Master running (pid=7)' : '', stderr: '', signal: null }),
         kill() {},
       }
     }
-    return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }
+    return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }
   }) as SshRunner & { opens: string[][]; checks: number[] }
   runner.opens = opens
   runner.checks = checks
@@ -79,7 +79,7 @@ function makeSsh(): SshRunner & { opens: string[][]; checks: number[] } {
 
 function deps(ssh: SshRunner): CodebaseDeps {
   return {
-    spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }),
+    spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }),
     sshRunner: ssh,
     credStore: { set() {}, get: () => undefined, unset() {} } satisfies CredentialStore,
   }

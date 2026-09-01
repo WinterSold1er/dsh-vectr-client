@@ -114,11 +114,15 @@ interface VectrStartResult {
 
 /**
  * Spawned-process runner. Mirrors `child_process.spawn` semantics: returns a
- * handle whose `promise` resolves with `{ code, stdout, stderr }`.
+ * handle whose `promise` resolves with `{ code, stdout, stderr, signal }`.
+ * `signal` is `null` for a clean exit and the signal name (e.g. `'SIGTERM'`)
+ * when the process was killed — a signaled "exit" is never a success, so
+ * callers that gate on success must check BOTH `code === 0` and
+ * `signal === null` (the promise resolves, it does not reject, on non-zero).
  */
 export interface SpawnHandle {
   /** Resolves when the process exits. */
-  promise: Promise<{ code: number; stdout: string; stderr: string }>
+  promise: Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>
   /** Kill the process (e.g. to clean up a partially-started daemon). */
   kill(): void
 }
@@ -713,8 +717,13 @@ export async function deleteCodebase(
     let recordedTeardownOk = false
     if (entry.tunnelCtl !== undefined) {
       try {
-        await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
-        recordedTeardownOk = true
+        // F2: the promise RESOLVES on any exit (non-zero included — it never
+        // rejects), so "resolved" is not "succeeded". A non-zero exit (stale
+        // socket, unreachable master) or a signaled death means the recorded
+        // teardown did NOT reach the master; keep the flag false so the
+        // slug-prefix fallback sweep below can reach a surviving master.
+        const result = await deps.sshRunner(['-O', 'exit', '-S', entry.tunnelCtl, entry.host ?? '']).promise
+        recordedTeardownOk = result.code === 0 && result.signal === null
       } catch {
         // control-socket exit failed; fall through to the PID kill below.
       }
@@ -1079,6 +1088,27 @@ async function healTunnelOnce(
     const msg = 'tunnel down: no host recorded; cannot reopen forward'
     downgrade(metaPath, entry, msg)
     return { entry: { ...entry, status: 'error', error: msg }, healed: false, error: msg }
+  }
+
+  // F1: before unlinking the control socket, best-effort SIGTERM the recorded
+  // tunnel pid. A master that no longer answers `-O check` (masterUp=false)
+  // can still be alive and holding its forwarded port; unlinking the socket
+  // WITHOUT killing the process would make it permanently uncontrollable (no
+  // `-O exit` target left) and leak its local port across every restart. Kill
+  // first so the port is actually freed before the reopen below. ESRCH =
+  // already gone (the normal case); EPERM = pid belongs to another user —
+  // warn with the pid, never escalate.
+  if (entry.tunnelPid !== undefined) {
+    try {
+      process.kill(entry.tunnelPid, 'SIGTERM')
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ESRCH') {
+        // tunnel process already gone; nothing to do.
+      } else {
+        deps.warn?.(`tunnel heal: cannot SIGTERM recorded tunnelPid ${entry.tunnelPid}: ${String(err)}`)
+      }
+    }
   }
 
   // Master is dead: clear any stale control socket so `-M -S` does not refuse

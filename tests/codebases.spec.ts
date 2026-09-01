@@ -57,8 +57,8 @@ function makeSpawnRunner(scripts: Map<string, FakeProc>): SpawnRunner & { procs:
     }
     const handle: SpawnHandle = {
       promise: script.hang
-        ? new Promise<{ code: number; stdout: string; stderr: string }>(() => {})
-        : Promise.resolve({ code: script.code, stdout: script.stdout, stderr: script.stderr }),
+        ? new Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>(() => {})
+        : Promise.resolve({ code: script.code, stdout: script.stdout, stderr: script.stderr, signal: null }),
       kill() {},
     }
     procs.push(handle)
@@ -83,7 +83,7 @@ function makeSshRunner(
       throw new Error(`unexpected ssh: ${args.join(' ')}`)
     }
     const handle: SpawnHandle = {
-      promise: Promise.resolve({ code: hit.proc.code, stdout: hit.proc.stdout, stderr: hit.proc.stderr }),
+      promise: Promise.resolve({ code: hit.proc.code, stdout: hit.proc.stdout, stderr: hit.proc.stderr, signal: null }),
       kill() {},
     }
     return handle

@@ -8,6 +8,7 @@
  * findFreePort reallocate" branch is covered deterministically.
  */
 import { createServer, type Server } from 'node:http'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, mkdir, chmod, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -60,7 +61,7 @@ function makeSsh(opts: FakeSshOpts = {}): SshRunner & { calls: string[][]; auths
       const code = opts.openCode ?? 0
       // A failed reopen (or an explicit no-bind) must NOT pretend to have bound.
       if (opts.bindOnOpen === false || code !== 0) {
-        return { promise: Promise.resolve({ code, stdout: '', stderr: '' }), kill() {} }
+        return { promise: Promise.resolve({ code, stdout: '', stderr: '', signal: null }), kill() {} }
       }
       // Parse `-L 127.0.0.1:<port>:...` and bind a real listener so the
       // post-reopen `isPortListening` force-check reflects the real forward.
@@ -68,15 +69,15 @@ function makeSsh(opts: FakeSshOpts = {}): SshRunner & { calls: string[][]; auths
       const spec = lIdx >= 0 ? (args[lIdx + 1] ?? '') : ''
       const m = /127\.0\.0\.1:(\d+):/.exec(spec)
       const port = m !== null ? Number(m[1]) : undefined
-      const p = new Promise<{ code: number; stdout: string; stderr: string }>((resolveOpen) => {
+      const p = new Promise<{ code: number; stdout: string; stderr: string; signal: NodeJS.Signals | null }>((resolveOpen) => {
         if (port !== undefined) {
           const s = createServer((_q, res) => res.end())
           s.listen(port, '127.0.0.1', () => {
             boundServers.push(s)
-            resolveOpen({ code, stdout: '', stderr: '' })
+            resolveOpen({ code, stdout: '', stderr: '', signal: null })
           })
         } else {
-          resolveOpen({ code, stdout: '', stderr: '' })
+          resolveOpen({ code, stdout: '', stderr: '', signal: null })
         }
       })
       return { promise: p, kill() {} }
@@ -85,9 +86,9 @@ function makeSsh(opts: FakeSshOpts = {}): SshRunner & { calls: string[][]; auths
       const code = checkCodes[Math.min(checkIdx, checkCodes.length - 1)] ?? 1
       checkIdx += 1
       const stdout = code === 0 && opts.pid !== undefined ? `Master running (pid=${opts.pid})` : ''
-      return { promise: Promise.resolve({ code, stdout, stderr: '' }), kill() {} }
+      return { promise: Promise.resolve({ code, stdout, stderr: '', signal: null }), kill() {} }
     }
-    return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }
+    return { promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }
   }) as SshRunner & { calls: string[][]; auths: Array<SshAuthContext | undefined>; opens: string[][] }
   ;(runner as { calls: string[][] }).calls = calls
   ;(runner as { auths: Array<SshAuthContext | undefined> }).auths = auths
@@ -105,11 +106,12 @@ function makeCredStore(): CredentialStore & { data: Map<string, string> } {
   }
 }
 
-function deps(ssh: SshRunner, creds: CredentialStore = makeCredStore()): CodebaseDeps {
+function deps(ssh: SshRunner, creds: CredentialStore = makeCredStore(), warn?: (message: string) => void): CodebaseDeps {
   return {
-    spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '' }), kill() {} }),
+    spawnRunner: () => ({ promise: Promise.resolve({ code: 0, stdout: '', stderr: '', signal: null }), kill() {} }),
     sshRunner: ssh,
     credStore: creds,
+    warn,
   }
 }
 
@@ -430,5 +432,69 @@ describe('ensureTunnelUp defect regressions', () => {
     expect(threw).toBe(false)
     expect(res?.error).toMatch(/^tunnel down:/)
     expect(res?.entry.status).toBe('error')
+  })
+})
+
+describe('ensureTunnelUp F1: surviving master killed before socket unlink', () => {
+  // The incident: host process dies, its ssh master survives, the socket is
+  // later unlinked by the heal path. Without the pre-unlink SIGTERM the master
+  // becomes permanently uncontrollable and leaks its port on every restart.
+  let sockDir: string
+  beforeEach(async () => {
+    sockDir = await mkdtemp(join(tmpdir(), 'heal-f1-'))
+  })
+  afterEach(async () => {
+    await rm(sockDir, { recursive: true, force: true })
+  })
+
+  it('SIGTERMs the recorded tunnelPid when the probe reports the master dead', async () => {
+    const K = 987654
+    const ctl = join(sockDir, 'vectr-tunnel-vnm-ctl.sock')
+    await writeFile(ctl, '')
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation((pidArg: number, _sig?: string | number): boolean => {
+      // Only the recorded pid may be touched; anything else is a test bug.
+      expect(pidArg).toBe(K)
+      return true
+    })
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 555 })
+    const entry = remoteEntry({ tunnelPid: K, tunnelCtl: ctl })
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+    expect(res.healed).toBe(true)
+    // The kill is the regression proof: SIGTERM to the recorded pid, and
+    // only AFTER the kill is the stale socket cleared.
+    expect(killSpy).toHaveBeenCalledWith(K, 'SIGTERM')
+    expect(existsSync(ctl)).toBe(false)
+  })
+
+  it('ignores ESRCH (pid already gone) and still heals', async () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const e = new Error('kill ESRCH') as NodeJS.ErrnoException
+      e.code = 'ESRCH'
+      throw e
+    })
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 555 })
+    const entry = remoteEntry({ tunnelPid: 987654 })
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh), metaPath, entry)
+    expect(res.healed).toBe(true)
+    expect(killSpy).toHaveBeenCalledWith(987654, 'SIGTERM')
+  })
+
+  it('warns with the pid on EPERM and still heals', async () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const e = new Error('kill EPERM') as NodeJS.ErrnoException
+      e.code = 'EPERM'
+      throw e
+    })
+    const warn = vi.fn()
+    const ssh = makeSsh({ checkSequence: [1, 0], pid: 555 })
+    const entry = remoteEntry({ tunnelPid: 987654 })
+    saveCodebases(metaPath, [entry])
+    const res = await ensureTunnelUp(deps(ssh, makeCredStore(), warn), metaPath, entry)
+    expect(res.healed).toBe(true)
+    expect(killSpy).toHaveBeenCalledWith(987654, 'SIGTERM')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('987654')
   })
 })
