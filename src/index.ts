@@ -239,6 +239,11 @@ export function install(
   config: Required<Config>,
   agent: Agent,
   codebasesPath?: string,
+  /** Agents disposed while their liveness probe is still in flight (see P1 in
+   * `apply`). When set, the IIFE tears down the freshly-created connection /
+   * prompt fiber instead of leaking it to host teardown. Defaults to an empty
+   * set so callers that do not seed live agents (unit tests) need not pass it. */
+  disposed: Set<Agent> = new Set<Agent>(),
 ): void {
   if (handles.has(agent)) return
   const cwd = agent.session.header.cwd
@@ -316,13 +321,25 @@ export function install(
         else ctx.logger.warn(message)
       }
     })
-    handles.set(agent, conn)
+    // P1: register the connection. If the agent was disposed during the probe
+    // window (between install() returning and this IIFE settling), the
+    // agent/disposed handler already ran and found nothing in `handles`, so
+    // tear the connection down immediately instead of leaking it to host
+    // teardown.
+    if (disposed.has(agent)) {
+      // ponytail: single-agent probe-window leak; the host restart reclaims it.
+      // If this race frequency climbs, move the dispose into the IIFE's own
+      // microtask ordering instead of a post-hoc disposed flag.
+      void conn.dispose().catch(() => {})
+    } else {
+      handles.set(agent, conn)
+    }
     // (a) Inject the vectr MCP usage-guidance section into THIS agent's scope
     // ONLY now that the daemon is verified alive (same gate as the tool bind).
     // `agent.ctx.inject(['systemPrompt'], ...)` opens a scope-targeted fiber so
     // the section shadows only for this agent; its disposer is the fiber itself.
-    // The early `handles.has(agent)` guard at the top already prevents a
-    // duplicate same-name registration (which would throw).
+    // The `!promptFibers.has(agent)` guard prevents a duplicate same-name
+    // registration (which would throw from SystemPrompt.section).
     if (!promptFibers.has(agent)) {
       const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
         scope.systemPrompt.section({
@@ -331,8 +348,20 @@ export function install(
           text: VECTR_GUIDANCE_SECTION_TEXT,
         })
       })
-      promptFibers.set(agent, fiber)
+      if (disposed.has(agent)) {
+        // P1: same probe-window race as the connection above — the section was
+        // just registered in the agent's scope but the disposed handler already
+        // ran and missed it, so dispose the fiber now. (ponytail: single-agent
+        // leak, host restart reclaims; revisit if frequency climbs.)
+        void fiber.dispose().catch(() => {})
+      } else {
+        promptFibers.set(agent, fiber)
+      }
     }
+    // The probe window for this agent is now closed: whichever path above ran,
+    // the connection/fiber is either tracked or torn down, so the flag is no
+    // longer needed. Clearing it keeps the set bounded by live agents.
+    disposed.delete(agent)
   })()
 
   // Feature B: also bind every persisted codebase whose status is 'up'. These
@@ -504,13 +533,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   // together with the agent. Keyed separately from `handles` because the fiber
   // opens a dependency scope rather than an MCP connection.
   const promptFibers = new Map<Agent, Fiber>()
+  // P1: agents disposed during their liveness-probe window. The IIFE in install
+  // registers the fiber/connection only after the await; if the agent is torn
+  // down before then, the disposed handler finds nothing in the maps. This set
+  // lets the IIFE detect that and dispose the freshly-created registration.
+  const disposed = new Set<Agent>()
 
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
   // metadata path is passed so install also binds up codebases.
-  for (const agent of ctx.agents.list()) install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath)
-  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath) })
+  for (const agent of ctx.agents.list()) install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed)
+  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed) })
   ctx.on('agent/disposed', ({ agent }) => {
+    disposed.add(agent)
     void handles.get(agent)?.dispose()
     handles.delete(agent)
     const fiber = promptFibers.get(agent)
