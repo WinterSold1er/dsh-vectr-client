@@ -16,12 +16,13 @@
  *
  * @module dsh-vectr-client
  */
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Fiber } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
-import { type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
+import { type CodebaseEntry, type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
 import { type InstancesFile } from './registry';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
@@ -38,6 +39,11 @@ export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codeb
 declare module '@deepseek-ai/cordis' {
     interface Context {
         webServer: WebServerLike;
+        /** Provided by `@deepseek-ai/dsh-system-prompt` at host runtime (same
+         * optional-augmentation pattern as `webServer` above). Declared here so
+         * `agent.ctx.systemPrompt.section(...)` type-checks without a build
+         * dependency on the system-prompt package. */
+        systemPrompt: SystemPrompt;
     }
 }
 interface WebServerLike {
@@ -84,7 +90,27 @@ export interface Config {
 export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
 /** Default TCP port-listening probe budget (ms). */
 export declare const DEFAULT_DAEMON_TCP_TIMEOUT_MS = 300;
+/** (b) Minimum interval between startup-time heal attempts for the same slug.
+ * Prevents a persistently-unreachable host from being hammered on every host
+ * restart while still leaving room for transient blips to recover. */
+export declare const STARTUP_HEAL_COOLDOWN_MS = 30000;
+/** (b) Startup-heal scope: which persisted entries get an automatic
+ * `ensureTunnelUp` attempt at host startup. `up` keeps its legacy behavior;
+ * `down` and `error` are the previously-deadlocked states that were only
+ * surfaced to the user and never automatically recovered. `local` entries
+ * have no tunnel to heal. */
+export declare function startupHealEligible(entry: Pick<CodebaseEntry, 'type' | 'status'>): boolean;
 export declare const Config: z<Config>;
+/**
+ * System-prompt section contributed to each agent when its vectr daemon is
+ * verified alive: nudges the agent to use the vectr MCP tools for code queries
+ * instead of blind file reads. Static English text (matches the official
+ * prompt style). Order 95 sits after the deployment persona (0) and before the
+ * tool-guidance band (100–199); see `@deepseek-ai/dsh-system-prompt`.
+ */
+export declare const VECTR_GUIDANCE_SECTION_NAME = "vectr:mcp-guidance";
+export declare const VECTR_GUIDANCE_SECTION_ORDER = 95;
+export declare const VECTR_GUIDANCE_SECTION_TEXT = "When answering code-query or codebase-navigation questions, prefer the vectr MCP tools (mcp__vectr__*) over blind file reads. Use them to search, retrieve, and reason over the indexed workspace.";
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
  * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
@@ -97,11 +123,17 @@ export declare const Config: z<Config>;
  * `agent/created` or seed without a Host reload.
  * @param ctx - plugin context (the loader fiber) providing agents and logger.
  * @param handles - live connection handles keyed by agent.
+ * @param promptFibers - live system-prompt injection fibers keyed by agent.
  * @param instancesPath - absolute path of the vectr daemon registry.
  * @param config - resolved plugin configuration.
  * @param agent - the agent whose workspace resolves the daemon port.
  */
-export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, instancesPath: string, config: Required<Config>, agent: Agent, codebasesPath?: string): void;
+export declare function install(ctx: Context, handles: Map<Agent, ConnectionHandle>, promptFibers: Map<Agent, Fiber>, instancesPath: string, config: Required<Config>, agent: Agent, codebasesPath?: string, 
+/** Agents disposed while their liveness probe is still in flight (see P1 in
+ * `apply`). When set, the IIFE tears down the freshly-created connection /
+ * prompt fiber instead of leaking it to host teardown. Defaults to an empty
+ * set so callers that do not seed live agents (unit tests) need not pass it. */
+disposed?: Set<Agent>): void;
 /**
  * Connect the agent to every persisted codebase entry with `status === 'up'`.
  * Each entry exposes a Streamable HTTP MCP endpoint at
@@ -158,6 +190,7 @@ export declare function buildCodebaseDeps(ctx: Context, secretsPath: string): {
     spawnRunner: SpawnRunner;
     sshRunner: SshRunner;
     credStore: CredentialStore;
+    warn: (message: string) => void;
 };
 /**
  * Extract the codebase slug from a request pathname. Strips the codebase route

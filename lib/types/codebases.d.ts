@@ -91,7 +91,11 @@ export interface CredentialStore {
 }
 /**
  * Spawned-process runner. Mirrors `child_process.spawn` semantics: returns a
- * handle whose `promise` resolves with `{ code, stdout, stderr }`.
+ * handle whose `promise` resolves with `{ code, stdout, stderr, signal }`.
+ * `signal` is `null` for a clean exit and the signal name (e.g. `'SIGTERM'`)
+ * when the process was killed — a signaled "exit" is never a success, so
+ * callers that gate on success must check BOTH `code === 0` and
+ * `signal === null` (the promise resolves, it does not reject, on non-zero).
  */
 export interface SpawnHandle {
     /** Resolves when the process exits. */
@@ -99,6 +103,7 @@ export interface SpawnHandle {
         code: number;
         stdout: string;
         stderr: string;
+        signal: NodeJS.Signals | null;
     }>;
     /** Kill the process (e.g. to clean up a partially-started daemon). */
     kill(): void;
@@ -120,6 +125,10 @@ export interface CodebaseDeps {
     sshRunner: SshRunner;
     /** Secret store. */
     credStore: CredentialStore;
+    /** Optional warn sink for observable non-fatal events (e.g. (c) preferred
+     * tunnel-port migration). Injected by the host so this module stays
+     * logger-free; may be absent in tests and direct use. */
+    warn?: (message: string) => void;
 }
 /** Validation regex for a slug (also used to derive `serverName`). */
 export declare const SLUG_PATTERN: RegExp;
@@ -178,9 +187,15 @@ export declare function saveCodebases(metaPath: string, list: CodebaseEntry[]): 
  * here we bind the candidate to detect occupancy.
  * @param min - first candidate port (inclusive).
  * @param max - last candidate port (inclusive).
+ * @param exclude - ports to skip (e.g. reserved by an in-flight create / heal).
+ * @param warn - optional warn sink used to surface port migration (c). When the
+ *   preferred `min` port is occupied and a LATER port in the window is
+ *   selected, `warn(message)` is invoked with a self-diagnosing message so the
+ *   migration is visible in the host log. The preferred-port-available case
+ *   never warns (a silent hit would just be noise).
  * @returns the first free port, or `undefined` when none are free.
  */
-export declare function findFreePort(min?: number, max?: number, exclude?: Set<number>): Promise<number | undefined>;
+export declare function findFreePort(min?: number, max?: number, exclude?: Set<number>, warn?: (message: string) => void): Promise<number | undefined>;
 /**
  * Create a codebase: spawn (local) or ssh-provision + tunnel (remote), then
  * persist the entry. Any partial failure cleans up what was already built.
@@ -198,6 +213,22 @@ export declare function createCodebase(deps: CodebaseDeps, metaPath: string, spe
  * @param entry - the entry to delete.
  */
 export declare function deleteCodebase(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<void>;
+/**
+ * (d) Fallback orphan cleanup used by {@link deleteCodebase} when no recorded
+ * `tunnelCtl` / `tunnelPid` exists OR the recorded teardown failed silently.
+ * Scans tmpdir for any `vectr-tunnel-<slug>-*.sock` and asks ssh to exit each
+ * control master cleanly via `ssh -O exit -S <sock> <host>`. When ssh itself
+ * is unavailable, the socket file is simply unlinked (the underlying master
+ * will not answer to `-O exit` either way). Every error is swallowed — this is
+ * a best-effort hygiene step that must not veto the delete.
+ *
+ * Exported as `cleanupOrphanedTunnelsForCodebases` so the effect disposer in
+ * `index.ts` can sweep the same set of orphans when the host pid changes and
+ * the recorded `tunnelPid` / `tunnelCtl` no longer points at a live master.
+ * Entries that are not `type === 'remote'` or whose slug is empty are
+ * silently skipped.
+ */
+export declare function cleanupOrphanedTunnelsForCodebases(deps: CodebaseDeps, entries: readonly CodebaseEntry[]): Promise<void>;
 /** Error carrying an HTTP status so the route layer can map it directly.
  * Pure domain errors (missing slug, unregistered workspace, serverName
  * collision) surface as {@link CodebaseError} from {@link patchCodebase}. */
@@ -394,12 +425,19 @@ export declare function _removeMeta(metaPath: string): void;
  * alive; live tunnels of the current process are left untouched. Every error is
  * swallowed — this is a startup hygiene step, never fatal.
  *
- * ponytail: pid-based heuristic — it verifies only that the *owning node process*
- * is dead, not that the ssh master itself is gone. If a node process dies while
- * its ssh master somehow outlives it, the socket would be skipped. To tighten,
- * attempt `ssh -O check -S <sock> <host>` once host is known, but that needs the
- * remote host which this function does not have, so the pid heuristic is the
- * pragmatic default.
+ * (a) Host-restart case: when the host process restarts with a DIFFERENT pid
+ * the old socket's encoded pid is no longer alive, so the pid heuristic still
+ * removes the stale socket — but only if its slug prefix matches one of OUR
+ * codebases. Without the slug-prefix filter the function also touches unrelated
+ * plugins/users on the same host. The new `slugs` argument narrows the scope
+ * to OUR codebases, fixing the false-positive problem the survey flagged.
+ *
+ * @param dir - directory to scan (defaults to tmpdir).
+ * @param slugs - optional whitelist of codebase slugs whose prefix-matched
+ *   sockets should be cleaned. When omitted, the legacy pid-only heuristic
+ *   runs across every `vectr-tunnel-*.sock` (kept for back-compat with the
+ *   pre-isolate startup hygiene path).
+ * @returns the number of sockets removed.
  */
-export declare function cleanupStaleTunnelSockets(dir?: string): number;
+export declare function cleanupStaleTunnelSockets(dir?: string, slugs?: readonly string[]): number;
 //# sourceMappingURL=codebases.d.ts.map
