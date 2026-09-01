@@ -514,11 +514,19 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
         }
         if (entry.tunnelPid !== undefined) {
+          // N3: best-effort kill only — it never marks the teardown ok. The
+          // recorded pid may be stale/recycled while a surviving master still
+          // holds its socket, so `recordedOk` stays driven by the control-
+          // socket exit above and the slug sweep below still runs.
           try {
             process.kill(entry.tunnelPid, 'SIGTERM')
-            recordedOk = true
-          } catch {
-            // tunnel already gone.
+          } catch (err) {
+            // ESRCH = tunnel already gone (normal case, ignore); EPERM = pid
+            // belongs to another user (warn; also not ok).
+            const code = (err as NodeJS.ErrnoException).code
+            if (code !== 'ESRCH') {
+              ctx.logger.warn(`vectr-client: teardown cannot SIGTERM recorded tunnelPid ${entry.tunnelPid}: ${String(err)}`)
+            }
           }
         }
         // (a) Recorded teardown could not reach the master -> sweep tmpdir

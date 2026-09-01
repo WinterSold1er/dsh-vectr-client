@@ -122,11 +122,6 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-/** Let the non-blocking liveness IIFE inside install() settle. */
-async function tick(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 20))
-}
-
 function aliveDeps(probe: HttpProbe = (e, ms) => fetchStatus(e, ms)) {
   return { httpProbe: probe, httpTimeoutMs: 10, tcpTimeoutMs: 300 }
 }
@@ -199,7 +194,14 @@ describe('install liveness gate (D-2 / R3)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    await tick()
+    // N2/T5: wait for the liveness IIFE to settle on its REAL outcome (the
+    // skip warn) instead of a fixed 20ms window that flakes under event-loop
+    // load.
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some(
+        c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PROCESS_DEAD_ESRCH'),
+      )).toBe(true)
+    }, { timeout: 5000, interval: 25 })
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
@@ -227,7 +229,12 @@ describe('install liveness gate (D-2 / R3)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    await tick()
+    // T5: wait for the real skip warn instead of a fixed 20ms window.
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some(
+        c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PORT_CLOSED'),
+      )).toBe(true)
+    }, { timeout: 5000, interval: 25 })
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
@@ -252,7 +259,12 @@ describe('install liveness gate (D-2 / R3)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    await tick()
+    // T5: wait for the real bind outcome (handle registered) instead of a
+    // fixed 20ms window; the HTTP probe to the status server is the slowest
+    // step in the IIFE.
+    await vi.waitFor(() => {
+      expect(handles.has(agent)).toBe(true)
+    }, { timeout: 5000, interval: 25 })
 
     expect(startConnectionMock).toHaveBeenCalledTimes(1)
     expect(handles.has(agent)).toBe(true)
@@ -321,7 +333,13 @@ describe('missing session cwd (D-4)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    await tick()
+    // T5: the no-cwd skip warn is synchronous, but poll the real outcome for
+    // uniformity with the other liveness-gate cases.
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some(
+        c => String(c[0]).includes('no cwd on session') && String(c[0]).includes('no-cwd-agent'),
+      )).toBe(true)
+    }, { timeout: 5000, interval: 25 })
 
     expect(startConnectionMock).not.toHaveBeenCalled()
     expect(handles.has(agent)).toBe(false)
@@ -356,7 +374,11 @@ describe('registry re-read on every call (D-7)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent1)
-    await tick()
+    // T5: wait for the first bind to settle (url carrying p1) instead of a
+    // fixed 20ms window.
+    await vi.waitFor(() => {
+      expect(startConnectionMock.mock.calls.some(c => String(c[1]?.url ?? '').includes(`:${p1}`))).toBe(true)
+    }, { timeout: 5000, interval: 25 })
     const firstUrl = startConnectionMock.mock.calls[0]?.[1]?.url as string | undefined
     expect(firstUrl).toContain(`:${p1}`)
 
@@ -371,7 +393,10 @@ describe('registry re-read on every call (D-7)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent2)
-    await tick()
+    // T5: wait for the second bind (url carrying p2) the same way.
+    await vi.waitFor(() => {
+      expect(startConnectionMock.mock.calls.some(c => String(c[1]?.url ?? '').includes(`:${p2}`))).toBe(true)
+    }, { timeout: 5000, interval: 25 })
     const secondUrl = startConnectionMock.mock.calls[1]?.[1]?.url as string | undefined
     expect(secondUrl).toContain(`:${p2}`)
 
@@ -422,7 +447,11 @@ describe('subagent / multi-agent scenario (D-2 / R4)', () => {
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, child)
-    await tick()
+    // T5: wait until the parent bind has settled, then assert the child was
+    // skipped.
+    await vi.waitFor(() => {
+      expect(handles.has(parent)).toBe(true)
+    }, { timeout: 5000, interval: 25 })
 
     expect(handles.has(parent)).toBe(true) // live daemon → registered
     expect(handles.has(child)).toBe(false) // dead daemon → skipped

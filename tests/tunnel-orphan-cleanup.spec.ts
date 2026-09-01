@@ -392,4 +392,32 @@ describe('deleteCodebase teardown failure (F2)', () => {
       expect(loadCodebases(metaPath)).toEqual([])
     })
   })
+
+  it('N3: a successful PID kill does NOT suppress the slug fallback after a failed ctl exit', async () => {
+    await withSweepDir(async (sweepDir) => {
+      const entry = {
+        ...remoteEntryFor(join(sweepDir, 'vectr-tunnel-vnm-recorded.sock')),
+        // The recorded pid still points at a live process: the SIGTERM succeeds.
+        tunnelPid: 987654,
+      }
+      saveCodebases(metaPath, [entry])
+      // A surviving master's socket the recorded teardown cannot reach.
+      const stray = join(sweepDir, 'vectr-tunnel-vnm-999999.sock')
+      await writeFile(stray, '')
+
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+      const ssh = makeSsh({ exitCode: 255 }) // the recorded ctl exit FAILED
+      await deleteCodebase(deps(ssh), metaPath, entry)
+
+      // The kill was attempted (best-effort)...
+      expect(killSpy).toHaveBeenCalledWith(987654, 'SIGTERM')
+      // ...but a successful kill must NOT mark the teardown ok: the ctl exit
+      // failed, so the sweep still ran, targeted the surviving socket, and
+      // unlinked it (master cleaned).
+      expect(ssh.calls.some((args) => args.includes('-O') && args.includes('exit') && args.includes(stray))).toBe(true)
+      expect(existsSync(stray)).toBe(false)
+      expect(loadCodebases(metaPath)).toEqual([])
+      killSpy.mockRestore()
+    })
+  })
 })

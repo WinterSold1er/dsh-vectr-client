@@ -729,11 +729,21 @@ export async function deleteCodebase(
       }
     }
     if (entry.tunnelPid !== undefined) {
+      // N3: the PID kill is best-effort and NEVER marks the teardown ok — a
+      // successful kill does not prove the master is gone (the recorded pid
+      // may be stale/recycled while a surviving master still holds its
+      // socket). `recordedTeardownOk` stays driven by the control-socket exit
+      // only, so the slug-prefix fallback sweep below still reaches a
+      // surviving master.
       try {
         process.kill(entry.tunnelPid, 'SIGTERM')
-        recordedTeardownOk = true
-      } catch {
-        // tunnel already gone; ignore.
+      } catch (err) {
+        // ESRCH = tunnel already gone (normal case, ignore); EPERM = pid
+        // belongs to another user (warn; also not ok).
+        const code = (err as NodeJS.ErrnoException).code
+        if (code !== 'ESRCH') {
+          deps.warn?.(`deleteCodebase: cannot SIGTERM recorded tunnelPid ${entry.tunnelPid}: ${String(err)}`)
+        }
       }
     }
     // (d) Slug-prefix fallback: when there is no recorded ctl / pid (legacy

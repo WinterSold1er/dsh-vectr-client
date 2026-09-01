@@ -364,11 +364,11 @@ describe('create remote', () => {
       if (args.includes('-O') && args.includes('check')) {
         checkCalls += 1
         const ok = checkCalls >= 2
-        return { promise: Promise.resolve({ code: ok ? 0 : 1, stdout: ok ? 'Master running (pid=4321)' : '', stderr: '' }), kill() {} }
+        return { promise: Promise.resolve({ code: ok ? 0 : 1, stdout: ok ? 'Master running (pid=4321)' : '', stderr: '', signal: null }), kill() {} }
       }
-      let proc = { code: 0, stdout: '', stderr: '' }
-      if (args.includes('start')) proc = { code: 0, stdout: '{"port":8760}', stderr: '' }
-      else if (args.includes('cat')) proc = { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '' }
+      let proc = { code: 0, stdout: '', stderr: '', signal: null as NodeJS.Signals | null }
+      if (args.includes('start')) proc = { code: 0, stdout: '{"port":8760}', stderr: '', signal: null }
+      else if (args.includes('cat')) proc = { code: 0, stdout: JSON.stringify({ k1: { workspace: '/w', port: 8760 } }), stderr: '', signal: null }
       return { promise: Promise.resolve(proc), kill() {} }
     }
     const deps: CodebaseDeps = {
