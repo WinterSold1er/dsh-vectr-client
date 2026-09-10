@@ -22,7 +22,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -132,6 +132,15 @@ describe('vectr-client real composition', () => {
         bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
         bootCtx.loader.builtins['vectr-test-session'] = SessionStore
         bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
+        bootCtx.loader.builtins['vectr-test-session-projections'] = {
+          name: 'vectr-test-session-projections',
+          apply(c: Context) {
+            c.provide('sessionProjections', {
+              register: () => {},
+              stateOf: () => undefined,
+            })
+          },
+        }
         bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
         bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
       },

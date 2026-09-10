@@ -11,6 +11,8 @@
  * @module dsh-vectr-client/codebases
  */
 import { type InstancesFile } from './registry';
+import type { CodebaseAuth, CodebaseEntry, CodebaseSpec, CodebaseStatus, CodebaseType } from './domain/types';
+export type { CodebaseAuth, CodebaseEntry, CodebaseSpec, CodebaseStatus, CodebaseType, };
 /** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
  * local port (ms) — used by `ensureTunnelUp` purely to decide
  * reuse-vs-reallocate of `localPort`. This is NOT the ssh control-master
@@ -23,58 +25,6 @@ export declare const DEFAULT_TUNNEL_PROBE_MS = 800;
  * so the two call sites cannot drift apart. */
 export declare const TUNNEL_PORT_MIN = 8760;
 export declare const TUNNEL_PORT_MAX = 8799;
-/** Discriminant for where a codebase's vectr daemon runs. */
-export type CodebaseType = 'local' | 'remote';
-/** How a remote host authenticates (informational; the secret lives in the store). */
-export type CodebaseAuth = 'key' | 'password';
-/** Input description of a codebase to create. */
-export interface CodebaseSpec {
-    /** Where the daemon runs. */
-    type: CodebaseType;
-    /** Absolute workspace path served by the daemon. */
-    path: string;
-    /** Owning workspace (absolute). Local == `path`; remote == the remote workspace the daemon serves. Composite `serverName` is derived from this + `slug`. */
-    workspace?: string;
-    /** Remote host (`user@host` or `host`) for `type === 'remote'`. */
-    host?: string;
-    /** Remote auth method. */
-    auth?: CodebaseAuth;
-    /** Plaintext password for `auth === 'password'`; consumed, never persisted here. */
-    password?: string;
-    /** Stable short identifier, also used to derive `serverName`. */
-    slug: string;
-}
-/** Runtime / persisted record of one managed codebase. */
-export interface CodebaseEntry {
-    /** `slug` (stable identifier). */
-    id: string;
-    /** `slug` duplicate field kept for callers expecting `id` + `slug`. */
-    slug: string;
-    /** Where the daemon runs. */
-    type: CodebaseType;
-    /** Absolute workspace path served by the daemon. */
-    path: string;
-    /** Remote host for `type === 'remote'`. */
-    host?: string;
-    /** Owning workspace (absolute); enables per-workspace binding isolation. Local == `path`; remote == the remote workspace. */
-    workspace?: string;
-    /** Derived MCP server name (`vectr_<sha256(workspace)[:12]>_<slug>`) — globally unique across workspaces. */
-    serverName: string;
-    /** Local Streamable HTTP port the host connects to (tunnel endpoint / daemon port). */
-    localPort?: number;
-    /** Remote daemon port for `type === 'remote'`. */
-    remotePort?: number;
-    /** PID of the ssh tunnel process for `type === 'remote'`. */
-    tunnelPid?: number;
-    /** Control-socket path of the ssh tunnel master (`-M -S`); reliable PID query + clean teardown. */
-    tunnelCtl?: string;
-    /** Reference into the credential store (never the value). */
-    credentialRef?: string;
-    /** Connection status. */
-    status: 'up' | 'down' | 'error';
-    /** Last error detail when `status === 'error'`. */
-    error?: string;
-}
 /**
  * Secret store seam. Implemented either by a wrapper over `ctx.credentials`
  * (async host service) or a {@link FileCredentialStore} fallback. Only

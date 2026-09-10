@@ -244,6 +244,41 @@ describe('create remote', () => {
     expect(metaText).toContain('VECTR_SSH_R')
   })
 
+  it('tolerates remotePath alias, infers password auth, and accepts custom remotePort', async () => {
+    const instancesJson = JSON.stringify({
+      abc: { workspace: '/w', port: 8761 },
+    })
+    const ssh = makeSshRunner([
+      { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('tool') && a.includes('list'), proc: { code: 0, stdout: 'vectr 0.1.0', stderr: '' } },
+      { match: (a) => a.includes('start'), proc: { code: 0, stdout: 'Listening on port 8761', stderr: '' } },
+      { match: (a) => a.includes('cat'), proc: { code: 0, stdout: instancesJson, stderr: '' } },
+      { match: (a) => a.includes('-L') || a.includes('-M'), proc: { code: 0, stdout: '', stderr: '' } },
+      { match: (a) => a.includes('-O'), proc: { code: 0, stdout: 'Master running (pid=12345)', stderr: '' } },
+    ])
+    const creds = makeCredStore()
+    const deps: CodebaseDeps = {
+      spawnRunner: makeSpawnRunner(new Map()),
+      sshRunner: ssh,
+      credStore: creds,
+    }
+    // Omit auth (only pass password), pass remotePath instead of path, and pass custom remotePort
+    const spec = {
+      type: 'remote',
+      remotePath: '/w',
+      host: 'h',
+      workspace: '/local/w',
+      slug: 'compat',
+      password: 'pwd',
+      remotePort: 9999,
+    } as any
+    const entry = await createCodebase(deps, metaPath, spec)
+    expect(entry.path).toBe('/w')
+    expect(entry.remotePort).toBe(9999)
+    expect(entry.credentialRef).toBe('VECTR_SSH_COMPAT')
+    expect(ssh.auths.some((a) => a?.password === 'pwd')).toBe(true)
+  })
+
   it('throws when password auth is requested but no password provided (P8)', async () => {
     const ssh = makeSshRunner([
       { match: (a) => a.includes('true'), proc: { code: 0, stdout: '', stderr: '' } },

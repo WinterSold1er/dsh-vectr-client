@@ -27,6 +27,9 @@ import {
   VECTR_GUIDANCE_SECTION_NAME,
   VECTR_GUIDANCE_SECTION_ORDER,
   VECTR_GUIDANCE_SECTION_TEXT,
+  VECTR_GREP_SECTION_NAME,
+  VECTR_GREP_SECTION_ORDER,
+  VECTR_GREP_SECTION_TEXT,
   type InstanceEntry,
 } from '../src/index.ts'
 import { fetchStatus } from '../src/probe.ts'
@@ -88,15 +91,16 @@ afterEach(async () => {
  * unwinds a scope's effects on fiber disposal.
  */
 function makeAgentWithInjectSpy(id: string, cwd: string) {
-  let sectionDisposer: (() => void) | undefined
+  const disposers: (() => void)[] = []
   const sectionSpy = vi.fn((section: { name: string; order: number; text: unknown }) => {
     // Record the disposer the real systemPrompt would return; disposing the
     // fiber must invoke it so the section is removed on agent teardown.
-    sectionDisposer = () => {}
+    const sectionDisposer = () => {}
+    disposers.push(sectionDisposer)
     return sectionDisposer
   })
   const disposeFiber = vi.fn(async () => {
-    sectionDisposer?.()
+    for (const d of disposers) d()
   })
   const injectSpy = vi.fn((_deps: string[], cb: (scope: unknown) => void) => {
     cb({ systemPrompt: { section: sectionSpy } })
@@ -153,11 +157,15 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
 
     expect(injectSpy).toHaveBeenCalledTimes(1)
     expect(injectSpy.mock.calls[0]?.[0]).toEqual(['systemPrompt'])
-    expect(sectionSpy).toHaveBeenCalledTimes(1)
-    const section = sectionSpy.mock.calls[0]?.[0] as { name: string; order: number; text: unknown }
-    expect(section.name).toBe(VECTR_GUIDANCE_SECTION_NAME)
-    expect(section.order).toBe(VECTR_GUIDANCE_SECTION_ORDER)
-    expect(section.text).toBe(VECTR_GUIDANCE_SECTION_TEXT)
+    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    const section1 = sectionSpy.mock.calls[0]?.[0] as { name: string; order: number; text: unknown }
+    expect(section1.name).toBe(VECTR_GUIDANCE_SECTION_NAME)
+    expect(section1.order).toBe(VECTR_GUIDANCE_SECTION_ORDER)
+    expect(section1.text).toBe(VECTR_GUIDANCE_SECTION_TEXT)
+    const section2 = sectionSpy.mock.calls[1]?.[0] as { name: string; order: number; text: unknown }
+    expect(section2.name).toBe(VECTR_GREP_SECTION_NAME)
+    expect(section2.order).toBe(VECTR_GREP_SECTION_ORDER)
+    expect(section2.text).toBe(VECTR_GREP_SECTION_TEXT)
     expect(handles.has(agent)).toBe(true) // tool bind also happened (same gate)
     killSpy.mockRestore()
   })
@@ -220,7 +228,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
       expect(promptFibers.has(agent)).toBe(true)
     }, { timeout: 5000, interval: 25 })
 
-    expect(sectionSpy).toHaveBeenCalledTimes(1)
+    expect(sectionSpy).toHaveBeenCalledTimes(2)
     // Simulate agent/disposed teardown: dispose the captured fiber.
     const fiber = promptFibers.get(agent) as { dispose: () => Promise<void> }
     await fiber.dispose()

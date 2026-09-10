@@ -71,6 +71,13 @@ import {
   diagnoseDaemon,
   fetchStatus,
 } from './probe'
+import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
+import { SessionVectrService, registerSessionRoutes } from './bridge'
+
+// Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
+export * from './domain'
+export * from './infra'
+export * from './bridge'
 
 // Re-export the registry/probe surface so existing importers (and tests) keep
 // resolving these symbols from the plugin root without the index↔workspaces cycle.
@@ -153,6 +160,12 @@ export interface Config {
   daemonHttpTimeoutMs?: number
   /** TCP port-listening probe budget in ms (default 300). */
   daemonTcpTimeoutMs?: number
+  /** Optional custom path to vectr CLI executable (default derived from env or PATH). */
+  cliPath?: string
+  /** Vectr CLI execution timeout in ms (default 30000). */
+  cliTimeoutMs?: number
+  /** Working memory note recall / resume timeout in ms (default 10000). */
+  recallTimeoutMs?: number
 }
 
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
@@ -160,6 +173,12 @@ export const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5_000
 
 /** Default TCP port-listening probe budget (ms). */
 export const DEFAULT_DAEMON_TCP_TIMEOUT_MS = DEFAULT_TCP_TIMEOUT_MS
+
+/** Default Vectr CLI execution timeout in ms (default 30,000). */
+export const DEFAULT_CLI_TIMEOUT_MS = 30_000
+
+/** Default working memory note recall / resume timeout in ms (default 10,000). */
+export const DEFAULT_RECALL_TIMEOUT_MS = 10_000
 
 /** (b) Minimum interval between startup-time heal attempts for the same slug.
  * Prevents a persistently-unreachable host from being hammered on every host
@@ -200,19 +219,34 @@ export const Config: z<Config> = z.object({
   secretsPath: z.string().default(DEFAULT_SECRETS_FILE),
   daemonHttpTimeoutMs: z.number().min(1).default(DEFAULT_DAEMON_HTTP_TIMEOUT_MS),
   daemonTcpTimeoutMs: z.number().min(1).default(DEFAULT_DAEMON_TCP_TIMEOUT_MS),
+  cliPath: z.string().default(''),
+  cliTimeoutMs: z.number().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
+  recallTimeoutMs: z.number().min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
 })
 
 /**
  * System-prompt section contributed to each agent when its vectr daemon is
- * verified alive: nudges the agent to use the vectr MCP tools for code queries
- * instead of blind file reads. Static English text (matches the official
- * prompt style). Order 95 sits after the deployment persona (0) and before the
- * tool-guidance band (100–199); see `@deepseek-ai/dsh-system-prompt`.
+ * verified alive: nudges the agent to prioritize vectr MCP tools for code queries
+ * and codebase navigation over grep and blind file reads. Static English text
+ * (matches the official prompt style). Order 95 sits after the deployment
+ * persona (0) and before the tool-guidance band (100–199); see
+ * `@deepseek-ai/dsh-system-prompt`.
  */
 export const VECTR_GUIDANCE_SECTION_NAME = 'vectr:mcp-guidance'
 export const VECTR_GUIDANCE_SECTION_ORDER = 95
 export const VECTR_GUIDANCE_SECTION_TEXT =
-  'When answering code-query or codebase-navigation questions, prefer the vectr MCP tools (mcp__vectr__*) over blind file reads. Use them to search, retrieve, and reason over the indexed workspace.'
+  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr__*) over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep only if vectr query fails or returns no matches.'
+
+/**
+ * Scoped prompt section that shadows the global `tool:grep` section for agents
+ * in a verified vectr workspace. Instead of directly telling the model to use
+ * grep to search file contents, it instructs the model to prioritize vectr tools
+ * and only use grep as a fallback if vectr fails.
+ */
+export const VECTR_GREP_SECTION_NAME = 'tool:grep'
+export const VECTR_GREP_SECTION_ORDER = 1500
+export const VECTR_GREP_SECTION_TEXT =
+  'Prioritize querying code via vectr tools (mcp__vectr__*). If vectr query fails or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
 
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
@@ -347,6 +381,11 @@ export function install(
           order: VECTR_GUIDANCE_SECTION_ORDER,
           text: VECTR_GUIDANCE_SECTION_TEXT,
         })
+        scope.systemPrompt.section({
+          name: VECTR_GREP_SECTION_NAME,
+          order: scope.systemPrompt.getSectionOrder?.('TOOL_GREP') ?? VECTR_GREP_SECTION_ORDER,
+          text: VECTR_GREP_SECTION_TEXT,
+        })
       })
       if (disposed.has(agent)) {
         // P1: same probe-window race as the connection above — the section was
@@ -461,6 +500,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     secretsPath: config.secretsPath ?? DEFAULT_SECRETS_FILE,
     daemonHttpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
     daemonTcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
+    cliPath: config.cliPath ?? '',
+    cliTimeoutMs: config.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
+    recallTimeoutMs: config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS,
   }
   // Relative-path fallback (P3-safe): only resolves against process.cwd()
   // when Config supplies a *relative* path. Both defaults
@@ -641,6 +683,24 @@ export function apply(ctx: Context, config: Config = {}): void {
   // management endpoints serves every workspace; disposed with this fiber.
   registerManagementRoutes(ctx, instancesPath, resolved)
   registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath, instancesPath)
+
+  // 4-Layer architecture: wire Domain, Infra, and Bridge services for session management
+  const instanceResolver = new InstanceResolver(instancesPath, ctx)
+  const apiClient = new VectrApiClient()
+  const codebaseService = new CodebaseService(codebasesPath)
+  const cliRunner = new VectrCliRunner({
+    cliPath: resolved.cliPath || undefined,
+    timeoutMs: resolved.cliTimeoutMs,
+  })
+  const sessionService = new SessionVectrService({
+    instanceResolver,
+    apiClient,
+    codebaseService,
+    cliRunner,
+    statusTimeoutMs: resolved.daemonHttpTimeoutMs,
+    recallTimeoutMs: resolved.recallTimeoutMs,
+  })
+  registerSessionRoutes(ctx, sessionService)
 }
 
 /**
@@ -926,6 +986,15 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
           return
         }
         const spec = body as CodebaseSpec
+        if (spec && typeof spec === 'object') {
+          const rawPath = spec.path || (spec as unknown as { remotePath?: string }).remotePath
+          if (rawPath && typeof rawPath === 'string') {
+            spec.path = rawPath.trim()
+          }
+          if (!spec.auth && spec.password) {
+            spec.auth = 'password'
+          }
+        }
         try {
           const entry = await createCodebase(deps, codebasesPath, spec)
           sendJson(res, 201, stripSecret(entry))

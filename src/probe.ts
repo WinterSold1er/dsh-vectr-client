@@ -12,20 +12,10 @@
 
 import { setTimeout as sleep } from 'node:timers/promises'
 import { connect as tcpConnect } from 'node:net'
-import { DEFAULT_HOST, type InstanceEntry } from './registry'
+import { DEFAULT_HOST } from './registry'
+import type { InstanceEntry, VectrStatus } from './domain/types'
 
-/** Shape of `/v1/status` as vectr documents it (optional fields tolerated). */
-export interface VectrStatus {
-  indexed_files?: number
-  total_chunks?: number
-  languages?: string[]
-  last_indexed?: string | null
-  notes_count?: number
-  fully_ready?: boolean
-  reindex_in_progress?: boolean
-  embed_model?: string
-  [key: string]: unknown
-}
+export type { VectrStatus }
 
 /** Default TCP connect budget for the port-listening probe. */
 export const DEFAULT_TCP_TIMEOUT_MS = 300

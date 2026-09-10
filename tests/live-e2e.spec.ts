@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { boot } from '@deepseek-ai/dsh-app-boot'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -117,6 +117,15 @@ describe('vectr-client live daemon e2e', () => {
           bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
           bootCtx.loader.builtins['vectr-test-session'] = SessionStore
           bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
+          bootCtx.loader.builtins['vectr-test-session-projections'] = {
+            name: 'vectr-test-session-projections',
+            apply(c: Context) {
+              c.provide('sessionProjections', {
+                register: () => {},
+                stateOf: () => undefined,
+              })
+            },
+          }
           bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
           bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
         },
@@ -189,6 +198,15 @@ describe('vectr-client per-workspace port isolation', () => {
           bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
           bootCtx.loader.builtins['vectr-test-session'] = SessionStore
           bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
+          bootCtx.loader.builtins['vectr-test-session-projections'] = {
+            name: 'vectr-test-session-projections',
+            apply(c: Context) {
+              c.provide('sessionProjections', {
+                register: () => {},
+                stateOf: () => undefined,
+              })
+            },
+          }
           bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
           bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
         },

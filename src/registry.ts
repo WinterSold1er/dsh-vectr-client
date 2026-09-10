@@ -12,6 +12,9 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { InstanceEntry, InstancesFile } from './domain/types'
+
+export type { InstanceEntry, InstancesFile }
 
 /** Minimal logger surface {@link readInstancesFile} touches (no Cordis dep). */
 interface LoggerLike {
@@ -32,29 +35,6 @@ export const WORKSPACE_KEY_LENGTH = 12
 
 /** Default path of the vectr daemon registry, inside the user's home. */
 export const DEFAULT_INSTANCES_FILE = join(homedir(), '.vectr', 'instances.json')
-
-/** One vectr daemon record from {@link InstancesFile}. */
-export interface InstanceEntry {
-  /** Absolute workspace directory this daemon serves. */
-  workspace: string
-  /** TCP port of the daemon's Streamable HTTP MCP endpoint. */
-  port: number
-  /** Daemon process id. */
-  pid?: number
-  /** Unix epoch milliseconds when the daemon started. */
-  started_at?: number
-  /** Registry mode (`full`, `lite`, …). */
-  mode?: string
-  /** Bind host; defaults to {@link DEFAULT_HOST}. */
-  host?: string
-  /** Optional extra index roots. */
-  extra_roots?: string[]
-  /** Optional VS Code workspace file the daemon indexes. */
-  code_workspace_file?: string | null
-}
-
-/** The on-disk `instances.json` mapping: sha256(workspace)[:12] → daemon record. */
-export type InstancesFile = Record<string, InstanceEntry>
 
 /**
  * Resolve the vectr daemon record for one workspace, following the same

@@ -17,6 +17,21 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join, resolve, sep } from 'node:path'
 import { isPortListening } from './probe'
 import { WORKSPACE_KEY_LENGTH, resolveInstance, type InstancesFile } from './registry'
+import type {
+  CodebaseAuth,
+  CodebaseEntry,
+  CodebaseSpec,
+  CodebaseStatus,
+  CodebaseType,
+} from './domain/types'
+
+export type {
+  CodebaseAuth,
+  CodebaseEntry,
+  CodebaseSpec,
+  CodebaseStatus,
+  CodebaseType,
+}
 
 /** TCP connect budget for the `isPortListening` liveness check of the FORWARDED
  * local port (ms) — used by `ensureTunnelUp` purely to decide
@@ -31,62 +46,6 @@ export const DEFAULT_TUNNEL_PROBE_MS = 800
  * so the two call sites cannot drift apart. */
 export const TUNNEL_PORT_MIN = 8760
 export const TUNNEL_PORT_MAX = 8799
-
-/** Discriminant for where a codebase's vectr daemon runs. */
-export type CodebaseType = 'local' | 'remote'
-
-/** How a remote host authenticates (informational; the secret lives in the store). */
-export type CodebaseAuth = 'key' | 'password'
-
-/** Input description of a codebase to create. */
-export interface CodebaseSpec {
-  /** Where the daemon runs. */
-  type: CodebaseType
-  /** Absolute workspace path served by the daemon. */
-  path: string
-  /** Owning workspace (absolute). Local == `path`; remote == the remote workspace the daemon serves. Composite `serverName` is derived from this + `slug`. */
-  workspace?: string
-  /** Remote host (`user@host` or `host`) for `type === 'remote'`. */
-  host?: string
-  /** Remote auth method. */
-  auth?: CodebaseAuth
-  /** Plaintext password for `auth === 'password'`; consumed, never persisted here. */
-  password?: string
-  /** Stable short identifier, also used to derive `serverName`. */
-  slug: string
-}
-
-/** Runtime / persisted record of one managed codebase. */
-export interface CodebaseEntry {
-  /** `slug` (stable identifier). */
-  id: string
-  /** `slug` duplicate field kept for callers expecting `id` + `slug`. */
-  slug: string
-  /** Where the daemon runs. */
-  type: CodebaseType
-  /** Absolute workspace path served by the daemon. */
-  path: string
-  /** Remote host for `type === 'remote'`. */
-  host?: string
-  /** Owning workspace (absolute); enables per-workspace binding isolation. Local == `path`; remote == the remote workspace. */
-  workspace?: string
-  /** Derived MCP server name (`vectr_<sha256(workspace)[:12]>_<slug>`) — globally unique across workspaces. */
-  serverName: string
-  /** Local Streamable HTTP port the host connects to (tunnel endpoint / daemon port). */
-  localPort?: number
-  /** Remote daemon port for `type === 'remote'`. */
-  remotePort?: number
-  /** PID of the ssh tunnel process for `type === 'remote'`. */
-  tunnelPid?: number
-  /** Control-socket path of the ssh tunnel master (`-M -S`); reliable PID query + clean teardown. */
-  tunnelCtl?: string
-  /** Reference into the credential store (never the value). */
-  credentialRef?: string
-  /** Connection status. */
-  status: 'up' | 'down' | 'error'
-  /** Last error detail when `status === 'error'`. */
-  error?: string
-}
 
 /**
  * Secret store seam. Implemented either by a wrapper over `ctx.credentials`
@@ -406,6 +365,16 @@ async function createCodebaseCore(
   metaPath: string,
   spec: CodebaseSpec,
 ): Promise<CodebaseEntry> {
+  // Dual validation & tolerance: resolve path alias if remotePath was passed
+  const rawPath = spec.path || (spec as unknown as { remotePath?: string }).remotePath
+  if (rawPath && typeof rawPath === 'string') {
+    spec.path = rawPath.trim()
+  }
+  // Dual validation & tolerance: infer 'password' auth if password is provided but auth omitted
+  if (!spec.auth && spec.password) {
+    spec.auth = 'password'
+  }
+
   const workspace = spec.workspace ?? spec.path
   // B2: a remote codebase's `workspace` is the CALLER's local cwd — it cannot be
   // inferred from the remote `path` (a different machine). The client must report
@@ -539,7 +508,10 @@ async function createCodebaseCore(
   // and reuses the already-assigned port (the `vectr start` in step 3 is a
   // no-op/idempotent when the daemon is already up). Querying the registry before
   // falling back to stdout is what makes a retry safe rather than a duplicate.
-  const remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(startResult.stdout)
+  const remotePort =
+    (typeof spec.remotePort === 'number' && spec.remotePort > 0 ? spec.remotePort : undefined) ??
+    (await resolveRemotePort(ssh, spec.host, spec.path)) ??
+    parseRemotePort(startResult.stdout)
   if (remotePort === undefined) {
     // The tunnel/port steps below must not run with an undefined port. Roll back
     // the already-reserved server name and any stored credential, then throw with

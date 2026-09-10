@@ -37,6 +37,8 @@ describe('Config schema defaults and validation', () => {
     expect(resolved.reconnect).toEqual({ enabled: false, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 })
     expect(resolved.daemonHttpTimeoutMs).toBe(DEFAULT_DAEMON_HTTP_TIMEOUT_MS)
     expect(resolved.daemonTcpTimeoutMs).toBe(DEFAULT_DAEMON_TCP_TIMEOUT_MS)
+    expect(resolved.cliTimeoutMs).toBe(30_000)
+    expect(resolved.recallTimeoutMs).toBe(10_000)
   })
 
   it('accepts explicit values and merges a partial reconnect block', () => {
@@ -68,5 +70,19 @@ describe('Config schema defaults and validation', () => {
   it('rejects daemonTcpTimeoutMs <= 0 (guardrail F2)', () => {
     expect(() => resolveConfig({ daemonTcpTimeoutMs: 0 })).toThrow()
     expect(() => resolveConfig({ daemonTcpTimeoutMs: -5 })).toThrow()
+  })
+
+  it('accepts custom cliTimeoutMs and recallTimeoutMs', () => {
+    const resolved = resolveConfig({
+      cliTimeoutMs: 45_000,
+      recallTimeoutMs: 15_000,
+    })
+    expect(resolved.cliTimeoutMs).toBe(45_000)
+    expect(resolved.recallTimeoutMs).toBe(15_000)
+  })
+
+  it('rejects cliTimeoutMs and recallTimeoutMs <= 0', () => {
+    expect(() => resolveConfig({ cliTimeoutMs: 0 })).toThrow()
+    expect(() => resolveConfig({ recallTimeoutMs: 0 })).toThrow()
   })
 })

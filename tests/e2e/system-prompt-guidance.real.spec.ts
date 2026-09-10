@@ -36,6 +36,9 @@ import {
   VECTR_GUIDANCE_SECTION_NAME,
   VECTR_GUIDANCE_SECTION_ORDER,
   VECTR_GUIDANCE_SECTION_TEXT,
+  VECTR_GREP_SECTION_NAME,
+  VECTR_GREP_SECTION_ORDER,
+  VECTR_GREP_SECTION_TEXT,
 } from '../../src/index.ts'
 
 vi.mock('@deepseek-ai/dsh-mcp-client/src/connection.ts', async (importOriginal) => {
@@ -149,6 +152,7 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
     await vi.waitFor(async () => {
       const assembly = await ctx.systemPrompt.assemble({ scope: agent })
       expect(assembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(true)
+      expect(assembly.sections.some(s => s.name === VECTR_GREP_SECTION_NAME)).toBe(true)
     }, { timeout: 10_000 })
 
     const scopedAssembly = await ctx.systemPrompt.assemble({ scope: agent })
@@ -156,11 +160,16 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
     expect(section).toBeDefined()
     expect(section!.text).toBe(VECTR_GUIDANCE_SECTION_TEXT)
     expect(section!.name).toBe(VECTR_GUIDANCE_SECTION_NAME)
-    // The band (order 95) must sit after the persona (order 0).
+
+    const grepSection = scopedAssembly.sections.find(s => s.name === VECTR_GREP_SECTION_NAME)
+    expect(grepSection).toBeDefined()
+    expect(grepSection!.text).toBe(VECTR_GREP_SECTION_TEXT)
+    expect(grepSection!.name).toBe(VECTR_GREP_SECTION_NAME)
 
     // The GLOBAL assembly must NOT carry the agent-scoped section.
     const globalAssembly = await ctx.systemPrompt.assemble({})
     expect(globalAssembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(false)
+    expect(globalAssembly.sections.some(s => s.name === VECTR_GREP_SECTION_NAME)).toBe(false)
 
     disposeAgent()
   })
@@ -202,6 +211,7 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
     await vi.waitFor(async () => {
       const assembly = await ctx.systemPrompt.assemble({ scope: agent })
       expect(assembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(true)
+      expect(assembly.sections.some(s => s.name === VECTR_GREP_SECTION_NAME)).toBe(true)
     }, { timeout: 10_000 })
 
     // Genuine teardown: unregistering the agent emits agent/disposed, which the
@@ -211,6 +221,39 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
     await vi.waitFor(async () => {
       const assembly = await ctx.systemPrompt.assemble({ scope: agent })
       expect(assembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(false)
+      expect(assembly.sections.some(s => s.name === VECTR_GREP_SECTION_NAME)).toBe(false)
+    }, { timeout: 5_000 })
+  })
+
+  it('shadows the global tool:grep section in scoped assembly', async () => {
+    await writeFile(join(instancesDir, 'instances.json'), JSON.stringify({
+      [keyOf(cwd)]: { workspace: cwd, port: statusPort, pid: 1, started_at: 0, mode: 'full', host: '127.0.0.1' },
+    }))
+    const ctx = await mountRegistry()
+    ctx.systemPrompt.section({
+      name: 'tool:grep',
+      order: 1500,
+      text: 'Default global grep text',
+    })
+    liveContexts.add(ctx)
+    const { agent, disposeAgent } = await mintAgent(ctx, cwd)
+
+    await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
+      instancesPath: join(instancesDir, 'instances.json'),
+    })
+
+    await vi.waitFor(async () => {
+      const assembly = await ctx.systemPrompt.assemble({ scope: agent })
+      expect(assembly.sections.find(s => s.name === 'tool:grep')?.text).toBe(VECTR_GREP_SECTION_TEXT)
+    }, { timeout: 10_000 })
+
+    const globalAssembly = await ctx.systemPrompt.assemble({})
+    expect(globalAssembly.sections.find(s => s.name === 'tool:grep')?.text).toBe('Default global grep text')
+
+    disposeAgent()
+    await vi.waitFor(async () => {
+      const assembly = await ctx.systemPrompt.assemble({ scope: agent })
+      expect(assembly.sections.find(s => s.name === 'tool:grep')?.text).toBe('Default global grep text')
     }, { timeout: 5_000 })
   })
 })

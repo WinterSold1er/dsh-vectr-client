@@ -24,6 +24,9 @@ import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
 import { type CodebaseEntry, type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
 import { type InstancesFile } from './registry';
+export * from './domain';
+export * from './infra';
+export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
@@ -85,11 +88,21 @@ export interface Config {
     daemonHttpTimeoutMs?: number;
     /** TCP port-listening probe budget in ms (default 300). */
     daemonTcpTimeoutMs?: number;
+    /** Optional custom path to vectr CLI executable (default derived from env or PATH). */
+    cliPath?: string;
+    /** Vectr CLI execution timeout in ms (default 30000). */
+    cliTimeoutMs?: number;
+    /** Working memory note recall / resume timeout in ms (default 10000). */
+    recallTimeoutMs?: number;
 }
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
 export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
 /** Default TCP port-listening probe budget (ms). */
 export declare const DEFAULT_DAEMON_TCP_TIMEOUT_MS = 300;
+/** Default Vectr CLI execution timeout in ms (default 30,000). */
+export declare const DEFAULT_CLI_TIMEOUT_MS = 30000;
+/** Default working memory note recall / resume timeout in ms (default 10,000). */
+export declare const DEFAULT_RECALL_TIMEOUT_MS = 10000;
 /** (b) Minimum interval between startup-time heal attempts for the same slug.
  * Prevents a persistently-unreachable host from being hammered on every host
  * restart while still leaving room for transient blips to recover. */
@@ -103,14 +116,24 @@ export declare function startupHealEligible(entry: Pick<CodebaseEntry, 'type' | 
 export declare const Config: z<Config>;
 /**
  * System-prompt section contributed to each agent when its vectr daemon is
- * verified alive: nudges the agent to use the vectr MCP tools for code queries
- * instead of blind file reads. Static English text (matches the official
- * prompt style). Order 95 sits after the deployment persona (0) and before the
- * tool-guidance band (100–199); see `@deepseek-ai/dsh-system-prompt`.
+ * verified alive: nudges the agent to prioritize vectr MCP tools for code queries
+ * and codebase navigation over grep and blind file reads. Static English text
+ * (matches the official prompt style). Order 95 sits after the deployment
+ * persona (0) and before the tool-guidance band (100–199); see
+ * `@deepseek-ai/dsh-system-prompt`.
  */
 export declare const VECTR_GUIDANCE_SECTION_NAME = "vectr:mcp-guidance";
 export declare const VECTR_GUIDANCE_SECTION_ORDER = 95;
-export declare const VECTR_GUIDANCE_SECTION_TEXT = "When answering code-query or codebase-navigation questions, prefer the vectr MCP tools (mcp__vectr__*) over blind file reads. Use them to search, retrieve, and reason over the indexed workspace.";
+export declare const VECTR_GUIDANCE_SECTION_TEXT = "When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr__*) over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep only if vectr query fails or returns no matches.";
+/**
+ * Scoped prompt section that shadows the global `tool:grep` section for agents
+ * in a verified vectr workspace. Instead of directly telling the model to use
+ * grep to search file contents, it instructs the model to prioritize vectr tools
+ * and only use grep as a fallback if vectr fails.
+ */
+export declare const VECTR_GREP_SECTION_NAME = "tool:grep";
+export declare const VECTR_GREP_SECTION_ORDER = 1500;
+export declare const VECTR_GREP_SECTION_TEXT = "Prioritize querying code via vectr tools (mcp__vectr__*). If vectr query fails or yields no results, use the grep tool \u2014 not shell grep or rg \u2014 to search file contents. Use read on a matched file when you need surrounding context.";
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
  * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.

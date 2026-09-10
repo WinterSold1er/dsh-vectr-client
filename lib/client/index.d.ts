@@ -26,6 +26,10 @@
  * @module dsh-vectr-client/client
  */
 import { type ReactNode } from 'react';
+export { SessionHeaderAction } from './SessionHeaderAction';
+export { SessionDrawerModal } from './SessionDrawerModal';
+export { CodebaseModal } from './CodebaseModal';
+export { MemoryViewer } from './MemoryViewer';
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
     slots: {
@@ -51,5 +55,4 @@ export declare const inject: string[];
  * runs its callback as a Cordis effect, so the callback returns the disposer
  * `slots.register` yields (not a plain descriptor) or the loader rejects it. */
 export declare function apply(ctx: ClientContext): void;
-export {};
 //# sourceMappingURL=index.d.ts.map

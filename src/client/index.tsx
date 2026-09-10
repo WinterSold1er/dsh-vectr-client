@@ -30,6 +30,12 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { VectrSettings } from './vectr-settings'
 import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
+import { SessionHeaderAction } from './SessionHeaderAction'
+
+export { SessionHeaderAction } from './SessionHeaderAction'
+export { SessionDrawerModal } from './SessionDrawerModal'
+export { CodebaseModal } from './CodebaseModal'
+export { MemoryViewer } from './MemoryViewer'
 
 /** Sentinel workspace for entries that could not be inferred during migration. */
 const UNASSIGNED_WORKSPACE = '__unassigned__'
@@ -683,4 +689,12 @@ export function apply(ctx: ClientContext): void {
     order: VECTR_SECTION_ORDER,
     label: () => 'Vectr',
   }, VectrSettings))
+
+  // Mount session utility in conversation header, reacting dynamically to active session cwd.
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'vectr-session-header-utility',
+    order: 120,
+    label: () => 'Vectr',
+  }, SessionHeaderAction))
 }

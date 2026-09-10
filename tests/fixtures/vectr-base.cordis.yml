@@ -14,6 +14,9 @@
 - id: session
   name: cordis:vectr-test-session
 
+- id: session-projections
+  name: cordis:vectr-test-session-projections
+
 - id: agent
   name: cordis:vectr-test-agent
 

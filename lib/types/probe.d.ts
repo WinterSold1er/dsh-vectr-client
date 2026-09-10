@@ -9,19 +9,8 @@
  *
  * @module dsh-vectr-client/probe
  */
-import { type InstanceEntry } from './registry';
-/** Shape of `/v1/status` as vectr documents it (optional fields tolerated). */
-export interface VectrStatus {
-    indexed_files?: number;
-    total_chunks?: number;
-    languages?: string[];
-    last_indexed?: string | null;
-    notes_count?: number;
-    fully_ready?: boolean;
-    reindex_in_progress?: boolean;
-    embed_model?: string;
-    [key: string]: unknown;
-}
+import type { InstanceEntry, VectrStatus } from './domain/types';
+export type { VectrStatus };
 /** Default TCP connect budget for the port-listening probe. */
 export declare const DEFAULT_TCP_TIMEOUT_MS = 300;
 /**
