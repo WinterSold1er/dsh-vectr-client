@@ -4,6 +4,7 @@
  * Mounted into the host slot `conversation.session.header.utilities`.
  * Dynamically tracks the current active session's working directory (`session.cwd`)
  * and displays live status, mode, port, and quick metrics.
+ * Acts as a pure trigger for `dialogCoordinator.open(workspace)`.
  *
  * (Layer 4: Presentation)
  *
@@ -11,9 +12,9 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import type { SessionVectrState } from '../domain'
+import { resolveUnifiedStatus, type SessionVectrState } from '../domain'
 import { VectrStyles } from './buttons'
-import { SessionDrawerModal } from './SessionDrawerModal'
+import { dialogCoordinator } from './dialogCoordinator'
 
 export interface SessionHeaderActionProps {
   sessionId?: string | undefined
@@ -30,12 +31,9 @@ export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode 
     : undefined
 
   const [state, setState] = useState<SessionVectrState | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [modalOpen, setModalOpen] = useState(false)
 
   const fetchStatus = async (cwd: string, signal?: AbortSignal): Promise<void> => {
     if (!cwd) return
-    setLoading(true)
     try {
       const res = await fetch(
         `/api/vectr/session-status?workspace=${encodeURIComponent(cwd)}`,
@@ -52,39 +50,51 @@ export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode 
         return
       }
       setState(null)
-    } finally {
-      if (!signal?.aborted) {
-        setLoading(false)
-      }
     }
   }
 
   useEffect(() => {
-    if (sessionCwd && typeof sessionCwd === 'string') {
-      const controller = new AbortController()
-      void fetchStatus(sessionCwd, controller.signal)
-      return () => {
-        controller.abort()
-      }
-    } else {
-      setState(null)
+    const cwdToFetch = sessionCwd || '.'
+    const controller = new AbortController()
+    void fetchStatus(cwdToFetch, controller.signal)
+    return () => {
+      controller.abort()
     }
   }, [sessionCwd])
 
-  if (!sessionCwd) {
-    return null
-  }
-
-  const live = state?.live === true
-  const mode = state?.mode ?? 'offline'
-  const isMemoryOnly = mode === 'memory_only'
+  const unifiedStatus = resolveUnifiedStatus({
+    live: state?.live,
+    mode: state?.mode,
+    status: state?.status,
+    reason: state?.reason,
+    error: state?.error,
+  })
 
   let badgeText = 'Vectr'
-  if (live) {
-    badgeText = isMemoryOnly ? `Vectr [mem:${state?.port ?? ''}]` : `Vectr [${state?.port ?? ''}]`
+  if (unifiedStatus.kind === 'ready') {
+    badgeText = state?.port ? `Vectr [${state.port}]` : 'Vectr'
+  } else if (unifiedStatus.kind === 'memory_only') {
+    badgeText = state?.port ? `Vectr [mem:${state.port}]` : 'Vectr [mem]'
+  } else if (unifiedStatus.kind === 'indexing') {
+    badgeText = state?.port ? `Vectr [idx:${state.port}]` : 'Vectr [indexing]'
+  } else if (unifiedStatus.kind === 'initializing') {
+    badgeText = state?.port ? `Vectr [init:${state.port}]` : 'Vectr [init]'
+  } else if (unifiedStatus.kind === 'search_only') {
+    badgeText = state?.port ? `Vectr [search:${state.port}]` : 'Vectr [search]'
+  } else if (unifiedStatus.label === 'Error') {
+    badgeText = 'Vectr [err]'
   } else {
     badgeText = 'Vectr [off]'
   }
+
+  const dotClass =
+    unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only' || unifiedStatus.kind === 'search_only'
+      ? 'vectr-dot-live'
+      : unifiedStatus.isBusy
+        ? 'vectr-dot-live'
+        : unifiedStatus.label === 'Error'
+          ? 'vectr-dot-error'
+          : 'vectr-dot-offline'
 
   return (
     <>
@@ -92,26 +102,13 @@ export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode 
       <button
         type="button"
         className="vectr-header-capsule"
-        onClick={() => setModalOpen(true)}
-        title={`Vectr 状态: ${live ? `Live (${mode})` : 'Offline'}\n工作区: ${sessionCwd}`}
+        onClick={() => dialogCoordinator.open(sessionCwd || '.')}
+        title={`Vectr 状态: ${unifiedStatus.label}${unifiedStatus.description ? ` (${unifiedStatus.description})` : ''}\n工作区: ${sessionCwd || '.'}`}
         aria-label="Vectr 状态与管理"
       >
-        <span
-          className={`vectr-indicator-dot ${live ? 'vectr-dot-live' : 'vectr-dot-offline'}`}
-        />
+        <span className={`vectr-indicator-dot ${dotClass}`} />
         <span>{badgeText}</span>
       </button>
-
-      <SessionDrawerModal
-        workspace={sessionCwd}
-        state={state}
-        loading={loading}
-        isOpen={modalOpen}
-        onClose={() => setModalOpen(false)}
-        onRefresh={() => {
-          if (sessionCwd) void fetchStatus(sessionCwd)
-        }}
-      />
     </>
   )
 }

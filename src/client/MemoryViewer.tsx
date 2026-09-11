@@ -108,7 +108,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
         style={{
           display: 'flex',
           gap: 8,
-          borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+          borderBottom: '1px solid var(--dsw-alias-border-l2)',
           paddingBottom: 2,
         }}
       >
@@ -188,8 +188,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
               style={{
                 padding: '8px 12px',
                 borderRadius: 6,
-                background: 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
-                color: 'var(--dsw-alias-state-error-primary, #ef4444)',
+                background: 'var(--dsw-alias-interactive-bg-hover-danger)',
+                color: 'var(--dsw-alias-state-error-primary)',
                 fontSize: 12,
               }}
             >
@@ -202,8 +202,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
               style={{
                 maxHeight: '380px',
                 overflowY: 'auto',
-                background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
-                border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))',
+                background: 'var(--dsw-alias-bg-layer-1)',
+                border: '1px solid var(--dsw-alias-border-l2)',
                 borderRadius: 8,
                 padding: '12px 16px',
                 fontSize: 13,
@@ -237,8 +237,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
               style={{
                 padding: '8px 12px',
                 borderRadius: 6,
-                background: 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
-                color: 'var(--dsw-alias-state-error-primary, #ef4444)',
+                background: 'var(--dsw-alias-interactive-bg-hover-danger)',
+                color: 'var(--dsw-alias-state-error-primary)',
                 fontSize: 12,
               }}
             >
@@ -261,11 +261,11 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
 
               {resumeData.gotchas && resumeData.gotchas.length > 0 && (
                 <div className="vectr-note-card">
-                  <div style={{ fontWeight: 600, color: 'var(--dsw-alias-state-warning-primary, #f59e0b)', marginBottom: 4 }}>
+                  <div style={{ fontWeight: 600, color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 4 }}>
                     ⚠️ 关联避坑项 (Gotchas: {resumeData.gotchas.length})
                   </div>
                   {resumeData.gotchas.map((g, idx) => (
-                    <div key={idx} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid #f59e0b' }}>
+                    <div key={idx} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--dsw-alias-state-warn-primary)' }}>
                       {g.file_path && <code style={{ fontSize: 11 }}>[{g.file_path}] </code>}
                       {g.content || g.title}
                     </div>
@@ -277,8 +277,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
                 style={{
                   maxHeight: '300px',
                   overflowY: 'auto',
-                  background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
-                  border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))',
+                  background: 'var(--dsw-alias-bg-layer-1)',
+                  border: '1px solid var(--dsw-alias-border-l2)',
                   borderRadius: 8,
                   padding: '12px 16px',
                   fontSize: 12,

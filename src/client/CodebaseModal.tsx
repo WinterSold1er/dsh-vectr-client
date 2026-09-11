@@ -118,7 +118,7 @@ export function CodebaseModal({
         <div
           style={{
             padding: '16px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+            borderBottom: '1px solid var(--dsw-alias-border-l2)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -141,8 +141,8 @@ export function CodebaseModal({
               style={{
                 padding: '8px 12px',
                 borderRadius: 6,
-                background: 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
-                color: 'var(--dsw-alias-state-error-primary, #ef4444)',
+                background: 'var(--dsw-alias-interactive-bg-hover-danger)',
+                color: 'var(--dsw-alias-state-error-primary)',
                 fontSize: 12,
               }}
             >
@@ -311,7 +311,7 @@ export function CodebaseModal({
               gap: 10,
               marginTop: 10,
               paddingTop: 14,
-              borderTop: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+              borderTop: '1px solid var(--dsw-alias-border-l2)',
             }}
           >
             <button type="button" className={BTN.secondary} onClick={onClose} disabled={busy}>

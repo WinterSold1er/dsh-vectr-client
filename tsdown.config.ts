@@ -40,8 +40,10 @@ export default {
   clean: false,
   // Platform modules stay external (resolved via the host module table at
   // runtime); everything else is inlined into the single bundle.
-  external: [...PLATFORM_MODULES],
-  noExternal: true,
+  deps: {
+    neverBundle: PLATFORM_MODULES,
+    alwaysBundle: (specifier: string) => !PLATFORM_MODULES.includes(specifier),
+  },
   define: {
     'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
     'import.meta.env.MODE': JSON.stringify(process.env.NODE_ENV ?? 'production'),

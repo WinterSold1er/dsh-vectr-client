@@ -7,7 +7,7 @@
  */
 
 import { useState, type ReactNode } from 'react'
-import type { SessionVectrState } from '../domain'
+import { resolveUnifiedStatus, type SessionVectrState } from '../domain'
 import { BTN } from './buttons'
 import { CodebaseModal } from './CodebaseModal'
 import { MemoryViewer } from './MemoryViewer'
@@ -45,6 +45,7 @@ export function SessionDrawerModal({
   // Codebase action states
   const [busySlug, setBusySlug] = useState<string | null>(null)
   const [codebaseMsg, setCodebaseMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [confirmDeleteSlug, setConfirmDeleteSlug] = useState<string | null>(null)
 
   if (!isOpen) return null
 
@@ -52,6 +53,13 @@ export function SessionDrawerModal({
   const mode = state?.mode ?? 'unknown'
   const isMemoryOnly = mode === 'memory_only'
   const status = state?.status
+  const unifiedStatus = resolveUnifiedStatus({
+    live,
+    mode,
+    status,
+    reason: state?.reason,
+    error: state?.error,
+  })
 
   const handleReindex = async (): Promise<void> => {
     setReindexing(true)
@@ -65,7 +73,6 @@ export function SessionDrawerModal({
       const data = (await res.json()) as { ok: boolean; error?: string }
       if (res.ok && data.ok) {
         setReindexMsg({ ok: true, text: '重新索引已触发并开始后台构建' })
-        setTimeout(onRefresh, 1500)
       } else {
         setReindexMsg({ ok: false, text: data.error ?? `触发失败 (${res.status})` })
       }
@@ -100,7 +107,6 @@ export function SessionDrawerModal({
           ok: true,
           text: `Vectr 工作区初始化完成！\n后续指引：如需启动语义检索与工作记忆守护进程，请在终端执行 vectr start（或配置后台守护进程拉起）。${data.stdout ? `\n\n${data.stdout}` : ''}`,
         })
-        setTimeout(onRefresh, 1200)
       } else {
         setInitResult({
           ok: false,
@@ -127,7 +133,6 @@ export function SessionDrawerModal({
       } else {
         setCodebaseMsg({ ok: false, text: `Codebase "${slug}" 连通失败: ${data.error ?? res.status}` })
       }
-      onRefresh()
     } catch (err) {
       setCodebaseMsg({ ok: false, text: `测试请求失败: ${String(err)}` })
     } finally {
@@ -135,9 +140,9 @@ export function SessionDrawerModal({
     }
   }
 
-  const handleDeleteCodebase = async (slug: string): Promise<void> => {
-    if (!confirm(`确定解绑并删除 Codebase "${slug}" 吗？`)) return
+  const executeDeleteCodebase = async (slug: string): Promise<void> => {
     setBusySlug(slug)
+    setConfirmDeleteSlug(null)
     setCodebaseMsg(null)
     try {
       const res = await fetch(`/api/vectr/codebases/${encodeURIComponent(slug)}`, {
@@ -145,7 +150,6 @@ export function SessionDrawerModal({
       })
       if (res.ok) {
         setCodebaseMsg({ ok: true, text: `Codebase "${slug}" 已解绑删除` })
-        onRefresh()
       } else {
         const data = (await res.json()) as { error?: string }
         setCodebaseMsg({ ok: false, text: `删除失败: ${data.error ?? res.status}` })
@@ -164,11 +168,11 @@ export function SessionDrawerModal({
         <div
           style={{
             padding: '16px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+            borderBottom: '1px solid var(--dsw-alias-border-l2)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
+            background: 'var(--dsw-alias-bg-layer-1)',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -182,15 +186,23 @@ export function SessionDrawerModal({
                     borderRadius: 10,
                     fontSize: 11,
                     fontWeight: 600,
-                    background: live
-                      ? 'var(--dsw-alias-state-success-subtle, rgba(16, 185, 129, 0.15))'
-                      : 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.15))',
-                    color: live
-                      ? 'var(--dsw-alias-state-success-primary, #10b981)'
-                      : 'var(--dsw-alias-state-error-primary, #ef4444)',
+                    background:
+                      unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only'
+                        ? 'var(--dsw-alias-state-success-tertiary)'
+                        : unifiedStatus.isBusy
+                          ? 'var(--dsw-alias-state-warn-tertiary)'
+                          : 'var(--dsw-alias-interactive-bg-hover-danger)',
+                    color:
+                      unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only'
+                        ? 'var(--dsw-alias-state-success-primary)'
+                        : unifiedStatus.isBusy
+                          ? 'var(--dsw-alias-state-warn-primary)'
+                          : 'var(--dsw-alias-state-error-primary)',
                   }}
+                  title={unifiedStatus.description}
                 >
-                  {live ? '● Live' : '○ Offline'}
+                  {unifiedStatus.kind === 'offline' ? '○ ' : '● '}
+                  {unifiedStatus.label}
                 </span>
                 <span
                   style={{
@@ -199,15 +211,15 @@ export function SessionDrawerModal({
                     fontSize: 11,
                     fontWeight: 500,
                     background: isMemoryOnly
-                      ? 'rgba(139, 92, 246, 0.15)'
+                      ? 'var(--dsw-alias-brand-tertiary)'
                       : mode === 'search_only'
-                        ? 'rgba(245, 158, 11, 0.15)'
-                        : 'rgba(59, 130, 246, 0.15)',
+                        ? 'var(--dsw-alias-state-warn-tertiary)'
+                        : 'var(--dsw-alias-brand-tertiary)',
                     color: isMemoryOnly
-                      ? '#8b5cf6'
+                      ? 'var(--dsw-alias-brand-primary)'
                       : mode === 'search_only'
-                        ? '#f59e0b'
-                        : '#3b82f6',
+                        ? 'var(--dsw-alias-state-warn-primary)'
+                        : 'var(--dsw-alias-brand-primary)',
                   }}
                 >
                   {mode}
@@ -261,7 +273,7 @@ export function SessionDrawerModal({
             gridTemplateColumns: 'repeat(4, 1fr)',
             gap: 12,
             padding: '14px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+            borderBottom: '1px solid var(--dsw-alias-border-l2)',
           }}
         >
           <div className="vectr-metric-card">
@@ -331,7 +343,7 @@ export function SessionDrawerModal({
             display: 'flex',
             gap: 12,
             padding: '0 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+            borderBottom: '1px solid var(--dsw-alias-border-l2)',
           }}
         >
           <button
@@ -380,11 +392,11 @@ export function SessionDrawerModal({
                     padding: '8px 12px',
                     borderRadius: 6,
                     background: codebaseMsg.ok
-                      ? 'var(--dsw-alias-state-success-subtle, rgba(16, 185, 129, 0.1))'
-                      : 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
+                      ? 'var(--dsw-alias-state-success-tertiary)'
+                      : 'var(--dsw-alias-interactive-bg-hover-danger)',
                     color: codebaseMsg.ok
-                      ? 'var(--dsw-alias-state-success-primary, #10b981)'
-                      : 'var(--dsw-alias-state-error-primary, #ef4444)',
+                      ? 'var(--dsw-alias-state-success-primary)'
+                      : 'var(--dsw-alias-state-error-primary)',
                     fontSize: 12,
                   }}
                 >
@@ -399,7 +411,7 @@ export function SessionDrawerModal({
                     textAlign: 'center',
                     color: 'var(--dsw-alias-label-tertiary)',
                     fontSize: 13,
-                    border: '1px dashed var(--dsw-alias-border-l2, #e5e7eb)',
+                    border: '1px dashed var(--dsw-alias-border-l2)',
                     borderRadius: 8,
                   }}
                 >
@@ -410,7 +422,7 @@ export function SessionDrawerModal({
                   <thead>
                     <tr
                       style={{
-                        borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+                        borderBottom: '1px solid var(--dsw-alias-border-l2)',
                         textAlign: 'left',
                         color: 'var(--dsw-alias-label-secondary)',
                       }}
@@ -426,7 +438,7 @@ export function SessionDrawerModal({
                     {state.codebases.map((cb) => (
                       <tr
                         key={cb.slug}
-                        style={{ borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)' }}
+                        style={{ borderBottom: '1px solid var(--dsw-alias-border-l2)' }}
                       >
                         <td style={{ padding: '10px', fontWeight: 600 }}>{cb.slug}</td>
                         <td style={{ padding: '10px' }}>
@@ -441,10 +453,10 @@ export function SessionDrawerModal({
                               fontWeight: 600,
                               color:
                                 cb.status === 'up'
-                                  ? 'var(--dsw-alias-state-success-primary, #10b981)'
+                                  ? 'var(--dsw-alias-state-success-primary)'
                                   : cb.status === 'error'
-                                    ? 'var(--dsw-alias-state-error-primary, #ef4444)'
-                                    : 'var(--dsw-alias-label-tertiary, #9ca3af)',
+                                    ? 'var(--dsw-alias-state-error-primary)'
+                                    : 'var(--dsw-alias-label-tertiary)',
                             }}
                             title={cb.error || ''}
                           >
@@ -452,23 +464,46 @@ export function SessionDrawerModal({
                           </span>
                         </td>
                         <td style={{ padding: '10px', textAlign: 'right' }}>
-                          <div style={{ display: 'inline-flex', gap: 6 }}>
-                            <button
-                              type="button"
-                              className={BTN.action}
-                              onClick={() => void handleTestCodebase(cb.slug)}
-                              disabled={busySlug === cb.slug}
-                            >
-                              测试连通性
-                            </button>
-                            <button
-                              type="button"
-                              className={BTN.danger}
-                              onClick={() => void handleDeleteCodebase(cb.slug)}
-                              disabled={busySlug === cb.slug}
-                            >
-                              解绑/删除
-                            </button>
+                          <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                            {confirmDeleteSlug === cb.slug ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className={BTN.danger}
+                                  onClick={() => void executeDeleteCodebase(cb.slug)}
+                                  disabled={busySlug === cb.slug}
+                                >
+                                  {busySlug === cb.slug ? '删除中…' : '确认解绑？'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={BTN.secondary}
+                                  onClick={() => setConfirmDeleteSlug(null)}
+                                  disabled={busySlug === cb.slug}
+                                >
+                                  取消
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className={BTN.action}
+                                  onClick={() => void handleTestCodebase(cb.slug)}
+                                  disabled={busySlug === cb.slug}
+                                >
+                                  测试连通性
+                                </button>
+                                <button
+                                  type="button"
+                                  className={BTN.danger}
+                                  onClick={() => setConfirmDeleteSlug(cb.slug)}
+                                  disabled={busySlug === cb.slug}
+                                >
+                                  解绑/删除
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -489,7 +524,7 @@ export function SessionDrawerModal({
               <div
                 style={{
                   padding: 16,
-                  border: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+                  border: '1px solid var(--dsw-alias-border-l2)',
                   borderRadius: 8,
                 }}
               >
@@ -505,8 +540,8 @@ export function SessionDrawerModal({
                     style={{
                       padding: '10px 12px',
                       borderRadius: 6,
-                      background: 'rgba(139, 92, 246, 0.1)',
-                      color: '#8b5cf6',
+                      background: 'var(--dsw-alias-brand-tertiary)',
+                      color: 'var(--dsw-alias-brand-primary)',
                       fontSize: 12,
                     }}
                   >
@@ -543,11 +578,11 @@ export function SessionDrawerModal({
                       padding: '8px 12px',
                       borderRadius: 6,
                       background: reindexMsg.ok
-                        ? 'var(--dsw-alias-state-success-subtle, rgba(16, 185, 129, 0.1))'
-                        : 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
+                        ? 'var(--dsw-alias-state-success-tertiary)'
+                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
                       color: reindexMsg.ok
-                        ? 'var(--dsw-alias-state-success-primary, #10b981)'
-                        : 'var(--dsw-alias-state-error-primary, #ef4444)',
+                        ? 'var(--dsw-alias-state-success-primary)'
+                        : 'var(--dsw-alias-state-error-primary)',
                       fontSize: 12,
                     }}
                   >
@@ -560,7 +595,7 @@ export function SessionDrawerModal({
               <div
                 style={{
                   padding: 16,
-                  border: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+                  border: '1px solid var(--dsw-alias-border-l2)',
                   borderRadius: 8,
                 }}
               >
@@ -606,11 +641,11 @@ export function SessionDrawerModal({
                       padding: '10px 12px',
                       borderRadius: 6,
                       background: initResult.ok
-                        ? 'var(--dsw-alias-state-success-subtle, rgba(16, 185, 129, 0.1))'
-                        : 'var(--dsw-alias-state-error-subtle, rgba(239, 68, 68, 0.1))',
+                        ? 'var(--dsw-alias-state-success-tertiary)'
+                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
                       color: initResult.ok
-                        ? 'var(--dsw-alias-state-success-primary, #10b981)'
-                        : 'var(--dsw-alias-state-error-primary, #ef4444)',
+                        ? 'var(--dsw-alias-state-success-primary)'
+                        : 'var(--dsw-alias-state-error-primary)',
                       fontSize: 12,
                       fontFamily: 'monospace',
                       whiteSpace: 'pre-wrap',
@@ -629,7 +664,7 @@ export function SessionDrawerModal({
         workspace={workspace}
         isOpen={showAddModal}
         onClose={() => setShowAddModal(false)}
-        onSuccess={onRefresh}
+        onSuccess={() => setCodebaseMsg({ ok: true, text: 'Codebase 添加成功' })}
       />
     </div>
   )

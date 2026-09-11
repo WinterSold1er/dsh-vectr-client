@@ -59,7 +59,7 @@ export function validateWorkspace(workspace: string): { valid: boolean; error?: 
  * Test whether a mode string indicates memory_only mode.
  */
 export function isMemoryOnly(mode?: string): boolean {
-  return mode === 'memory_only'
+  return mode === 'memory_only' || mode === 'memory-only'
 }
 
 /**
@@ -83,7 +83,7 @@ export function canReindex(
   if (!live) {
     return { canReindex: false, reason: 'Daemon offline' }
   }
-  if (mode === 'memory_only') {
+  if (mode === 'memory_only' || mode === 'memory-only') {
     return {
       canReindex: false,
       reason: "Daemon in 'memory_only' mode cannot be re-indexed (no persistent index store)",
@@ -110,8 +110,114 @@ export function canReindex(
 export function formatMode(mode?: string, live?: boolean): VectrMode {
   if (live === false) return 'offline'
   if (!mode) return 'unknown'
-  if (mode === 'full' || mode === 'memory_only' || mode === 'search_only' || mode === 'lite') {
+  if (mode === 'memory-only' || mode === 'memory_only') {
+    return 'memory_only'
+  }
+  if (mode === 'full' || mode === 'search_only' || mode === 'lite') {
     return mode
   }
   return 'unknown'
+}
+
+/**
+ * Normalized unified status representation.
+ */
+export interface UnifiedStatus {
+  kind: 'ready' | 'initializing' | 'indexing' | 'memory_only' | 'search_only' | 'offline' | 'unknown'
+  label: string
+  isBusy?: boolean
+  description?: string
+}
+
+export interface ResolveUnifiedStatusInput {
+  live?: boolean | undefined
+  mode?: string | undefined
+  status?: VectrStatus | null | undefined
+  reason?: string | undefined
+  error?: string | undefined
+}
+
+/**
+ * Resolve unified lifecycle and operational status across settings and modals.
+ */
+export function resolveUnifiedStatus(input?: ResolveUnifiedStatusInput): UnifiedStatus {
+  if (input?.error) {
+    return {
+      kind: 'offline',
+      label: 'Error',
+      isBusy: false,
+      description: input.error,
+    }
+  }
+
+  if (!input || input.live !== true) {
+    return {
+      kind: 'offline',
+      label: input?.live === undefined ? 'Unknown' : 'Offline',
+      isBusy: false,
+      description: input?.reason ?? (input?.live === undefined ? 'Daemon status unknown' : 'Daemon offline or unreachable'),
+    }
+  }
+
+  if (!input.status) {
+    return {
+      kind: 'initializing',
+      label: 'Initializing',
+      isBusy: true,
+      description: input.reason ?? 'Starting daemon or waiting for status',
+    }
+  }
+
+  const normalizedMode = formatMode(input.mode, input.live)
+  if (normalizedMode === 'memory_only') {
+    return {
+      kind: 'memory_only',
+      label: 'Memory Only',
+      isBusy: false,
+      description: 'Running in working memory mode without persistent index',
+    }
+  }
+
+  if (input.status?.reindex_in_progress === true) {
+    return {
+      kind: 'indexing',
+      label: 'Indexing',
+      isBusy: true,
+      description: 'Re-indexing codebase files and embedding vectors',
+    }
+  }
+
+  if (input.status?.fully_ready === false) {
+    return {
+      kind: 'initializing',
+      label: 'Initializing',
+      isBusy: true,
+      description: 'Daemon starting or warming up initial index',
+    }
+  }
+
+  if (normalizedMode === 'search_only') {
+    return {
+      kind: 'search_only',
+      label: 'Search Only',
+      isBusy: false,
+      description: 'Semantic search active without working memory',
+    }
+  }
+
+  if (normalizedMode === 'full' || normalizedMode === 'lite') {
+    return {
+      kind: 'ready',
+      label: 'Ready',
+      isBusy: false,
+      description: 'Daemon fully ready and synchronized',
+    }
+  }
+
+  return {
+    kind: 'unknown',
+    label: 'Unknown',
+    isBusy: false,
+    description: 'Unknown daemon status',
+  }
 }

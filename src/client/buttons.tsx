@@ -30,17 +30,17 @@ export const VECTR_CSS = `
 
 .vectr-modal-backdrop {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--dsw-alias-bg-overlay, rgba(0, 0, 0, 0.45));
   backdrop-filter: blur(2px);
   z-index: 10000;
   display: flex; align-items: center; justify-content: center;
   animation: vectr-fade-in 150ms ease-out;
 }
 .vectr-modal-card {
-  background: var(--dsw-alias-bg-layer-0, #fff);
-  border: 1px solid var(--dsw-alias-border-l2, #e5e7eb);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
-  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04);
+  box-shadow: var(--dsw-alias-shadow-modal, 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04));
   width: 90vw; max-width: 840px; max-height: 88vh;
   display: flex; flex-direction: column; overflow: hidden;
   color: var(--dsw-alias-label-primary);
@@ -49,8 +49,8 @@ export const VECTR_CSS = `
 .vectr-header-capsule {
   display: inline-flex; align-items: center; gap: 6px;
   height: 26px; padding: 0 8px; border-radius: 13px;
-  background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.04));
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08));
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
   color: var(--dsw-alias-label-primary);
   font-size: 11px; font-weight: 500; cursor: pointer;
   transition: all 140ms ease;
@@ -63,13 +63,13 @@ export const VECTR_CSS = `
   width: 7px; height: 7px; border-radius: 50%;
   display: inline-block; flex-shrink: 0;
 }
-.vectr-dot-live { background: var(--dsw-alias-state-success-primary, #10b981); box-shadow: 0 0 4px var(--dsw-alias-state-success-primary, #10b981); }
-.vectr-dot-offline { background: var(--dsw-alias-label-tertiary, #9ca3af); }
-.vectr-dot-error { background: var(--dsw-alias-state-error-primary, #ef4444); }
+.vectr-dot-live { background: var(--dsw-alias-state-success-primary); box-shadow: 0 0 4px var(--dsw-alias-state-success-primary); }
+.vectr-dot-offline { background: var(--dsw-alias-label-tertiary); }
+.vectr-dot-error { background: var(--dsw-alias-state-error-primary); }
 
 .vectr-metric-card {
-  background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02));
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06));
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px; padding: 10px 14px;
   display: flex; flex-direction: column; gap: 4px;
 }
@@ -89,8 +89,8 @@ export const VECTR_CSS = `
   color: var(--dsw-alias-label-primary);
 }
 .vectr-note-card {
-  background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02));
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08));
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px; padding: 12px; margin-bottom: 8px;
   font-size: 13px; line-height: 1.5;
 }

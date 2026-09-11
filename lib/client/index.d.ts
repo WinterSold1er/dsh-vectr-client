@@ -30,6 +30,10 @@ export { SessionHeaderAction } from './SessionHeaderAction';
 export { SessionDrawerModal } from './SessionDrawerModal';
 export { CodebaseModal } from './CodebaseModal';
 export { MemoryViewer } from './MemoryViewer';
+export { VectrNavIcon } from './VectrNavIcon';
+export { ConversationInputRightAction } from './ConversationInputRightAction';
+export { VectrDialogRoot } from './VectrDialogRoot';
+export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator';
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
     slots: {
@@ -39,12 +43,13 @@ interface ClientContext {
             id?: string;
             order?: number;
             label?: () => string;
+            icon?: unknown;
             locale?: string;
             inject?: () => unknown;
             children?: Record<string, unknown>;
         }, component: unknown): () => void;
     };
-    effect(disposer: () => void, name?: string): void;
+    effect(disposer: () => unknown, name?: string): void;
 }
 /** The full merged console panel (workspaces + their codebases). */
 export declare function WorkspaceConsole(): ReactNode;

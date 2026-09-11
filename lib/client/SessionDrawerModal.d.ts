@@ -6,7 +6,7 @@
  * @module dsh-vectr-client/client/SessionDrawerModal
  */
 import { type ReactNode } from 'react';
-import type { SessionVectrState } from '../domain';
+import { type SessionVectrState } from '../domain';
 export interface SessionDrawerModalProps {
     workspace: string;
     state: SessionVectrState | null;

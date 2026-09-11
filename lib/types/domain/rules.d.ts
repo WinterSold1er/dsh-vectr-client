@@ -51,4 +51,24 @@ export declare function canReindex(live: boolean, mode?: string, status?: VectrS
  * Normalize raw mode string and liveness state into typed VectrMode.
  */
 export declare function formatMode(mode?: string, live?: boolean): VectrMode;
+/**
+ * Normalized unified status representation.
+ */
+export interface UnifiedStatus {
+    kind: 'ready' | 'initializing' | 'indexing' | 'memory_only' | 'search_only' | 'offline' | 'unknown';
+    label: string;
+    isBusy?: boolean;
+    description?: string;
+}
+export interface ResolveUnifiedStatusInput {
+    live?: boolean | undefined;
+    mode?: string | undefined;
+    status?: VectrStatus | null | undefined;
+    reason?: string | undefined;
+    error?: string | undefined;
+}
+/**
+ * Resolve unified lifecycle and operational status across settings and modals.
+ */
+export declare function resolveUnifiedStatus(input?: ResolveUnifiedStatusInput): UnifiedStatus;
 //# sourceMappingURL=rules.d.ts.map

@@ -13,6 +13,7 @@ import {
   SLUG_PATTERN,
   validateSlug,
   validateWorkspace,
+  resolveUnifiedStatus,
 } from '../src/domain'
 
 describe('Domain Core: rules & validation', () => {
@@ -121,6 +122,51 @@ describe('Domain Core: rules & validation', () => {
       const res = canReindex(true, 'full', { fully_ready: true })
       expect(res.canReindex).toBe(true)
       expect(res.reason).toBeUndefined()
+    })
+  })
+
+  describe('resolveUnifiedStatus robustness', () => {
+    it('returns offline/Error when input.error exists', () => {
+      const res = resolveUnifiedStatus({
+        live: true,
+        status: { fully_ready: true },
+        error: 'connection refused',
+      })
+      expect(res.kind).toBe('offline')
+      expect(res.label).toBe('Error')
+      expect(res.description).toBe('connection refused')
+    })
+
+    it('returns offline/Unknown when !input or input.live is undefined', () => {
+      const resNull = resolveUnifiedStatus(undefined)
+      expect(resNull.kind).toBe('offline')
+      expect(resNull.label).toBe('Unknown')
+
+      const resUndefLive = resolveUnifiedStatus({
+        status: { fully_ready: true },
+      })
+      expect(resUndefLive.kind).toBe('offline')
+      expect(resUndefLive.label).toBe('Unknown')
+    })
+
+    it('returns offline/Offline when input.live is false', () => {
+      const resFalse = resolveUnifiedStatus({
+        live: false,
+        reason: 'daemon hung',
+      })
+      expect(resFalse.kind).toBe('offline')
+      expect(resFalse.label).toBe('Offline')
+      expect(resFalse.description).toBe('daemon hung')
+    })
+
+    it('returns initializing when live === true but !input.status', () => {
+      const res = resolveUnifiedStatus({
+        live: true,
+        mode: 'full',
+      })
+      expect(res.kind).toBe('initializing')
+      expect(res.label).toBe('Initializing')
+      expect(res.isBusy).toBe(true)
     })
   })
 })

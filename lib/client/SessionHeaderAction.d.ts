@@ -4,6 +4,7 @@
  * Mounted into the host slot `conversation.session.header.utilities`.
  * Dynamically tracks the current active session's working directory (`session.cwd`)
  * and displays live status, mode, port, and quick metrics.
+ * Acts as a pure trigger for `dialogCoordinator.open(workspace)`.
  *
  * (Layer 4: Presentation)
  *

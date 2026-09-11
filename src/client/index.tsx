@@ -31,11 +31,18 @@ import { VectrSettings } from './vectr-settings'
 import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
 import { SessionHeaderAction } from './SessionHeaderAction'
+import { VectrNavIcon } from './VectrNavIcon'
+import { ConversationInputRightAction } from './ConversationInputRightAction'
+import { VectrDialogRoot } from './VectrDialogRoot'
 
 export { SessionHeaderAction } from './SessionHeaderAction'
 export { SessionDrawerModal } from './SessionDrawerModal'
 export { CodebaseModal } from './CodebaseModal'
 export { MemoryViewer } from './MemoryViewer'
+export { VectrNavIcon } from './VectrNavIcon'
+export { ConversationInputRightAction } from './ConversationInputRightAction'
+export { VectrDialogRoot } from './VectrDialogRoot'
+export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator'
 
 /** Sentinel workspace for entries that could not be inferred during migration. */
 const UNASSIGNED_WORKSPACE = '__unassigned__'
@@ -84,9 +91,21 @@ interface CodebaseView {
 interface ClientContext {
   slots: {
     inject(key: string, callback: () => unknown): () => void
-    register(options: { name: string; id?: string; order?: number; label?: () => string; locale?: string; inject?: () => unknown; children?: Record<string, unknown> }, component: unknown): () => void
+    register(
+      options: {
+        name: string
+        id?: string
+        order?: number
+        label?: () => string
+        icon?: unknown
+        locale?: string
+        inject?: () => unknown
+        children?: Record<string, unknown>
+      },
+      component: unknown,
+    ): () => void
   }
-  effect(disposer: () => void, name?: string): void
+  effect(disposer: () => unknown, name?: string): void
 }
 
 /** Reason a row's re-index button is disabled, or undefined when enabled. */
@@ -677,24 +696,59 @@ const VECTR_SECTION_ORDER = 200
  * owns the single merged panel (workspaces + their codebases). `slots.inject`
  * runs its callback as a Cordis effect, so the callback returns the disposer
  * `slots.register` yields (not a plain descriptor) or the loader rejects it. */
+/**
+ * Registers a slot injection wrapped inside ctx.effect so that Cordis HMR reload
+ * cleans up previous injections, avoiding duplicate modals and buttons.
+ */
+function effectInject(ctx: ClientContext, key: string, callback: () => unknown, name: string): void {
+  let executed = false
+  ctx.effect(() => {
+    executed = true
+    return ctx.slots.inject(key, callback)
+  }, name)
+  if (!executed) {
+    ctx.slots.inject(key, callback)
+  }
+}
+
+/** Mount the Vectr shell as a top-level **Settings → Vectr** section. The shell
+ * owns the single merged panel (workspaces + their codebases). `slots.inject`
+ * runs its callback as a Cordis effect, so the callback returns the disposer
+ * `slots.register` yields (not a plain descriptor) or the loader rejects it. */
 export function apply(ctx: ClientContext): void {
   // Vectr ships a fixed English section/label by design (product terminology is
   // not user-localizable), so we do NOT wire `locale`/`i18n` here. The host's
   // `settings.section` slot accepts a `label` FUNCTION (not just a string), which
   // is the supported hook for i18n when a plugin needs it; we simply return the
   // constant. No `locale` key is passed because there is nothing to translate.
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
+  effectInject(ctx, 'settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'vectr',
     order: VECTR_SECTION_ORDER,
     label: () => 'Vectr',
-  }, VectrSettings))
+    icon: VectrNavIcon,
+  }, VectrSettings), 'vectr: settings.section')
 
   // Mount session utility in conversation header, reacting dynamically to active session cwd.
-  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+  effectInject(ctx, 'conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities',
     id: 'vectr-session-header-utility',
     order: 120,
     label: () => 'Vectr',
-  }, SessionHeaderAction))
+  }, SessionHeaderAction), 'vectr: conversation.session.header.utilities')
+
+  // Mount quick trigger in conversation input bar for blank / new sessions
+  effectInject(ctx, 'conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'vectr-conversation-input-right',
+    order: 120,
+    label: () => 'Vectr',
+  }, ConversationInputRightAction), 'vectr: conversation.input.right')
+
+  // Mount global dialog singleton in shell.overlay
+  effectInject(ctx, 'shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'vectr-dialog-root',
+    order: 100,
+  }, VectrDialogRoot), 'vectr: shell.overlay')
 }
