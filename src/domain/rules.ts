@@ -68,9 +68,16 @@ export function isMemoryOnly(mode?: string): boolean {
  * string literals 'null'/'undefined', and non-finite numbers (NaN, Infinity)
  * represent an inactive, blank, or invalid session.
  *
+ * If blank is explicitly true, always returns false (blank session page).
+ * If blank is explicitly false, verifies valid session ID.
+ * If blank is undefined, preserves legacy backward-compatible behavior.
+ *
  * (Layer 1: Domain Core - Single Source of Truth for Session Activation)
  */
-export function hasActiveSession(sessionId?: unknown): boolean {
+export function hasActiveSession(sessionId?: unknown, blank?: boolean): boolean {
+  if (blank === true) {
+    return false
+  }
   if (sessionId === null || sessionId === undefined) {
     return false
   }
@@ -86,6 +93,58 @@ export function hasActiveSession(sessionId?: unknown): boolean {
     return Number.isFinite(sessionId)
   }
   return false
+}
+
+export interface SessionActivationState {
+  sessionId?: unknown
+  blank?: boolean
+  [key: string]: unknown
+}
+
+export interface IsSessionActivatedOptions {
+  fallbackWhenBlankUndefined?: boolean
+}
+
+/**
+ * Single source of truth for whether a session is in an activated (non-blank, engaged) state.
+ */
+export function isSessionActivated(
+  state: SessionActivationState | unknown,
+  options?: IsSessionActivatedOptions,
+): boolean {
+  if (!state || typeof state !== 'object') {
+    return hasActiveSession(state)
+  }
+  const { sessionId, blank } = state as SessionActivationState
+  if (blank === true) {
+    return false
+  }
+  if (blank === false) {
+    return hasActiveSession(sessionId, false)
+  }
+  if (options?.fallbackWhenBlankUndefined === false) {
+    return false
+  }
+  return hasActiveSession(sessionId, undefined)
+}
+
+export interface SessionSlotVisibility {
+  shouldRenderInputRight: boolean
+  shouldRenderHeaderUtility: boolean
+}
+
+/**
+ * Resolve slot visibility across conversation.input.right and conversation.session.header.utilities.
+ */
+export function resolveSessionSlotVisibility(
+  state: SessionActivationState | unknown,
+  options?: IsSessionActivatedOptions,
+): SessionSlotVisibility {
+  const isActivated = isSessionActivated(state, options)
+  return {
+    shouldRenderInputRight: !isActivated,
+    shouldRenderHeaderUtility: isActivated,
+  }
 }
 
 /**

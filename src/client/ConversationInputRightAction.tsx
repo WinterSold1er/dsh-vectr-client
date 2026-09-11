@@ -12,27 +12,21 @@
  */
 
 import type { ReactNode } from 'react'
-import { hasActiveSession } from '../domain'
+import { resolveSessionSlotVisibility } from '../domain'
 import { VectrStyles } from './buttons'
 import { VectrNavIcon } from './VectrNavIcon'
 import { dialogCoordinator } from './dialogCoordinator'
 
 export interface ConversationInputRightActionProps {
   sessionId?: string | undefined
+  blank?: boolean | undefined
+  useSession?: (<T>(selector: (state: any) => T) => T) | undefined
   useSessions?: (<T>(selector: (state: any) => T) => T) | undefined
   workspace?: string | undefined
   [key: string]: unknown
 }
 
-export function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode {
-  const { sessionId } = props
-
-  // In active sessions, the top header capsule takes over; input button yields to avoid duplication
-  if (hasActiveSession(sessionId)) {
-    return null
-  }
-
-  // Pure static fallback workspace without invoking any React Hooks or session stores
+export function StaticInputRightAction(props: ConversationInputRightActionProps): ReactNode {
   const effectiveWorkspace =
     typeof props.workspace === 'string' && props.workspace ? props.workspace : '.'
 
@@ -67,4 +61,69 @@ export function ConversationInputRightAction(props: ConversationInputRightAction
       </button>
     </>
   )
+}
+
+export interface SessionBoundInputRightActionProps extends ConversationInputRightActionProps {
+  useSession: <T>(selector: (state: any) => T) => T
+}
+
+export function SessionBoundInputRightAction(props: SessionBoundInputRightActionProps): ReactNode {
+  const { useSession, sessionId } = props
+  // Unconditionally call hook without optional chaining
+  const singleSession = useSession((s: any) => s)
+  const isBlank = props.blank !== undefined ? props.blank : singleSession?.blank
+  const sessionCwd = singleSession?.cwd
+
+  const visibility = resolveSessionSlotVisibility({ sessionId, blank: isBlank })
+  if (!visibility.shouldRenderInputRight) {
+    return null
+  }
+
+  const effectiveWorkspace = sessionCwd || (typeof props.workspace === 'string' ? props.workspace : undefined)
+  return <StaticInputRightAction {...props} workspace={effectiveWorkspace} />
+}
+
+export interface SessionsBoundInputRightActionProps extends ConversationInputRightActionProps {
+  useSessions: <T>(selector: (state: any) => T) => T
+}
+
+export function SessionsBoundInputRightAction(props: SessionsBoundInputRightActionProps): ReactNode {
+  const { useSessions, sessionId } = props
+  // Unconditionally call hook without optional chaining
+  const sessionInfo = useSessions((state: any) => {
+    const id = sessionId ? String(sessionId) : ''
+    return id ? state?.byId?.[id] : undefined
+  })
+  const sessionCwd = sessionInfo?.cwd
+  const isBlank = props.blank !== undefined ? props.blank : sessionInfo?.blank
+
+  const visibility = resolveSessionSlotVisibility({ sessionId, blank: isBlank })
+  if (!visibility.shouldRenderInputRight) {
+    return null
+  }
+
+  const effectiveWorkspace = sessionCwd || (typeof props.workspace === 'string' ? props.workspace : undefined)
+  return <StaticInputRightAction {...props} workspace={effectiveWorkspace} />
+}
+
+export function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode {
+  // Prioritize useSessions when present to read real sessionCwd and blank state
+  if (typeof props.useSessions === 'function') {
+    return <SessionsBoundInputRightAction {...props} useSessions={props.useSessions} />
+  }
+
+  if (typeof props.useSession === 'function') {
+    return <SessionBoundInputRightAction {...props} useSession={props.useSession} />
+  }
+
+  const visibility = resolveSessionSlotVisibility({
+    sessionId: props.sessionId,
+    blank: props.blank,
+  })
+
+  if (!visibility.shouldRenderInputRight) {
+    return null
+  }
+
+  return <StaticInputRightAction {...props} />
 }

@@ -12,24 +12,29 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { hasActiveSession, resolveUnifiedStatus, type SessionVectrState } from '../domain'
+import {
+  resolveSessionSlotVisibility,
+  resolveUnifiedStatus,
+  type SessionVectrState,
+} from '../domain'
 import { VectrStyles } from './buttons'
 import { dialogCoordinator } from './dialogCoordinator'
 
 export interface SessionHeaderActionProps {
   sessionId?: string | undefined
+  blank?: boolean | undefined
+  workspace?: string | undefined
   useSessions?: (<T>(selector: (state: any) => T) => T) | undefined
   [key: string]: unknown
 }
 
-function ActiveSessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
-  const { sessionId, useSessions } = props
+export interface ActiveSessionHeaderActionProps {
+  sessionCwd?: string | undefined
+  [key: string]: unknown
+}
 
-  // Dynamically retrieve the current session's working directory
-  const sessionCwd = useSessions
-    ? useSessions((state: any) => (sessionId ? state?.byId?.[String(sessionId)]?.cwd : undefined))
-    : undefined
-
+export function ActiveSessionHeaderAction(props: ActiveSessionHeaderActionProps): ReactNode {
+  const { sessionCwd } = props
   const [state, setState] = useState<SessionVectrState | null>(null)
 
   const fetchStatus = async (cwd: string, signal?: AbortSignal): Promise<void> => {
@@ -122,10 +127,45 @@ function ActiveSessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
   )
 }
 
-export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
-  // In blank or new sessions, the top header capsule must not render or trigger requests
-  if (!hasActiveSession(props.sessionId)) {
+export interface SessionsBoundHeaderActionProps extends SessionHeaderActionProps {
+  useSessions: <T>(selector: (state: any) => T) => T
+}
+
+export function SessionsBoundHeaderAction(props: SessionsBoundHeaderActionProps): ReactNode {
+  const { useSessions, sessionId } = props
+
+  // Unconditionally invoke useSessions at container top-level (strictly adheres to Rules of Hooks)
+  const sessionInfo = useSessions((state: any) => {
+    const id = sessionId ? String(sessionId) : ''
+    return id ? state?.byId?.[id] : undefined
+  })
+
+  const isBlank = props.blank !== undefined ? props.blank : sessionInfo?.blank
+  const sessionCwd = sessionInfo?.cwd ?? (typeof props.workspace === 'string' ? props.workspace : undefined)
+
+  const visibility = resolveSessionSlotVisibility({ sessionId, blank: isBlank })
+  if (!visibility.shouldRenderHeaderUtility) {
     return null
   }
-  return <ActiveSessionHeaderAction {...props} />
+
+  return <ActiveSessionHeaderAction sessionCwd={sessionCwd} />
+}
+
+export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
+  // Check baseline activation & slot visibility via domain rules
+  const visibility = resolveSessionSlotVisibility({
+    sessionId: props.sessionId,
+    blank: props.blank,
+  })
+
+  if (!visibility.shouldRenderHeaderUtility) {
+    return null
+  }
+
+  if (typeof props.useSessions === 'function') {
+    return <SessionsBoundHeaderAction {...props} useSessions={props.useSessions} />
+  }
+
+  const sessionCwd = typeof props.workspace === 'string' ? props.workspace : undefined
+  return <ActiveSessionHeaderAction sessionCwd={sessionCwd} />
 }

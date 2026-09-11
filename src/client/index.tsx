@@ -35,12 +35,16 @@ import { VectrNavIcon } from './VectrNavIcon'
 import { ConversationInputRightAction } from './ConversationInputRightAction'
 import { VectrDialogRoot } from './VectrDialogRoot'
 
-export { SessionHeaderAction } from './SessionHeaderAction'
+export { SessionHeaderAction, SessionsBoundHeaderAction } from './SessionHeaderAction'
 export { SessionDrawerModal } from './SessionDrawerModal'
 export { CodebaseModal } from './CodebaseModal'
 export { MemoryViewer } from './MemoryViewer'
 export { VectrNavIcon } from './VectrNavIcon'
-export { ConversationInputRightAction } from './ConversationInputRightAction'
+export {
+  ConversationInputRightAction,
+  SessionsBoundInputRightAction,
+  SessionBoundInputRightAction,
+} from './ConversationInputRightAction'
 export { VectrDialogRoot } from './VectrDialogRoot'
 export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator'
 

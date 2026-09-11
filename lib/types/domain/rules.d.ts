@@ -39,9 +39,33 @@ export declare function isMemoryOnly(mode?: string): boolean;
  * string literals 'null'/'undefined', and non-finite numbers (NaN, Infinity)
  * represent an inactive, blank, or invalid session.
  *
+ * If blank is explicitly true, always returns false (blank session page).
+ * If blank is explicitly false, verifies valid session ID.
+ * If blank is undefined, preserves legacy backward-compatible behavior.
+ *
  * (Layer 1: Domain Core - Single Source of Truth for Session Activation)
  */
-export declare function hasActiveSession(sessionId?: unknown): boolean;
+export declare function hasActiveSession(sessionId?: unknown, blank?: boolean): boolean;
+export interface SessionActivationState {
+    sessionId?: unknown;
+    blank?: boolean;
+    [key: string]: unknown;
+}
+export interface IsSessionActivatedOptions {
+    fallbackWhenBlankUndefined?: boolean;
+}
+/**
+ * Single source of truth for whether a session is in an activated (non-blank, engaged) state.
+ */
+export declare function isSessionActivated(state: SessionActivationState | unknown, options?: IsSessionActivatedOptions): boolean;
+export interface SessionSlotVisibility {
+    shouldRenderInputRight: boolean;
+    shouldRenderHeaderUtility: boolean;
+}
+/**
+ * Resolve slot visibility across conversation.input.right and conversation.session.header.utilities.
+ */
+export declare function resolveSessionSlotVisibility(state: SessionActivationState | unknown, options?: IsSessionActivatedOptions): SessionSlotVisibility;
 /**
  * Test whether a mode string indicates search_only mode.
  */

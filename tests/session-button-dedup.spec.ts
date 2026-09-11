@@ -9,25 +9,36 @@
  * 2. Inactive / Blank / New session (sessionId missing, undefined, empty, whitespace, 'null', 'undefined', NaN, Infinity):
  *    - conversation.input.right (ConversationInputRightAction) renders input action button.
  *    - conversation.session.header.utilities (SessionHeaderAction) returns null and makes ZERO network calls.
- * 3. React Hook Safety (Anti-Breakage Invariant):
- *    - ConversationInputRightAction must be a pure, hook-free component.
- *    - It must never call useSessions or any React hooks (conditional or unconditional).
+ * 3. React Hook Safety & Rules of Hooks:
+ *    - Top-level unconditional hook execution in SessionsBoundHeaderAction and SessionsBoundInputRightAction.
+ *    - Zero ternary hook invocations and zero optional-chaining hook calls.
  * 4. Workspace Isolation (CWD Fallback Elimination):
  *    - SessionHeaderAction must never fall back to '.' when sessionCwd is missing or unready.
  *    - Unready sessionCwd must immediately reset state to null and make zero network requests.
  * 5. Domain layer:
- *    - src/domain/rules.ts exports hasActiveSession(sessionId?: unknown): boolean as the single source of truth.
+ *    - src/domain/rules.ts exports hasActiveSession, isSessionActivated, and resolveSessionSlotVisibility.
  *    - Rigorous boundary defense against sentinel strings and non-finite numbers.
  * 6. Internationalization & Accessibility:
  *    - English titles and aria-labels across both components.
  */
 
 import { readFileSync } from 'node:fs'
+import type { ReactNode } from 'react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import * as domainRules from '../src/domain/rules'
 import * as domainIndex from '../src/domain/index'
-import { SessionHeaderAction } from '../src/client/SessionHeaderAction'
-import { ConversationInputRightAction } from '../src/client/ConversationInputRightAction'
+import * as headerActionModule from '../src/client/SessionHeaderAction'
+import * as inputActionModule from '../src/client/ConversationInputRightAction'
+import {
+  SessionHeaderAction,
+  SessionsBoundHeaderAction,
+  ActiveSessionHeaderAction,
+} from '../src/client/SessionHeaderAction'
+import {
+  ConversationInputRightAction,
+  SessionsBoundInputRightAction,
+  SessionBoundInputRightAction,
+} from '../src/client/ConversationInputRightAction'
 import { dialogCoordinator } from '../src/client/dialogCoordinator'
 
 const inputActionSrc = readFileSync(
@@ -38,6 +49,25 @@ const headerActionSrc = readFileSync(
   new URL('../src/client/SessionHeaderAction.tsx', import.meta.url),
   'utf8',
 )
+
+/**
+ * Unwraps React container components by executing their type functions with props,
+ * verifying true runtime execution of container decision logic and hook passing.
+ * Leaf presentation components with React hooks (ActiveSessionHeaderAction) or
+ * fragments remain as valid JSX elements.
+ */
+function unwrapElement(node: unknown): unknown {
+  let current: any = node
+  while (
+    current &&
+    typeof current === 'object' &&
+    typeof current.type === 'function' &&
+    current.type !== ActiveSessionHeaderAction
+  ) {
+    current = current.type(current.props)
+  }
+  return current
+}
 
 describe('Domain: hasActiveSession truth source & boundary defense', () => {
   it('exports hasActiveSession from src/domain/rules and src/domain/index', () => {
@@ -98,33 +128,73 @@ describe('Domain: hasActiveSession truth source & boundary defense', () => {
     expect(hasActiveSession(Infinity)).toBe(false)
     expect(hasActiveSession(-Infinity)).toBe(false)
   })
-})
 
-describe('React Hook Rule Safety in ConversationInputRightAction', () => {
-  it('does not invoke useSessions even if provided via props', () => {
-    const throwingUseSessions = vi.fn().mockImplementation(() => {
-      throw new Error('Rules of Hooks violated: useSessions should never be called in ConversationInputRightAction')
-    })
+  it('respects blank parameter in hasActiveSession', () => {
+    const { hasActiveSession } = domainRules
 
-    // Must not throw when rendered for blank session
-    const element = ConversationInputRightAction({
-      sessionId: undefined,
-      useSessions: throwingUseSessions,
-    })
+    // When blank: true, it is NEVER active
+    expect(hasActiveSession('session-123', true)).toBe(false)
+    expect(hasActiveSession(42, true)).toBe(false)
 
-    expect(element).not.toBeNull()
-    expect(throwingUseSessions).not.toHaveBeenCalled()
+    // When blank: false, it is active if ID is valid
+    expect(hasActiveSession('session-123', false)).toBe(true)
+    expect(hasActiveSession(42, false)).toBe(true)
+    expect(hasActiveSession(undefined, false)).toBe(false)
+    expect(hasActiveSession('', false)).toBe(false)
   })
 
-  it('source code contains zero React Hook invocations', () => {
-    // Assert no React hooks (useState, useEffect, useMemo, useCallback, useContext, useRef, useSessions)
+  it('correctly evaluates isSessionActivated and resolveSessionSlotVisibility', () => {
+    const { isSessionActivated, resolveSessionSlotVisibility } = domainRules as any
+
+    expect(typeof isSessionActivated).toBe('function')
+    expect(typeof resolveSessionSlotVisibility).toBe('function')
+
+    // Blank new session
+    expect(isSessionActivated({ sessionId: 'session-new', blank: true })).toBe(false)
+    const blankVisibility = resolveSessionSlotVisibility({ sessionId: 'session-new', blank: true })
+    expect(blankVisibility.shouldRenderInputRight).toBe(true)
+    expect(blankVisibility.shouldRenderHeaderUtility).toBe(false)
+
+    // Active session
+    expect(isSessionActivated({ sessionId: 'session-active', blank: false })).toBe(true)
+    const activeVisibility = resolveSessionSlotVisibility({ sessionId: 'session-active', blank: false })
+    expect(activeVisibility.shouldRenderInputRight).toBe(false)
+    expect(activeVisibility.shouldRenderHeaderUtility).toBe(true)
+
+    // Undefined blank with valid sessionId -> active session
+    expect(isSessionActivated({ sessionId: 'session-active-undef', blank: undefined })).toBe(true)
+    const undefVisibility = resolveSessionSlotVisibility({ sessionId: 'session-active-undef', blank: undefined })
+    expect(undefVisibility.shouldRenderInputRight).toBe(false)
+    expect(undefVisibility.shouldRenderHeaderUtility).toBe(true)
+
+    // Invalid session ID
+    expect(isSessionActivated({ sessionId: undefined, blank: false })).toBe(false)
+    const invalidVisibility = resolveSessionSlotVisibility({ sessionId: undefined, blank: false })
+    expect(invalidVisibility.shouldRenderInputRight).toBe(true)
+    expect(invalidVisibility.shouldRenderHeaderUtility).toBe(false)
+  })
+})
+
+describe('React Hook Rule Safety & Anti-Pattern Elimination', () => {
+  it('SessionHeaderAction exports SessionsBoundHeaderAction and avoids ternary hook execution', () => {
+    expect(typeof SessionsBoundHeaderAction).toBe('function')
+    expect(headerActionSrc).not.toMatch(/useSessions\s*\?\s*useSessions\s*\(/)
+    expect(headerActionSrc).not.toMatch(/useSessions\?\./)
+  })
+
+  it('ConversationInputRightAction avoids optional-chaining hook invocations and plain function call returns', () => {
+    expect(inputActionSrc).not.toMatch(/sessionSelector\?\./)
+    expect(inputActionSrc).not.toMatch(/sessionsSelector\?\./)
+    expect(inputActionSrc).not.toMatch(/return\s+StaticInputRightAction\s*\(/)
+  })
+
+  it('source code contains no standalone React lifecycle hooks in input actions', () => {
     expect(inputActionSrc).not.toMatch(/\buseState\b/)
     expect(inputActionSrc).not.toMatch(/\buseEffect\b/)
     expect(inputActionSrc).not.toMatch(/\buseMemo\b/)
     expect(inputActionSrc).not.toMatch(/\buseCallback\b/)
     expect(inputActionSrc).not.toMatch(/\buseContext\b/)
     expect(inputActionSrc).not.toMatch(/\buseRef\b/)
-    expect(inputActionSrc).not.toMatch(/\buseSessions\s*\(/)
   })
 
   it('uses static props.workspace with fallback "." for dialog trigger', () => {
@@ -134,11 +204,12 @@ describe('React Hook Rule Safety in ConversationInputRightAction', () => {
     const elemWithWs = ConversationInputRightAction({
       sessionId: undefined,
       workspace: '/custom/workspace/alpha',
-    }) as any
+    })
+    const unpackedWithWs = unwrapElement(elemWithWs) as any
 
-    const buttonWithWs = Array.isArray(elemWithWs?.props?.children)
-      ? elemWithWs.props.children.find((c: any) => c?.type === 'button')
-      : elemWithWs
+    const buttonWithWs = Array.isArray(unpackedWithWs?.props?.children)
+      ? unpackedWithWs.props.children.find((c: any) => c?.type === 'button')
+      : unpackedWithWs
     expect(buttonWithWs).toBeDefined()
     buttonWithWs.props.onClick()
     expect(dialogCoordinator.getState().workspace).toBe('/custom/workspace/alpha')
@@ -149,11 +220,12 @@ describe('React Hook Rule Safety in ConversationInputRightAction', () => {
     // 2. Without workspace prop (defaults to '.')
     const elemWithoutWs = ConversationInputRightAction({
       sessionId: undefined,
-    }) as any
+    })
+    const unpackedWithoutWs = unwrapElement(elemWithoutWs) as any
 
-    const buttonWithoutWs = Array.isArray(elemWithoutWs?.props?.children)
-      ? elemWithoutWs.props.children.find((c: any) => c?.type === 'button')
-      : elemWithoutWs
+    const buttonWithoutWs = Array.isArray(unpackedWithoutWs?.props?.children)
+      ? unpackedWithoutWs.props.children.find((c: any) => c?.type === 'button')
+      : unpackedWithoutWs
     expect(buttonWithoutWs).toBeDefined()
     buttonWithoutWs.props.onClick()
     expect(dialogCoordinator.getState().workspace).toBe('.')
@@ -163,11 +235,12 @@ describe('React Hook Rule Safety in ConversationInputRightAction', () => {
   it('uses standardized English title and aria-label', () => {
     const elem = ConversationInputRightAction({
       sessionId: undefined,
-    }) as any
+    })
+    const unpacked = unwrapElement(elem) as any
 
-    const button = Array.isArray(elem?.props?.children)
-      ? elem.props.children.find((c: any) => c?.type === 'button')
-      : elem
+    const button = Array.isArray(unpacked?.props?.children)
+      ? unpacked.props.children.find((c: any) => c?.type === 'button')
+      : unpacked
     expect(button.props.title).toBe('Vectr Search & Memory Console')
     expect(button.props['aria-label']).toBe('Vectr status and management')
   })
@@ -175,7 +248,6 @@ describe('React Hook Rule Safety in ConversationInputRightAction', () => {
 
 describe('Workspace Isolation & CWD Fallback Elimination in SessionHeaderAction', () => {
   it('source code contains no fallback to "." (sessionCwd || ".") and eliminates silent default', () => {
-    // Both fetch and dialogCoordinator must never fall back to '.' in session header
     expect(headerActionSrc).not.toMatch(/sessionCwd\s*\|\|\s*'\.'/)
     expect(headerActionSrc).not.toMatch(/cwdToFetch\s*=\s*sessionCwd\s*\|\|\s*'\.'/)
     expect(headerActionSrc).not.toMatch(/dialogCoordinator\.open\(sessionCwd\s*\|\|\s*'\.'\)/)
@@ -195,7 +267,7 @@ describe('Workspace Isolation & CWD Fallback Elimination in SessionHeaderAction'
   })
 })
 
-describe('Component Mutual Exclusion & Lifecycle Transitions', () => {
+describe('Component Mutual Exclusion & Lifecycle Transitions (Runtime Executed)', () => {
   const originalFetch = globalThis.fetch
 
   beforeEach(() => {
@@ -213,18 +285,159 @@ describe('Component Mutual Exclusion & Lifecycle Transitions', () => {
   describe('Active Session (sessionId exists and is valid)', () => {
     const activeSessionId = 'session-active-001'
 
-    it('ConversationInputRightAction returns null in an active session', () => {
+    it('ConversationInputRightAction returns null in an active session with blank: false', () => {
       const element = ConversationInputRightAction({
         sessionId: activeSessionId,
+        blank: false,
       })
-      expect(element).toBeNull()
+      expect(unwrapElement(element)).toBeNull()
+    })
+
+    it('ConversationInputRightAction returns null in an active session with blank: undefined', () => {
+      const element = ConversationInputRightAction({
+        sessionId: activeSessionId,
+        blank: undefined,
+      })
+      expect(unwrapElement(element)).toBeNull()
+    })
+
+    it('ConversationInputRightAction returns null when useSessions container reports blank: false', () => {
+      const mockUseSessions = vi.fn().mockImplementation((sel: any) => sel({
+        byId: { [activeSessionId]: { blank: false, cwd: '/work/active' } },
+      }))
+      const element = ConversationInputRightAction({
+        sessionId: activeSessionId,
+        useSessions: mockUseSessions,
+      })
+      expect(unwrapElement(element)).toBeNull()
+      expect(mockUseSessions).toHaveBeenCalled()
+    })
+
+    it('ConversationInputRightAction returns null when useSession container reports blank: false', () => {
+      const mockUseSession = vi.fn().mockImplementation((sel: any) => sel({ blank: false, cwd: '/work/active' }))
+      const element = ConversationInputRightAction({
+        sessionId: activeSessionId,
+        useSession: mockUseSession,
+      })
+      expect(unwrapElement(element)).toBeNull()
+      expect(mockUseSession).toHaveBeenCalled()
     })
 
     it('SessionHeaderAction returns non-null element in an active session', () => {
       const element = SessionHeaderAction({
         sessionId: activeSessionId,
+        blank: false,
       })
-      expect(element).not.toBeNull()
+      const unpacked = unwrapElement(element)
+      expect(unpacked).not.toBeNull()
+      expect((unpacked as any)?.type).toBe(ActiveSessionHeaderAction)
+    })
+
+    it('SessionHeaderAction returns non-null element when useSessions container reports blank: false', () => {
+      const mockUseSessions = vi.fn().mockImplementation((sel: any) => sel({
+        byId: { [activeSessionId]: { blank: false, cwd: '/work/active' } },
+      }))
+      const element = SessionHeaderAction({
+        sessionId: activeSessionId,
+        useSessions: mockUseSessions,
+      })
+      const unpacked = unwrapElement(element)
+      expect(unpacked).not.toBeNull()
+      expect((unpacked as any)?.type).toBe(ActiveSessionHeaderAction)
+      expect(mockUseSessions).toHaveBeenCalled()
+    })
+  })
+
+  describe('REPRODUCTION: Blank / New Session page with valid sessionId', () => {
+    const newSessionId = 'session-new-chat-999'
+
+    it('ConversationInputRightAction MUST render button when blank: true even if sessionId is non-empty', () => {
+      const element = ConversationInputRightAction({
+        sessionId: newSessionId,
+        blank: true,
+      })
+      expect(unwrapElement(element)).not.toBeNull()
+    })
+
+    it('ConversationInputRightAction MUST render button when useSession indicates blank: true', () => {
+      const mockUseSession = vi.fn().mockImplementation((sel: any) => sel({ blank: true, cwd: '/test/ws' }))
+      const element = ConversationInputRightAction({
+        sessionId: newSessionId,
+        useSession: mockUseSession,
+      })
+      const unpacked = unwrapElement(element) as any
+      expect(unpacked).not.toBeNull()
+      const button = Array.isArray(unpacked?.props?.children)
+        ? unpacked.props.children.find((c: any) => c?.type === 'button')
+        : unpacked
+      expect(button).toBeDefined()
+      expect(button.type).toBe('button')
+    })
+
+    it('ConversationInputRightAction MUST render button when useSessions indicates blank: true', () => {
+      const mockUseSessions = vi.fn().mockImplementation((sel: any) => sel({
+        byId: { [newSessionId]: { blank: true, cwd: '/test/ws' } },
+      }))
+      const element = ConversationInputRightAction({
+        sessionId: newSessionId,
+        useSessions: mockUseSessions,
+      })
+      const unpacked = unwrapElement(element) as any
+      expect(unpacked).not.toBeNull()
+      const button = Array.isArray(unpacked?.props?.children)
+        ? unpacked.props.children.find((c: any) => c?.type === 'button')
+        : unpacked
+      expect(button).toBeDefined()
+      expect(button.type).toBe('button')
+    })
+
+    it('SessionHeaderAction returns null when blank: true', () => {
+      const element = SessionHeaderAction({
+        sessionId: newSessionId,
+        blank: true,
+      })
+      expect(unwrapElement(element)).toBeNull()
+      expect(globalThis.fetch).not.toHaveBeenCalled()
+    })
+
+    it('SessionHeaderAction returns null when useSessions reports blank: true', () => {
+      const mockUseSessions = vi.fn().mockImplementation((sel: any) => sel({
+        byId: { [newSessionId]: { blank: true, cwd: '/test/ws' } },
+      }))
+      const element = SessionHeaderAction({
+        sessionId: newSessionId,
+        useSessions: mockUseSessions,
+      })
+      expect(unwrapElement(element)).toBeNull()
+      expect(globalThis.fetch).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('CWD Resolution and Composition in ConversationInputRightAction', () => {
+    const testSessionId = 'session-cwd-test'
+
+    it('reads sessionCwd from useSessions even if useSession is also passed, preventing silent fallback to "."', () => {
+      dialogCoordinator.close()
+      const mockUseSessions = vi.fn().mockImplementation((sel: any) => sel({
+        byId: { [testSessionId]: { blank: true, cwd: '/custom/store/cwd' } },
+      }))
+      const mockUseSession = vi.fn().mockImplementation((sel: any) => sel({ blank: true, cwd: '/fallback/single/cwd' }))
+
+      const element = ConversationInputRightAction({
+        sessionId: testSessionId,
+        useSessions: mockUseSessions,
+        useSession: mockUseSession,
+      })
+
+      const unpacked = unwrapElement(element) as any
+      expect(unpacked).not.toBeNull()
+
+      const button = Array.isArray(unpacked?.props?.children)
+        ? unpacked.props.children.find((c: any) => c?.type === 'button')
+        : unpacked
+      expect(button).toBeDefined()
+      button.props.onClick()
+      expect(dialogCoordinator.getState().workspace).toBe('/custom/store/cwd')
     })
   })
 
@@ -244,10 +457,10 @@ describe('Component Mutual Exclusion & Lifecycle Transitions', () => {
     for (const { name, value } of inactiveCases) {
       it(`mutual exclusion holds for ${name}: input action renders, header action is null with zero fetch calls`, () => {
         const inputElem = ConversationInputRightAction({ sessionId: value })
-        expect(inputElem).not.toBeNull()
+        expect(unwrapElement(inputElem)).not.toBeNull()
 
         const headerElem = SessionHeaderAction({ sessionId: value })
-        expect(headerElem).toBeNull()
+        expect(unwrapElement(headerElem)).toBeNull()
         expect(globalThis.fetch).not.toHaveBeenCalled()
       })
     }
@@ -257,28 +470,28 @@ describe('Component Mutual Exclusion & Lifecycle Transitions', () => {
     it('seamlessly transitions across blank -> active -> blank -> active states', () => {
       // Step 1: Blank new chat
       let currentSessionId: string | undefined = undefined
-      expect(ConversationInputRightAction({ sessionId: currentSessionId })).not.toBeNull()
-      expect(SessionHeaderAction({ sessionId: currentSessionId })).toBeNull()
+      expect(unwrapElement(ConversationInputRightAction({ sessionId: currentSessionId }))).not.toBeNull()
+      expect(unwrapElement(SessionHeaderAction({ sessionId: currentSessionId }))).toBeNull()
 
       // Step 2: Session created / activated
       currentSessionId = 'session-first-msg'
-      expect(ConversationInputRightAction({ sessionId: currentSessionId })).toBeNull()
-      expect(SessionHeaderAction({ sessionId: currentSessionId })).not.toBeNull()
+      expect(unwrapElement(ConversationInputRightAction({ sessionId: currentSessionId }))).toBeNull()
+      expect(unwrapElement(SessionHeaderAction({ sessionId: currentSessionId }))).not.toBeNull()
 
       // Step 3: User resets / starts a new chat
       currentSessionId = ''
-      expect(ConversationInputRightAction({ sessionId: currentSessionId })).not.toBeNull()
-      expect(SessionHeaderAction({ sessionId: currentSessionId })).toBeNull()
+      expect(unwrapElement(ConversationInputRightAction({ sessionId: currentSessionId }))).not.toBeNull()
+      expect(unwrapElement(SessionHeaderAction({ sessionId: currentSessionId }))).toBeNull()
 
       // Step 4: User selects a historic session
       currentSessionId = 'session-historic-42'
-      expect(ConversationInputRightAction({ sessionId: currentSessionId })).toBeNull()
-      expect(SessionHeaderAction({ sessionId: currentSessionId })).not.toBeNull()
+      expect(unwrapElement(ConversationInputRightAction({ sessionId: currentSessionId }))).toBeNull()
+      expect(unwrapElement(SessionHeaderAction({ sessionId: currentSessionId }))).not.toBeNull()
 
       // Step 5: Teardown / sentinel value
       currentSessionId = 'null'
-      expect(ConversationInputRightAction({ sessionId: currentSessionId })).not.toBeNull()
-      expect(SessionHeaderAction({ sessionId: currentSessionId })).toBeNull()
+      expect(unwrapElement(ConversationInputRightAction({ sessionId: currentSessionId }))).not.toBeNull()
+      expect(unwrapElement(SessionHeaderAction({ sessionId: currentSessionId }))).toBeNull()
     })
   })
 })
@@ -304,7 +517,6 @@ describe('QA Quality Detector: Tricky Boundaries, Failure Paths & Configuration 
       const en = readFileSync(rootReadmePath, 'utf8')
       const zh = readFileSync(zhReadmePath, 'utf8')
 
-      // Vectr attribution
       expect(en).toContain('Based on Vectr')
       expect(en).toContain('https://github.com/swapnanil/vectr')
       expect(en).toContain('https://swapnanilsaha.com/tools/vectr')
@@ -330,12 +542,9 @@ describe('QA Quality Detector: Tricky Boundaries, Failure Paths & Configuration 
 
   describe('Configuration Externalization & Anti-Fake-Implementation Invariants', () => {
     it('SessionHeaderAction does not contain hardcoded localhost ports or mock status strings', () => {
-      // Must not hardcode fake ports or fake status states
       expect(headerActionSrc).not.toMatch(/http:\/\/localhost:\d+/)
       expect(headerActionSrc).not.toMatch(/8765|8766|9223/)
-      // Must dynamically build query string from encoded cwd
       expect(headerActionSrc).toContain('encodeURIComponent(cwd)')
-      // Dynamic badge construction based on state.port and unifiedStatus
       expect(headerActionSrc).toContain('state?.port')
     })
 
@@ -360,4 +569,3 @@ describe('QA Quality Detector: Tricky Boundaries, Failure Paths & Configuration 
     })
   })
 })
-

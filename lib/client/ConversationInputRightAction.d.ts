@@ -13,9 +13,20 @@
 import type { ReactNode } from 'react';
 export interface ConversationInputRightActionProps {
     sessionId?: string | undefined;
+    blank?: boolean | undefined;
+    useSession?: (<T>(selector: (state: any) => T) => T) | undefined;
     useSessions?: (<T>(selector: (state: any) => T) => T) | undefined;
     workspace?: string | undefined;
     [key: string]: unknown;
 }
+export declare function StaticInputRightAction(props: ConversationInputRightActionProps): ReactNode;
+export interface SessionBoundInputRightActionProps extends ConversationInputRightActionProps {
+    useSession: <T>(selector: (state: any) => T) => T;
+}
+export declare function SessionBoundInputRightAction(props: SessionBoundInputRightActionProps): ReactNode;
+export interface SessionsBoundInputRightActionProps extends ConversationInputRightActionProps {
+    useSessions: <T>(selector: (state: any) => T) => T;
+}
+export declare function SessionsBoundInputRightAction(props: SessionsBoundInputRightActionProps): ReactNode;
 export declare function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode;
 //# sourceMappingURL=ConversationInputRightAction.d.ts.map
