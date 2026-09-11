@@ -1,8 +1,23 @@
+[简体中文](README.zh-CN.md)
+
 # dsh-vectr-client
+
+> **Based on Vectr**: Built upon [Vectr](https://github.com/swapnanil/vectr) by Swapnanil Saha ([Official Website & Documentation](https://swapnanilsaha.com/tools/vectr)).
 
 Per-workspace vectr MCP binding **bundle** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): on every `agent/created` (and for already-live agents at startup) it resolves the agent's workspace (session `cwd`), looks up that workspace's vectr daemon port in `~/.vectr/instances.json`, connects a [Streamable HTTP](https://modelcontextprotocol.io/) MCP client to `http://localhost:<port>/mcp`, and registers the vectr tools (`mcp__vectr__*`) scoped to that agent only. `agent/disposed` closes the HTTP connection; the agent scope unwinds the tool registrations on its own.
 
 Each workspace directory has its own vectr daemon (and port), so the binding is entirely derived from the agent's workspace — no global MCP config. Loading this bundle once in a profile covers every agent.
+
+## Core Capabilities of Vectr
+
+Vectr equips DeepSeek Harness agents with two foundational capabilities:
+
+- **Semantic Search**: Fast, high-precision code and concept retrieval. Rather than guessing exact file paths or running exhaustive grep loops across large repositories, agents locate symbols, implementation patterns, and structural relationships by describing them in plain language.
+- **Reliable Working Memory**:
+  - **<50ms Sub-millisecond Recall**: Fetch stored findings, active decisions, and architectural invariants on demand with near-zero latency.
+  - **Resilience to Context Compaction**: Working notes stored in Vectr survive context window trimming and conversation compaction, retaining precise function signatures and operational guidelines without degradation.
+  - **Cross-Session Recovery**: Instantly pick up where prior sessions left off from turn 1, eliminating repetitive codebase rediscovery.
+  - **Multi-Agent Shared Memory Bus**: Provides a durable, low-token handoff bus between orchestrators and subagents.
 
 ## Install
 
@@ -31,6 +46,7 @@ The bundle is **discovery-ready** out of the box — its `package.json` declares
 **Verify:** after restart, `GET /api/vectr/workspaces` answers, and an agent whose workspace has a live vectr daemon registers `mcp__vectr__*` tools. No code change in this repo is required to enable it — only the host-side one-time `dsh plugin add` + restart.
 
 > Constraints honored: this plugin does **not** modify the DSH harness source, `~/.dsh/profiles/web`, or the vectr binary; enablement is purely additive bundle configuration on the host profile.
+
 ## Config
 
 | Field | Required | Description |
@@ -91,9 +107,21 @@ The `dsh.client` dual-face declaration (`platform: 'web'`) makes the host load `
 
 The web half and its routes take effect only after the **host process is restarted** (the `dsh.client` scan and the route registration run at boot). Until then the plugin still binds vectr tools normally; the console is simply absent. End-to-end (routes answering through host 3081, the tab mounting) is verified after a host restart — see Known Limitations.
 
+## Session Button Deduplication & Mutual Exclusion
+
+To prevent visual clutter, eliminate redundant UI triggers, and strictly adhere to workspace isolation principles:
+
+- **Single Source of Truth**: The domain invariant `hasActiveSession(sessionId)` in `src/domain/rules.ts` acts as the pure authority across conversation components. It defensively filters out empty strings, whitespace, string literals `'null'` / `'undefined'`, and non-finite numbers (`NaN`, `Infinity`).
+- **Active Session** (valid `sessionId`):
+  - Top header capsule (`SessionHeaderAction` in `conversation.session.header.utilities`): Dynamically resolves `session.cwd` and displays live daemon status, mode, and port. When `session.cwd` is unresolved or not yet ready, it resets state to `null`, strictly avoids issuing background network requests, and does not open dialogues with a generic `.` fallback.
+  - Input-adjacent action (`ConversationInputRightAction` in `conversation.input.right`): Yields and returns `null` to avoid duplicate action buttons.
+- **Blank / New Session** (absent, empty, whitespace, or sentinel `sessionId`):
+  - Input-adjacent action (`ConversationInputRightAction`): Renders as a pure, hook-free static trigger to open the Vectr management console.
+  - Top header capsule (`SessionHeaderAction`): Returns `null` immediately and makes zero background network calls.
+
 ## Multi-codebase management (feature B)
 
-Feature B extends the bundle to manage **multiple vectr daemons** — local ones started with `vectr start --path` and remote ones provisioned over `ssh` — and to register each one as its own host-level MCP server. The metadata file `~/.dsh/vectr-codebases.json` records every managed codebase; the secret store (`~/.dsh/vectr-secrets.json`, or the host `ctx.credentials` service when present) holds the only the password ref — **the plaintext password never lands in the metadata file**.
+Feature B extends the bundle to manage **multiple vectr daemons** — local ones started with `vectr start --path` and remote ones provisioned over `ssh` — and to register each one as its own host-level MCP server. The metadata file `~/.dsh/vectr-codebases.json` records every managed codebase; the secret store (`~/.dsh/vectr-secrets.json`, or the host `ctx.credentials` service when present) holds only the password ref — **the plaintext password never lands in the metadata file**.
 
 ### Host module (`src/codebases.ts`) — pure logic, injected side effects
 

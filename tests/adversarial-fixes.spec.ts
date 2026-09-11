@@ -176,13 +176,14 @@ describe('Adversarial Review Fixes', () => {
       expect(injectedSlots).toEqual([])
     })
 
-    it('SessionHeaderAction falls back to "." when sessionCwd is empty or undefined', () => {
+    it('SessionHeaderAction strictly enforces workspace isolation and does not fall back to "."', () => {
       const headerActionContent = readFileSync(
         join(__dirname, '../src/client/SessionHeaderAction.tsx'),
         'utf-8',
       )
 
-      expect(headerActionContent).toContain('dialogCoordinator.open(sessionCwd || \'.\')')
+      expect(headerActionContent).not.toContain("dialogCoordinator.open(sessionCwd || '.')")
+      expect(headerActionContent).not.toContain("sessionCwd || '.'")
       expect(headerActionContent).toContain('resolveUnifiedStatus')
     })
   })

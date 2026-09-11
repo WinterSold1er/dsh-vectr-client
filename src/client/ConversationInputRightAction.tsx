@@ -12,6 +12,7 @@
  */
 
 import type { ReactNode } from 'react'
+import { hasActiveSession } from '../domain'
 import { VectrStyles } from './buttons'
 import { VectrNavIcon } from './VectrNavIcon'
 import { dialogCoordinator } from './dialogCoordinator'
@@ -24,16 +25,16 @@ export interface ConversationInputRightActionProps {
 }
 
 export function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode {
-  const { sessionId, useSessions } = props
+  const { sessionId } = props
 
-  // Track active session cwd or fallback workspace
-  const sessionCwd = useSessions
-    ? useSessions((state: any) => (sessionId ? state?.byId?.[String(sessionId)]?.cwd : undefined))
-    : props.workspace
+  // In active sessions, the top header capsule takes over; input button yields to avoid duplication
+  if (hasActiveSession(sessionId)) {
+    return null
+  }
 
-  const effectiveWorkspace = (typeof sessionCwd === 'string' && sessionCwd)
-    ? sessionCwd
-    : '.'
+  // Pure static fallback workspace without invoking any React Hooks or session stores
+  const effectiveWorkspace =
+    typeof props.workspace === 'string' && props.workspace ? props.workspace : '.'
 
   const handleOpen = (): void => {
     dialogCoordinator.open(effectiveWorkspace)
@@ -58,8 +59,8 @@ export function ConversationInputRightAction(props: ConversationInputRightAction
           gap: 5,
         }}
         onClick={handleOpen}
-        title="Vectr 语义检索与工作记忆控制台"
-        aria-label="Vectr 状态与管理"
+        title="Vectr Search & Memory Console"
+        aria-label="Vectr status and management"
       >
         <VectrNavIcon size={14} />
         <span>Vectr</span>

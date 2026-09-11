@@ -34,6 +34,15 @@ export declare function validateWorkspace(workspace: string): {
  */
 export declare function isMemoryOnly(mode?: string): boolean;
 /**
+ * Test whether a given sessionId represents an active, valid session.
+ * Absent values, undefined, null, empty strings, whitespace-only strings,
+ * string literals 'null'/'undefined', and non-finite numbers (NaN, Infinity)
+ * represent an inactive, blank, or invalid session.
+ *
+ * (Layer 1: Domain Core - Single Source of Truth for Session Activation)
+ */
+export declare function hasActiveSession(sessionId?: unknown): boolean;
+/**
  * Test whether a mode string indicates search_only mode.
  */
 export declare function isSearchOnly(mode?: string): boolean;

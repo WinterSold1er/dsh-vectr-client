@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { resolveUnifiedStatus, type SessionVectrState } from '../domain'
+import { hasActiveSession, resolveUnifiedStatus, type SessionVectrState } from '../domain'
 import { VectrStyles } from './buttons'
 import { dialogCoordinator } from './dialogCoordinator'
 
@@ -22,7 +22,7 @@ export interface SessionHeaderActionProps {
   [key: string]: unknown
 }
 
-export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
+function ActiveSessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
   const { sessionId, useSessions } = props
 
   // Dynamically retrieve the current session's working directory
@@ -54,9 +54,12 @@ export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode 
   }
 
   useEffect(() => {
-    const cwdToFetch = sessionCwd || '.'
+    if (!sessionCwd || typeof sessionCwd !== 'string' || sessionCwd.trim().length === 0) {
+      setState(null)
+      return
+    }
     const controller = new AbortController()
-    void fetchStatus(cwdToFetch, controller.signal)
+    void fetchStatus(sessionCwd.trim(), controller.signal)
     return () => {
       controller.abort()
     }
@@ -96,19 +99,33 @@ export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode 
           ? 'vectr-dot-error'
           : 'vectr-dot-offline'
 
+  const handleOpen = (): void => {
+    if (typeof sessionCwd === 'string' && sessionCwd.trim().length > 0) {
+      dialogCoordinator.open(sessionCwd.trim())
+    }
+  }
+
   return (
     <>
       <VectrStyles />
       <button
         type="button"
         className="vectr-header-capsule"
-        onClick={() => dialogCoordinator.open(sessionCwd || '.')}
-        title={`Vectr 状态: ${unifiedStatus.label}${unifiedStatus.description ? ` (${unifiedStatus.description})` : ''}\n工作区: ${sessionCwd || '.'}`}
-        aria-label="Vectr 状态与管理"
+        onClick={handleOpen}
+        title={`Vectr Status: ${unifiedStatus.label}${unifiedStatus.description ? ` (${unifiedStatus.description})` : ''}${sessionCwd ? `\nWorkspace: ${sessionCwd}` : ''}`}
+        aria-label="Vectr status and management"
       >
         <span className={`vectr-indicator-dot ${dotClass}`} />
         <span>{badgeText}</span>
       </button>
     </>
   )
+}
+
+export function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode {
+  // In blank or new sessions, the top header capsule must not render or trigger requests
+  if (!hasActiveSession(props.sessionId)) {
+    return null
+  }
+  return <ActiveSessionHeaderAction {...props} />
 }
