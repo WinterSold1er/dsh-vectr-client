@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -64,15 +64,18 @@ import {
   DEFAULT_HOST,
   resolveInstance,
   readInstancesFile,
+  WORKSPACE_KEY_LENGTH,
   type InstancesFile,
 } from './registry'
 import {
   DEFAULT_TCP_TIMEOUT_MS,
   diagnoseDaemon,
   fetchStatus,
+  isPortListening,
 } from './probe'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
+import { isSystemPrimarySlug } from './domain'
 
 // Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
 export * from './domain'
@@ -82,7 +85,7 @@ export * from './bridge'
 // Re-export the registry/probe surface so existing importers (and tests) keep
 // resolving these symbols from the plugin root without the index↔workspaces cycle.
 export { isDaemonAlive, isPortListening } from './probe'
-export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry'
+export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry'
 export type { InstanceEntry, InstancesFile } from './registry'
 
 // Re-export the tunnel self-heal surface (问题1B) so callers/tests resolve it
@@ -166,10 +169,13 @@ export interface Config {
   cliTimeoutMs?: number
   /** Working memory note recall / resume timeout in ms (default 10000). */
   recallTimeoutMs?: number
+  /** Vectr workspace upgrade timeout in ms (default 15000). */
+  upgradeTimeoutMs?: number
 }
 
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
 export const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5_000
+export const DEFAULT_HTTP_TIMEOUT_MS = DEFAULT_DAEMON_HTTP_TIMEOUT_MS
 
 /** Default TCP port-listening probe budget (ms). */
 export const DEFAULT_DAEMON_TCP_TIMEOUT_MS = DEFAULT_TCP_TIMEOUT_MS
@@ -179,6 +185,9 @@ export const DEFAULT_CLI_TIMEOUT_MS = 30_000
 
 /** Default working memory note recall / resume timeout in ms (default 10,000). */
 export const DEFAULT_RECALL_TIMEOUT_MS = 10_000
+
+/** Default Vectr workspace upgrade timeout in ms (default 15,000). */
+export const DEFAULT_UPGRADE_TIMEOUT_MS = 15_000
 
 /** (b) Minimum interval between startup-time heal attempts for the same slug.
  * Prevents a persistently-unreachable host from being hammered on every host
@@ -222,6 +231,7 @@ export const Config: z<Config> = z.object({
   cliPath: z.string().default(''),
   cliTimeoutMs: z.number().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
   recallTimeoutMs: z.number().min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
+  upgradeTimeoutMs: z.number().min(1).default(DEFAULT_UPGRADE_TIMEOUT_MS),
 })
 
 /**
@@ -503,6 +513,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     cliPath: config.cliPath ?? '',
     cliTimeoutMs: config.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
     recallTimeoutMs: config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS,
+    upgradeTimeoutMs: (() => {
+      const envVal = process.env.VECTR_UPGRADE_TIMEOUT_MS ? parseInt(process.env.VECTR_UPGRADE_TIMEOUT_MS.trim(), 10) : undefined
+      if (typeof envVal === 'number' && !isNaN(envVal) && envVal > 0) return envVal
+      return config.upgradeTimeoutMs ?? DEFAULT_UPGRADE_TIMEOUT_MS
+    })(),
   }
   // Relative-path fallback (P3-safe): only resolves against process.cwd()
   // when Config supplies a *relative* path. Both defaults
@@ -682,7 +697,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Registered in the root plugin scope (not per-agent) so a single pair of
   // management endpoints serves every workspace; disposed with this fiber.
   registerManagementRoutes(ctx, instancesPath, resolved)
-  registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath, instancesPath)
+  registerCodebaseRoutes(ctx, codebasesPath, resolved.secretsPath, instancesPath, resolved)
 
   // 4-Layer architecture: wire Domain, Infra, and Bridge services for session management
   const instanceResolver = new InstanceResolver(instancesPath, ctx)
@@ -699,6 +714,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     cliRunner,
     statusTimeoutMs: resolved.daemonHttpTimeoutMs,
     recallTimeoutMs: resolved.recallTimeoutMs,
+    upgradeTimeoutMs: resolved.upgradeTimeoutMs,
   })
   registerSessionRoutes(ctx, sessionService)
 }
@@ -949,14 +965,23 @@ export function slugFromPathname(pathname: string): string {
  * @param ctx - plugin context carrying `webServer` + `credentials`.
  * @param codebasesPath - absolute path of the codebase metadata file.
  * @param secretsPath - fallback secret file path.
+ * @param instancesPath - instances JSON file path.
+ * @param config - optional configuration override (e.g. daemonHttpTimeoutMs).
  */
-export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath: string = DEFAULT_INSTANCES_FILE): void {
+export function registerCodebaseRoutes(
+  ctx: Context,
+  codebasesPath: string,
+  secretsPath: string,
+  instancesPath: string = DEFAULT_INSTANCES_FILE,
+  config?: { daemonHttpTimeoutMs?: number },
+): void {
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
     ctx.logger.warn('vectr-client: webServer service unavailable; skipping /api/vectr/codebases* routes')
     return
   }
   const deps = buildCodebaseDeps(ctx, secretsPath)
+  const httpTimeoutMs = config?.daemonHttpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS
 
   ctx.effect(() => webServer.register({
     kind: 'exact',
@@ -971,6 +996,69 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
           if (wsFilter !== undefined) {
             list = list.filter(e => e.workspace === wsFilter)
           }
+
+          // Prepend Primary codebase for non-memory_only workspaces that have mounted codebases
+          let instances: InstancesFile | undefined
+          try {
+            instances = readInstancesFile(ctx, instancesPath)
+          } catch {
+            // ignore
+          }
+          if (wsFilter !== undefined) {
+            const inst = instances ? resolveInstance(instances, wsFilter) : undefined
+            const isMemoryOnly = inst ? (inst.mode === 'memory_only' || inst.mode === 'memory-only') : false
+            if (!isMemoryOnly && list.length > 0 && !list.some(e => e.isPrimary || isSystemPrimarySlug(e.slug))) {
+              const isListening = inst?.port ? await isPortListening(inst.host ?? '127.0.0.1', inst.port, 300) : false
+              list = [
+                {
+                  id: `primary:${wsFilter}`,
+                  slug: 'primary',
+                  type: 'local',
+                  path: wsFilter,
+                  workspace: wsFilter,
+                  serverName: `primary_${wsFilter}`,
+                  status: isListening ? 'up' : 'down',
+                  isPrimary: true,
+                },
+                ...list,
+              ]
+            }
+          } else {
+            const workspacesWithEntries = new Set<string>()
+            for (const item of list) {
+              if (item.workspace && item.workspace !== UNASSIGNED_WORKSPACE) {
+                workspacesWithEntries.add(item.workspace)
+              }
+            }
+            const primaries: typeof list = []
+            for (const ws of workspacesWithEntries) {
+              const inst = instances ? resolveInstance(instances, ws) : undefined
+              const isMemoryOnly = inst ? (inst.mode === 'memory_only' || inst.mode === 'memory-only') : false
+              const alreadyHasPrimary = list.some(
+                e => e.workspace === ws && (e.isPrimary || isSystemPrimarySlug(e.slug)),
+              )
+              if (!isMemoryOnly && !alreadyHasPrimary) {
+                const wsKey = createHash('sha256').update(ws).digest('hex').slice(0, WORKSPACE_KEY_LENGTH)
+                // Multi-workspace global listing: avoid pushing identical slug 'primary'
+                const slug = workspacesWithEntries.size > 1 ? `primary-${wsKey}` : 'primary'
+                const isListening = inst?.port ? await isPortListening(inst.host ?? '127.0.0.1', inst.port, 300) : false
+                primaries.push({
+                  id: `primary:${ws}`,
+                  slug,
+                  type: 'local',
+                  path: ws,
+                  workspace: ws,
+                  serverName: `primary_${wsKey}`,
+                  status: isListening ? 'up' : 'down',
+                  isPrimary: true,
+                })
+              }
+            }
+            if (primaries.length > 0) {
+              list = [...primaries, ...list]
+            }
+          }
+
           sendJson(res, 200, list)
         } catch (error) {
           sendJson(res, 500, { error: String(error) })
@@ -1017,13 +1105,27 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
         sendJson(res, 400, { error: 'missing codebase slug' })
         return
       }
+      const normSlug = slug.trim().toLowerCase()
       const list = () => loadCodebases(codebasesPath)
-      const find = () => list().find(e => e.slug === slug)
+      const find = () => list().find(e => e.slug.trim().toLowerCase() === normSlug)
 
       if (req.method === 'DELETE') {
+        if (isSystemPrimarySlug(normSlug)) {
+          sendJson(res, 403, { ok: false, error: 'Cannot delete primary codebase of the workspace' })
+          return
+        }
         const entry = find()
         if (entry === undefined) {
           sendJson(res, 404, { ok: false, error: 'no such codebase' })
+          return
+        }
+        const isPrimaryByPath = Boolean(
+          entry.workspace && entry.path && resolve(entry.path) === resolve(entry.workspace),
+        )
+        const isPrimaryBySlug =
+          typeof entry.slug === 'string' && isSystemPrimarySlug(entry.slug)
+        if (entry.isPrimary || isPrimaryBySlug || isPrimaryByPath) {
+          sendJson(res, 403, { ok: false, error: 'Cannot delete primary codebase of the workspace' })
           return
         }
         try {
@@ -1035,6 +1137,70 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
         return
       }
       if (req.method === 'POST' && url.pathname.endsWith('/test')) {
+        if (isSystemPrimarySlug(normSlug)) {
+          let instances: InstancesFile | undefined
+          try {
+            instances = readInstancesFile(ctx, instancesPath)
+          } catch {
+            // ignore
+          }
+          if (!instances) {
+            sendJson(res, 503, { ok: false, error: 'Instance registry unavailable' })
+            return
+          }
+          let targetWs = url.searchParams.get('workspace') ?? undefined
+          if (!targetWs && isSystemPrimarySlug(normSlug) && normSlug !== 'primary') {
+            const key = normSlug.replace(/^primary-/i, '')
+            for (const [k, inst] of Object.entries(instances)) {
+              if (
+                k.startsWith(key) ||
+                key.startsWith(k) ||
+                (inst?.workspace && createHash('sha256').update(inst.workspace).digest('hex').startsWith(key))
+              ) {
+                targetWs = inst?.workspace
+                break
+              }
+            }
+          }
+          if (!targetWs) {
+            const codebases = loadCodebases(codebasesPath)
+            const wsSet = new Set(codebases.map(c => c.workspace).filter(w => w && w !== UNASSIGNED_WORKSPACE))
+            if (wsSet.size === 1) {
+              targetWs = [...wsSet][0]
+            } else {
+              const allInstWorkspaces = Object.values(instances).map(i => i.workspace).filter(Boolean)
+              if (allInstWorkspaces.length === 1) {
+                targetWs = allInstWorkspaces[0]
+              }
+            }
+          }
+          if (!targetWs) {
+            sendJson(res, 400, { ok: false, error: 'Ambiguous primary codebase: please specify ?workspace=' })
+            return
+          }
+          const inst = resolveInstance(instances, targetWs)
+          if (!inst || !inst.port) {
+            sendJson(res, 503, { ok: false, error: `No Vectr daemon registered for workspace ${targetWs}` })
+            return
+          }
+          const host = inst.host || '127.0.0.1'
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), httpTimeoutMs)
+          try {
+            const probeRes = await fetch(`http://${host}:${inst.port}/v1/status`, { signal: controller.signal })
+            if (!probeRes.ok) {
+              sendJson(res, 503, { ok: false, error: `Primary daemon returned status ${probeRes.status}` })
+              return
+            }
+            const statusData = await probeRes.json()
+            sendJson(res, 200, { ok: true, status: statusData })
+          } catch (err) {
+            sendJson(res, 503, { ok: false, error: `Primary daemon probe failed: ${String(err)}` })
+          } finally {
+            clearTimeout(timer)
+          }
+          return
+        }
         const entry = find()
         if (entry === undefined) {
           sendJson(res, 404, { ok: false, error: 'no such codebase' })
@@ -1048,6 +1214,10 @@ export function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secr
         return
       }
       if (req.method === 'PATCH') {
+        if (isSystemPrimarySlug(normSlug)) {
+          sendJson(res, 403, { ok: false, error: 'Cannot reassign primary codebase of the workspace' })
+          return
+        }
         const entry = find()
         if (entry === undefined) {
           sendJson(res, 404, { ok: false, error: 'no such codebase' })

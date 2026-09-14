@@ -42,5 +42,9 @@ export declare class VectrCliRunner implements IVectrCliRunner {
     private readonly defaultTimeoutMs;
     constructor(options?: CliRunnerOptions);
     init(options: VectrInitOptions): Promise<InitResult>;
+    restart(workspace: string, options?: {
+        full?: boolean;
+    }): Promise<InitResult>;
+    private executeCommand;
 }
 //# sourceMappingURL=cli-runner.d.ts.map

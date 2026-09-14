@@ -28,5 +28,10 @@ export interface SessionsBoundInputRightActionProps extends ConversationInputRig
     useSessions: <T>(selector: (state: any) => T) => T;
 }
 export declare function SessionsBoundInputRightAction(props: SessionsBoundInputRightActionProps): ReactNode;
+export interface DualBoundInputRightActionProps extends ConversationInputRightActionProps {
+    useSession: <T>(selector: (state: any) => T) => T;
+    useSessions: <T>(selector: (state: any) => T) => T;
+}
+export declare function DualBoundInputRightAction(props: DualBoundInputRightActionProps): ReactNode;
 export declare function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode;
 //# sourceMappingURL=ConversationInputRightAction.d.ts.map

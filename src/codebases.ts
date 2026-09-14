@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join, resolve, sep } from 'node:path'
 import { isPortListening } from './probe'
 import { WORKSPACE_KEY_LENGTH, resolveInstance, type InstancesFile } from './registry'
+import { isReservedPrimarySlug, isSystemPrimarySlug } from './domain'
 import type {
   CodebaseAuth,
   CodebaseEntry,
@@ -44,8 +45,8 @@ export const DEFAULT_TUNNEL_PROBE_MS = 800
  * `ensureTunnelUp` allocate from this same window so the forwarded
  * Streamable-HTTP endpoints stay in one predictable band. Shared as a constant
  * so the two call sites cannot drift apart. */
-export const TUNNEL_PORT_MIN = 8760
-export const TUNNEL_PORT_MAX = 8799
+export const TUNNEL_PORT_MIN = (process.env.VECTR_TUNNEL_PORT_MIN ? parseInt(process.env.VECTR_TUNNEL_PORT_MIN, 10) : undefined) || 8760
+export const TUNNEL_PORT_MAX = (process.env.VECTR_TUNNEL_PORT_MAX ? parseInt(process.env.VECTR_TUNNEL_PORT_MAX, 10) : undefined) || 8799
 
 /**
  * Secret store seam. Implemented either by a wrapper over `ctx.credentials`
@@ -375,6 +376,10 @@ async function createCodebaseCore(
     spec.auth = 'password'
   }
 
+  if (typeof spec.slug === 'string' && isReservedPrimarySlug(spec.slug)) {
+    throw new CodebaseError(400, 'Slug "primary" is reserved for the primary codebase')
+  }
+
   const workspace = spec.workspace ?? spec.path
   // B2: a remote codebase's `workspace` is the CALLER's local cwd — it cannot be
   // inferred from the remote `path` (a different machine). The client must report
@@ -673,6 +678,13 @@ export async function deleteCodebase(
   metaPath: string,
   entry: CodebaseEntry,
 ): Promise<void> {
+  const isPrimaryByPath = Boolean(
+    entry.workspace && entry.path && resolve(entry.path) === resolve(entry.workspace),
+  )
+  if (entry.isPrimary || isSystemPrimarySlug(entry.slug) || isPrimaryByPath) {
+    throw new CodebaseError(403, 'Cannot delete primary codebase of the workspace')
+  }
+
   if (entry.type === 'local') {
     if (entry.localPort !== undefined) {
       const stop = deps.spawnRunner('vectr', ['stop', '--port', String(entry.localPort)])

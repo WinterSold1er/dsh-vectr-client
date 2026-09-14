@@ -106,6 +106,8 @@ export interface CodebaseEntry {
   status: CodebaseStatus
   /** Last error detail when `status === 'error'`. */
   error?: string
+  /** Whether this codebase is the primary codebase of the workspace. */
+  isPrimary?: boolean | undefined
 }
 
 /**
@@ -129,6 +131,8 @@ export interface CodebaseSummary {
   status: 'up' | 'down' | 'error'
   error?: string | undefined
   workspace?: string | undefined
+  isPrimary?: boolean | undefined
+  deletable?: boolean | undefined
 }
 
 /**
@@ -212,6 +216,18 @@ export interface InitResult {
   stdout?: string | undefined
   stderr?: string | undefined
   error?: string | undefined
+}
+
+/**
+ * Outcome of upgrading a workspace from memory-only to full mode.
+ */
+export interface UpgradeResult {
+  ok: boolean
+  mode?: VectrMode | undefined
+  port?: number | undefined
+  error?: string | undefined
+  stdout?: string | undefined
+  stderr?: string | undefined
 }
 
 /**

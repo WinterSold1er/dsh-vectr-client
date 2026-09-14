@@ -79,6 +79,36 @@ describe('Infrastructure Layer', () => {
       expect(capturedArgs).toEqual(['init', '--path', '/tmp/test-ws', '--hooks', '--style', 'memory-only'])
     })
 
+    it('executes restart with --full option', async () => {
+      let capturedCmd = ''
+      let capturedArgs: string[] = []
+
+      const mockSpawn = (cmd: string, args: string[]) => {
+        capturedCmd = cmd
+        capturedArgs = args
+        const child = new EventEmitter() as unknown as ChildProcess
+        const stdout = new EventEmitter()
+        const stderr = new EventEmitter()
+        ;(child as any).stdout = stdout
+        ;(child as any).stderr = stderr
+        ;(child as any).kill = vi.fn()
+
+        setTimeout(() => {
+          stdout.emit('data', 'Restarting daemon in full mode: /tmp/test-ws\n')
+          child.emit('close', 0, null)
+        }, 10)
+        return child
+      }
+
+      const runner = new VectrCliRunner({ spawnFn: mockSpawn as any })
+      const res = await runner.restart('/tmp/test-ws', { full: true })
+
+      expect(res.ok).toBe(true)
+      expect(res.stdout).toContain('Restarting daemon in full mode')
+      expect(capturedCmd).toBe('vectr')
+      expect(capturedArgs).toEqual(['restart', '/tmp/test-ws', '--full'])
+    })
+
     it('handles CLI execution errors gracefully', async () => {
       const mockSpawn = () => {
         const child = new EventEmitter() as unknown as ChildProcess

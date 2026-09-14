@@ -263,16 +263,19 @@ describe('QA Verification: 3. Session Linkage & Anti-crosstalk', () => {
       cliRunner: { init: vi.fn(async () => ({ ok: true })) },
     })
 
-    // Query Session A
+    // Query Session A: non-memory_only project with external codebase mounts primary at index 0
     const stateA = await service.getSessionStatus('/workspace/repo-a')
     expect(stateA.workspace).toBe('/workspace/repo-a')
     expect(stateA.port).toBe(8761)
     expect(stateA.mode).toBe('full')
-    expect(stateA.codebases).toHaveLength(1)
-    expect(stateA.codebases[0]?.slug).toBe('cb-a')
-    expect(stateA.codebases[0]?.type).toBe('local')
+    expect(stateA.codebases).toHaveLength(2)
+    expect(stateA.codebases[0]?.slug).toBe('primary')
+    expect(stateA.codebases[0]?.isPrimary).toBe(true)
+    expect(stateA.codebases[0]?.deletable).toBe(false)
+    expect(stateA.codebases[1]?.slug).toBe('cb-a')
+    expect(stateA.codebases[1]?.type).toBe('local')
 
-    // Query Session B
+    // Query Session B: memory_only project does not mount primary codebase
     const stateB = await service.getSessionStatus('/workspace/repo-b')
     expect(stateB.workspace).toBe('/workspace/repo-b')
     expect(stateB.port).toBe(8762)

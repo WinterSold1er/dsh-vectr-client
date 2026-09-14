@@ -12,6 +12,29 @@ import type { VectrMode, VectrStatus } from './types';
  */
 export declare const SLUG_PATTERN: RegExp;
 /**
+ * Pattern matching reserved primary codebase slug prefixes and names.
+ * Any slug equal to "primary" or prefixed with "primary-" is reserved for
+ * system-generated primary codebases and cannot be used for user codebases.
+ */
+export declare const PRIMARY_RESERVED_PREFIX_PATTERN: RegExp;
+/**
+ * Pattern matching system-generated primary codebase slugs:
+ * 'primary', legacy 8-char hex keys, current 12-char hex keys
+ * (WORKSPACE_KEY_LENGTH), or standard 8-16 hex key ranges.
+ */
+export declare const SYSTEM_PRIMARY_SLUG_PATTERN: RegExp;
+/**
+ * Test whether a slug uses the reserved primary codebase prefix or name.
+ * Slugs that match this pattern cannot be created or registered by users.
+ */
+export declare function isReservedPrimarySlug(slug?: string | null): boolean;
+/**
+ * Test whether a slug represents a system-generated Primary codebase.
+ * Matches the reserved 'primary' name, legacy 8-char hex keys, current
+ * WORKSPACE_KEY_LENGTH (12-char hex) keys, and standard 8-16 hex key ranges.
+ */
+export declare function isSystemPrimarySlug(slug?: string | null): boolean;
+/**
  * Validate a codebase slug.
  * @param slug - input slug string.
  * @returns validation result with error message if invalid.

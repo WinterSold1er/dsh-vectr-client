@@ -7,6 +7,7 @@
  */
 
 import { useState, type FormEvent, type ReactNode } from 'react'
+import { isReservedPrimarySlug, SLUG_PATTERN } from '../domain'
 import { BTN } from './buttons'
 
 export interface CodebaseModalProps {
@@ -16,7 +17,7 @@ export interface CodebaseModalProps {
   onSuccess: (slug: string) => void
 }
 
-const SLUG_REGEX = /^[A-Za-z0-9_-]{1,32}$/
+const SLUG_REGEX = SLUG_PATTERN
 
 export function CodebaseModal({
   workspace,
@@ -44,6 +45,10 @@ export function CodebaseModal({
     e.preventDefault()
     if (!isSlugValid) {
       setError('Slug 格式不符合要求')
+      return
+    }
+    if (isReservedPrimarySlug(slug)) {
+      setError('Slug "primary" is reserved for the primary codebase')
       return
     }
 

@@ -16,6 +16,39 @@ import type { VectrMode, VectrStatus } from './types'
 export const SLUG_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
 /**
+ * Pattern matching reserved primary codebase slug prefixes and names.
+ * Any slug equal to "primary" or prefixed with "primary-" is reserved for
+ * system-generated primary codebases and cannot be used for user codebases.
+ */
+export const PRIMARY_RESERVED_PREFIX_PATTERN = /^primary(-.*)?$/i
+
+/**
+ * Pattern matching system-generated primary codebase slugs:
+ * 'primary', legacy 8-char hex keys, current 12-char hex keys
+ * (WORKSPACE_KEY_LENGTH), or standard 8-16 hex key ranges.
+ */
+export const SYSTEM_PRIMARY_SLUG_PATTERN = /^primary(-[0-9a-f]{8,16})?$/i
+
+/**
+ * Test whether a slug uses the reserved primary codebase prefix or name.
+ * Slugs that match this pattern cannot be created or registered by users.
+ */
+export function isReservedPrimarySlug(slug?: string | null): boolean {
+  if (!slug || typeof slug !== 'string') return false
+  return PRIMARY_RESERVED_PREFIX_PATTERN.test(slug.trim())
+}
+
+/**
+ * Test whether a slug represents a system-generated Primary codebase.
+ * Matches the reserved 'primary' name, legacy 8-char hex keys, current
+ * WORKSPACE_KEY_LENGTH (12-char hex) keys, and standard 8-16 hex key ranges.
+ */
+export function isSystemPrimarySlug(slug?: string | null): boolean {
+  if (!slug || typeof slug !== 'string') return false
+  return SYSTEM_PRIMARY_SLUG_PATTERN.test(slug.trim())
+}
+
+/**
  * Validate a codebase slug.
  * @param slug - input slug string.
  * @returns validation result with error message if invalid.

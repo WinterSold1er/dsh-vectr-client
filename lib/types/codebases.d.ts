@@ -23,8 +23,8 @@ export declare const DEFAULT_TUNNEL_PROBE_MS = 800;
  * `ensureTunnelUp` allocate from this same window so the forwarded
  * Streamable-HTTP endpoints stay in one predictable band. Shared as a constant
  * so the two call sites cannot drift apart. */
-export declare const TUNNEL_PORT_MIN = 8760;
-export declare const TUNNEL_PORT_MAX = 8799;
+export declare const TUNNEL_PORT_MIN: number;
+export declare const TUNNEL_PORT_MAX: number;
 /**
  * Secret store seam. Implemented either by a wrapper over `ctx.credentials`
  * (async host service) or a {@link FileCredentialStore} fallback. Only

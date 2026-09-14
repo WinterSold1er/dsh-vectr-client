@@ -15,12 +15,13 @@ import type {
   ResumeResponse,
   SessionVectrState,
   TriggerResult,
+  UpgradeResult,
   VectrInitOptions,
   VectrStatus,
 } from './types'
 
 /**
- * Runner interface for Vectr CLI commands (e.g. vectr init).
+ * Runner interface for Vectr CLI commands (e.g. vectr init, vectr restart).
  */
 export interface IVectrCliRunner {
   /**
@@ -28,6 +29,13 @@ export interface IVectrCliRunner {
    * @param options - initialization options (workspace, hooks, memoryOnly, style).
    */
   init(options: VectrInitOptions): Promise<InitResult>
+
+  /**
+   * Run `vectr restart` on a workspace directory.
+   * @param workspace - workspace path.
+   * @param options - restart options (e.g. full: true).
+   */
+  restart(workspace: string, options?: { full?: boolean }): Promise<InitResult>
 }
 
 /**
@@ -107,6 +115,11 @@ export interface ISessionStatusService {
    * Run vectr init for a workspace.
    */
   initWorkspace(options: VectrInitOptions): Promise<InitResult>
+
+  /**
+   * Upgrade a memory-only workspace to full mode (indexing + memory).
+   */
+  upgradeWorkspace(workspace: string): Promise<UpgradeResult>
 
   /**
    * Recall working memory notes for a workspace or port.

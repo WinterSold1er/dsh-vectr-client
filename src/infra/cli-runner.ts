@@ -91,6 +91,24 @@ export class VectrCliRunner implements IVectrCliRunner {
       args.push('--style', options.style.trim())
     }
 
+    return this.executeCommand(args)
+  }
+
+  async restart(workspace: string, options?: { full?: boolean }): Promise<InitResult> {
+    const wsCheck = validateWorkspace(workspace)
+    if (!wsCheck.valid) {
+      return { ok: false, error: wsCheck.error }
+    }
+
+    const args: string[] = ['restart', workspace]
+    if (options?.full === true) {
+      args.push('--full')
+    }
+
+    return this.executeCommand(args)
+  }
+
+  private executeCommand(args: string[]): Promise<InitResult> {
     return new Promise<InitResult>((resolveResult) => {
       let stdout = ''
       let stderr = ''

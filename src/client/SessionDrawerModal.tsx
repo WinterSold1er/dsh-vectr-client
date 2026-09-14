@@ -42,6 +42,10 @@ export function SessionDrawerModal({
   const [initBusy, setInitBusy] = useState(false)
   const [initResult, setInitResult] = useState<{ ok: boolean; text: string } | null>(null)
 
+  // Upgrade state
+  const [upgrading, setUpgrading] = useState(false)
+  const [upgradeMsg, setUpgradeMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
   // Codebase action states
   const [busySlug, setBusySlug] = useState<string | null>(null)
   const [codebaseMsg, setCodebaseMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -83,6 +87,29 @@ export function SessionDrawerModal({
     }
   }
 
+  const handleUpgrade = async (): Promise<void> => {
+    setUpgrading(true)
+    setUpgradeMsg(null)
+    try {
+      const res = await fetch('/api/vectr/upgrade', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace }),
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string; mode?: string }
+      if (res.ok && data.ok) {
+        setUpgradeMsg({ ok: true, text: '工作区已成功升级为完整模式 (Full Mode)！' })
+        onRefresh()
+      } else {
+        setUpgradeMsg({ ok: false, text: data.error ?? `升级失败 (${res.status})` })
+      }
+    } catch (err) {
+      setUpgradeMsg({ ok: false, text: `升级请求失败: ${String(err)}` })
+    } finally {
+      setUpgrading(false)
+    }
+  }
+
   const handleInit = async (): Promise<void> => {
     setInitBusy(true)
     setInitResult(null)
@@ -107,6 +134,7 @@ export function SessionDrawerModal({
           ok: true,
           text: `Vectr 工作区初始化完成！\n后续指引：如需启动语义检索与工作记忆守护进程，请在终端执行 vectr start（或配置后台守护进程拉起）。${data.stdout ? `\n\n${data.stdout}` : ''}`,
         })
+        onRefresh()
       } else {
         setInitResult({
           ok: false,
@@ -124,7 +152,8 @@ export function SessionDrawerModal({
     setBusySlug(slug)
     setCodebaseMsg(null)
     try {
-      const res = await fetch(`/api/vectr/codebases/${encodeURIComponent(slug)}/test`, {
+      const wsParam = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      const res = await fetch(`/api/vectr/codebases/${encodeURIComponent(slug)}/test${wsParam}`, {
         method: 'POST',
       })
       const data = (await res.json()) as { ok: boolean; error?: string }
@@ -440,7 +469,24 @@ export function SessionDrawerModal({
                         key={cb.slug}
                         style={{ borderBottom: '1px solid var(--dsw-alias-border-l2)' }}
                       >
-                        <td style={{ padding: '10px', fontWeight: 600 }}>{cb.slug}</td>
+                        <td style={{ padding: '10px', fontWeight: 600 }}>
+                          {cb.slug}
+                          {cb.isPrimary && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                fontSize: 10,
+                                background: 'var(--dsw-alias-brand-tertiary)',
+                                color: 'var(--dsw-alias-brand-primary)',
+                                fontWeight: 600,
+                              }}
+                            >
+                              Primary
+                            </span>
+                          )}
+                        </td>
                         <td style={{ padding: '10px' }}>
                           {cb.type === 'remote' ? '🌐 Remote' : '📁 Local'}
                         </td>
@@ -465,7 +511,17 @@ export function SessionDrawerModal({
                         </td>
                         <td style={{ padding: '10px', textAlign: 'right' }}>
                           <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                            {confirmDeleteSlug === cb.slug ? (
+                            {cb.isPrimary ? (
+                              <button
+                                type="button"
+                                className={BTN.secondary}
+                                disabled
+                                style={{ opacity: 0.5, cursor: 'not-allowed' }}
+                                title="工作区主代码库不可解绑删除"
+                              >
+                                不可删除
+                              </button>
+                            ) : confirmDeleteSlug === cb.slug ? (
                               <>
                                 <button
                                   type="button"
@@ -536,16 +592,45 @@ export function SessionDrawerModal({
                 </div>
 
                 {isMemoryOnly ? (
-                  <div
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: 6,
-                      background: 'var(--dsw-alias-brand-tertiary)',
-                      color: 'var(--dsw-alias-brand-primary)',
-                      fontSize: 12,
-                    }}
-                  >
-                    ℹ️ 当前工作区运行在 <strong>memory_only</strong> 模式，禁止发起索引请求（原生支持仅工作记忆与 hooks，无需代码目录，不建索引）。
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 6,
+                        background: 'var(--dsw-alias-brand-tertiary)',
+                        color: 'var(--dsw-alias-brand-primary)',
+                        fontSize: 12,
+                      }}
+                    >
+                      ℹ️ 当前工作区运行在 <strong>memory_only</strong> 模式，禁止发起索引请求（原生支持仅工作记忆与 hooks，无需代码目录，不建索引）。
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        className={BTN.primary}
+                        disabled={upgrading}
+                        onClick={() => void handleUpgrade()}
+                      >
+                        {upgrading ? '升级中…' : '⚡ 升级为完整模式 (启用代码检索)'}
+                      </button>
+                    </div>
+                    {upgradeMsg && (
+                      <div
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: 6,
+                          background: upgradeMsg.ok
+                            ? 'var(--dsw-alias-state-success-tertiary)'
+                            : 'var(--dsw-alias-interactive-bg-hover-danger)',
+                          color: upgradeMsg.ok
+                            ? 'var(--dsw-alias-state-success-primary)'
+                            : 'var(--dsw-alias-state-error-primary)',
+                          fontSize: 12,
+                        }}
+                      >
+                        {upgradeMsg.text}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div>

@@ -24,6 +24,7 @@ export declare function readJsonBody(req: IncomingMessage, limitBytes?: number):
  * - `GET  /api/vectr/session-status?workspace=<path>`
  * - `POST /api/vectr/session-reindex`
  * - `POST /api/vectr/init`
+ * - `POST /api/vectr/upgrade`
  * - `POST /api/vectr/notes/recall`
  * - `GET  /api/vectr/notes/resume?workspace=<path>`
  *

@@ -126,13 +126,13 @@ describe('scanWorkspaces', () => {
 
   it('assembles online rows with status fields', async () => {
     const a = await startDaemon()
-    await writeRegistry({ aa: { workspace: '/ws/a', port: a.port, pid: 999, mode: 'full', host: '127.0.0.1' } })
+    await writeRegistry({ aa: { workspace: '/ws/a', port: a.port, pid: process.pid, mode: 'full', host: '127.0.0.1' } })
     const views = await scanWorkspaces(ctx, registryPath)
     expect(views).toHaveLength(1)
     expect(views[0]!.live).toBe(true)
     expect(views[0]!.workspace).toBe('/ws/a')
     expect(views[0]!.port).toBe(a.port)
-    expect(views[0]!.pid).toBe(999)
+    expect(views[0]!.pid).toBe(process.pid)
     expect(views[0]!.mode).toBe('full')
     expect(views[0]!.status?.indexed_files).toBe(12)
     expect(views[0]!.status?.total_chunks).toBe(34)

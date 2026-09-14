@@ -106,8 +106,46 @@ export function SessionsBoundInputRightAction(props: SessionsBoundInputRightActi
   return <StaticInputRightAction {...props} workspace={effectiveWorkspace} />
 }
 
+export interface DualBoundInputRightActionProps extends ConversationInputRightActionProps {
+  useSession: <T>(selector: (state: any) => T) => T
+  useSessions: <T>(selector: (state: any) => T) => T
+}
+
+export function DualBoundInputRightAction(props: DualBoundInputRightActionProps): ReactNode {
+  const { useSession, useSessions, sessionId } = props
+  // Unconditionally call hooks at top level
+  const singleSession = useSession((s: any) => s)
+  const sessionInfo = useSessions((state: any) => {
+    const id = sessionId ? String(sessionId) : ''
+    return id ? state?.byId?.[id] : undefined
+  })
+  const sessionCwd = sessionInfo?.cwd ?? singleSession?.cwd
+  const isBlank = props.blank !== undefined
+    ? props.blank
+    : (singleSession?.blank !== undefined ? singleSession.blank : sessionInfo?.blank)
+
+  const visibility = resolveSessionSlotVisibility({ sessionId, blank: isBlank })
+  if (!visibility.shouldRenderInputRight) {
+    return null
+  }
+
+  const effectiveWorkspace = sessionCwd || (typeof props.workspace === 'string' ? props.workspace : undefined)
+  return <StaticInputRightAction {...props} workspace={effectiveWorkspace} />
+}
+
 export function ConversationInputRightAction(props: ConversationInputRightActionProps): ReactNode {
-  // Prioritize useSessions when present to read real sessionCwd and blank state
+  // Use dual-bound container when both hooks are available
+  if (typeof props.useSession === 'function' && typeof props.useSessions === 'function') {
+    return (
+      <DualBoundInputRightAction
+        {...props}
+        useSession={props.useSession}
+        useSessions={props.useSessions}
+      />
+    )
+  }
+
+  // Fallback to single hook containers
   if (typeof props.useSessions === 'function') {
     return <SessionsBoundInputRightAction {...props} useSessions={props.useSessions} />
   }

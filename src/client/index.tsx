@@ -27,6 +27,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
+import { isReservedPrimarySlug } from '../domain'
 import { VectrSettings } from './vectr-settings'
 import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
@@ -89,6 +90,8 @@ interface CodebaseView {
   error?: string
   /** Owning workspace (absolute); '__unassigned__' or absent ⇒ unassigned bucket. */
   workspace?: string
+  /** Whether this is the primary codebase of the workspace. */
+  isPrimary?: boolean
 }
 
 /** Minimal structural view of the Cordis client context this half needs. */
@@ -163,7 +166,7 @@ function TargetCell(props: { view: CodebaseView }): ReactNode {
 /** One codebase sub-row: 5 columns (name / type / target / status / actions). */
 function CodebaseSubRow(props: {
   view: CodebaseView
-  onTest: (slug: string) => void
+  onTest: (slug: string, workspace?: string) => void
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busy: boolean
@@ -177,7 +180,26 @@ function CodebaseSubRow(props: {
   const [target, setTarget] = useState(knownWorkspaces[0] ?? '')
   return (
     <tr>
-      <td style={tdStyle} title={view.slug}><span style={ellipsisStyle}>{view.slug}</span></td>
+      <td style={tdStyle} title={view.slug}>
+        <span style={ellipsisStyle}>
+          {view.slug}
+          {view.isPrimary && (
+            <span
+              style={{
+                marginLeft: 4,
+                padding: '1px 4px',
+                borderRadius: 3,
+                fontSize: 10,
+                background: 'var(--dsw-alias-brand-tertiary)',
+                color: 'var(--dsw-alias-brand-primary)',
+                fontWeight: 600,
+              }}
+            >
+              Primary
+            </span>
+          )}
+        </span>
+      </td>
       <td style={tdStyle}><TypeCell type={view.type} /></td>
       <TargetCell view={view} />
       <td style={tdStyle}><StatusPill status={view.status} error={view.error} /></td>
@@ -185,8 +207,16 @@ function CodebaseSubRow(props: {
         {/* flex + nowrap keeps test/delete/(assign) on one line; gap replaces
             marginLeft so they never wrap when the column is squeezed (问题2). */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
-          <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug)}>test</button>
-          <button type="button" className={BTN.danger} disabled={busy} onClick={() => onDelete(view.slug)}>delete</button>
+          <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug, view.workspace)}>test</button>
+          <button
+            type="button"
+            className={BTN.danger}
+            disabled={busy || view.isPrimary === true}
+            title={view.isPrimary ? 'Primary codebase cannot be deleted' : 'Delete codebase'}
+            onClick={() => onDelete(view.slug)}
+          >
+            delete
+          </button>
           {showAssign
             ? assigning
               ? (
@@ -215,7 +245,7 @@ function CodebaseSubRow(props: {
 /** The 5-column codebase sub-table for one workspace section (no large minWidth). */
 function CodebaseSubTable(props: {
   entries: CodebaseView[]
-  onTest: (slug: string) => void
+  onTest: (slug: string, workspace?: string) => void
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busySlug: string | null
@@ -284,6 +314,10 @@ function CodebaseCreateForm(props: {
   const submit = (e: { preventDefault: () => void }): void => {
     e.preventDefault()
     setFormError(null)
+    if (isReservedPrimarySlug(slug)) {
+      setFormError('Slug "primary" is reserved for the primary codebase')
+      return
+    }
     setCreating(true)
     // 阶段2: the form ALWAYS reports `workspace`. In a section it is the preset
     // (so the entry binds to that workspace); in the unassigned area it is the
@@ -390,7 +424,7 @@ function WorkspaceRow(props: {
   onToggle: () => void
   onReindex: (port: number) => void
   busyPort: boolean
-  onTest: (slug: string) => void
+  onTest: (slug: string, workspace?: string) => void
   onDelete: (slug: string) => void
   onAssign: (slug: string, ws: string) => void
   busySlug: string | null
@@ -522,7 +556,10 @@ export function WorkspaceConsole(): ReactNode {
       .finally(() => setBusySlug(null))
   }
 
-  const test = (slug: string): void => run(slug, 'POST', '/test', `tested ${slug}`)
+  const test = (slug: string, ws?: string): void => {
+    const wsParam = ws ? `?workspace=${encodeURIComponent(ws)}` : ''
+    run(slug, 'POST', `/test${wsParam}`, `tested ${slug}`)
+  }
   const del = (slug: string): void => run(slug, 'DELETE', '', `deleted ${slug}`)
   // Assign calls the real backend PATCH route (src/index.ts) to move a
   // codebase into a workspace; a 4xx from the host surfaces as a clear flash

@@ -7,7 +7,7 @@
  *
  * @module dsh-vectr-client/bridge/session-service
  */
-import { type ICodebaseService, type IInstanceResolver, type InitResult, type ISessionStatusService, type IVectrApiClient, type IVectrCliRunner, type RecallOptions, type ResumeResponse, type SessionVectrState, type TriggerResult, type VectrInitOptions } from '../domain';
+import { type ICodebaseService, type IInstanceResolver, type InitResult, type ISessionStatusService, type IVectrApiClient, type IVectrCliRunner, type RecallOptions, type ResumeResponse, type SessionVectrState, type TriggerResult, type UpgradeResult, type VectrInitOptions } from '../domain';
 export interface SessionServiceOptions {
     instanceResolver: IInstanceResolver;
     apiClient: IVectrApiClient;
@@ -15,6 +15,7 @@ export interface SessionServiceOptions {
     cliRunner: IVectrCliRunner;
     statusTimeoutMs?: number;
     recallTimeoutMs?: number;
+    upgradeTimeoutMs?: number;
     defaultHost?: string;
 }
 export declare class SessionVectrService implements ISessionStatusService {
@@ -24,11 +25,16 @@ export declare class SessionVectrService implements ISessionStatusService {
     private readonly cliRunner;
     private readonly statusTimeoutMs;
     private readonly recallTimeoutMs;
+    private readonly upgradeTimeoutMs;
     private readonly defaultHost;
+    private readonly inFlightUpgrades;
     constructor(options: SessionServiceOptions);
+    private buildCodebases;
     getSessionStatus(workspace: string): Promise<SessionVectrState>;
     triggerIndex(workspace: string): Promise<TriggerResult>;
     initWorkspace(options: VectrInitOptions): Promise<InitResult>;
+    upgradeWorkspace(workspace: string): Promise<UpgradeResult>;
+    private doUpgradeWorkspace;
     recallNotes(target: {
         workspace?: string | undefined;
         port?: number | undefined;

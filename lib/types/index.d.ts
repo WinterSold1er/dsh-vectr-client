@@ -28,7 +28,7 @@ export * from './domain';
 export * from './infra';
 export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
-export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE } from './registry';
+export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
 export { ensureTunnelUp, probeTunnel, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
 export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codebases';
@@ -94,15 +94,20 @@ export interface Config {
     cliTimeoutMs?: number;
     /** Working memory note recall / resume timeout in ms (default 10000). */
     recallTimeoutMs?: number;
+    /** Vectr workspace upgrade timeout in ms (default 15000). */
+    upgradeTimeoutMs?: number;
 }
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
 export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
+export declare const DEFAULT_HTTP_TIMEOUT_MS = 5000;
 /** Default TCP port-listening probe budget (ms). */
 export declare const DEFAULT_DAEMON_TCP_TIMEOUT_MS = 300;
 /** Default Vectr CLI execution timeout in ms (default 30,000). */
 export declare const DEFAULT_CLI_TIMEOUT_MS = 30000;
 /** Default working memory note recall / resume timeout in ms (default 10,000). */
 export declare const DEFAULT_RECALL_TIMEOUT_MS = 10000;
+/** Default Vectr workspace upgrade timeout in ms (default 15,000). */
+export declare const DEFAULT_UPGRADE_TIMEOUT_MS = 15000;
 /** (b) Minimum interval between startup-time heal attempts for the same slug.
  * Prevents a persistently-unreachable host from being hammered on every host
  * restart while still leaving room for transient blips to recover. */
@@ -241,6 +246,10 @@ export declare function slugFromPathname(pathname: string): string;
  * @param ctx - plugin context carrying `webServer` + `credentials`.
  * @param codebasesPath - absolute path of the codebase metadata file.
  * @param secretsPath - fallback secret file path.
+ * @param instancesPath - instances JSON file path.
+ * @param config - optional configuration override (e.g. daemonHttpTimeoutMs).
  */
-export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath?: string): void;
+export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath?: string, config?: {
+    daemonHttpTimeoutMs?: number;
+}): void;
 //# sourceMappingURL=index.d.ts.map

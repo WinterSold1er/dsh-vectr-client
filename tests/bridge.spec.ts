@@ -54,8 +54,11 @@ describe('Host RPC Bridge Layer', () => {
       expect(status.live).toBe(false)
       expect(status.mode).toBe('offline')
       expect(status.canReindex).toBe(false)
-      expect(status.codebases).toHaveLength(1)
-      expect(status.codebases[0]?.slug).toBe('cb-1')
+      expect(status.codebases).toHaveLength(2)
+      expect(status.codebases[0]?.slug).toBe('primary')
+      expect(status.codebases[0]?.status).toBe('down')
+      expect(status.codebases[0]?.isPrimary).toBe(true)
+      expect(status.codebases[1]?.slug).toBe('cb-1')
     })
 
     it('returns memory_only state and enforces canReindex: false', async () => {
@@ -177,6 +180,80 @@ describe('Host RPC Bridge Layer', () => {
       expect(res.error).toContain('memory_only')
       expect(mockApiClient.triggerIndex).not.toHaveBeenCalled()
     })
+
+    it('fails fast in upgradeWorkspace when cliRunner.init returns !ok without running restart', async () => {
+      const mockResolver: IInstanceResolver = {
+        resolveForWorkspace: vi.fn(async () => undefined),
+        getAll: vi.fn(async () => ({})),
+      }
+      const mockApiClient: IVectrApiClient = {
+        getStatus: vi.fn(async () => undefined),
+        triggerIndex: vi.fn(async () => ({ ok: false })),
+        recall: vi.fn(async () => ({ ok: false })),
+        resume: vi.fn(async () => ({ ok: false })),
+      }
+      const mockCodebaseService: ICodebaseService = {
+        listForWorkspace: vi.fn(async () => []),
+      }
+      const restartSpy = vi.fn(async () => ({ ok: true }))
+      const mockCliRunner: IVectrCliRunner = {
+        init: vi.fn(async () => ({ ok: false, error: 'init write permission denied', stderr: 'permission denied' })),
+        restart: restartSpy,
+      }
+
+      const service = new SessionVectrService({
+        instanceResolver: mockResolver,
+        apiClient: mockApiClient,
+        codebaseService: mockCodebaseService,
+        cliRunner: mockCliRunner,
+      })
+
+      const res = await service.upgradeWorkspace('/my/broken-init')
+      expect(res.ok).toBe(false)
+      expect(res.error).toContain('init write permission denied')
+      expect(mockCliRunner.init).toHaveBeenCalledTimes(1)
+      expect(restartSpy).not.toHaveBeenCalled()
+    })
+
+    it('prioritizes VECTR_UPGRADE_TIMEOUT_MS env var over options.upgradeTimeoutMs', async () => {
+      const prevEnv = process.env.VECTR_UPGRADE_TIMEOUT_MS
+      try {
+        process.env.VECTR_UPGRADE_TIMEOUT_MS = '25000'
+        const mockResolver: IInstanceResolver = {
+          resolveForWorkspace: vi.fn(async () => undefined),
+          getAll: vi.fn(async () => ({})),
+        }
+        const mockApiClient: IVectrApiClient = {
+          getStatus: vi.fn(async () => undefined),
+          triggerIndex: vi.fn(async () => ({ ok: false })),
+          recall: vi.fn(async () => ({ ok: false })),
+          resume: vi.fn(async () => ({ ok: false })),
+        }
+        const mockCodebaseService: ICodebaseService = {
+          listForWorkspace: vi.fn(async () => []),
+        }
+        const mockCliRunner: IVectrCliRunner = {
+          init: vi.fn(async () => ({ ok: true })),
+        }
+
+        const service = new SessionVectrService({
+          instanceResolver: mockResolver,
+          apiClient: mockApiClient,
+          codebaseService: mockCodebaseService,
+          cliRunner: mockCliRunner,
+          upgradeTimeoutMs: 15_000,
+        })
+
+        // Access internal upgradeTimeoutMs to verify priority
+        expect((service as any).upgradeTimeoutMs).toBe(25_000)
+      } finally {
+        if (prevEnv !== undefined) {
+          process.env.VECTR_UPGRADE_TIMEOUT_MS = prevEnv
+        } else {
+          delete process.env.VECTR_UPGRADE_TIMEOUT_MS
+        }
+      }
+    })
   })
 
   describe('Session HTTP Routes', () => {
@@ -212,6 +289,7 @@ describe('Host RPC Bridge Layer', () => {
       expect(routes.some((r) => r.path === '/api/vectr/session-status')).toBe(true)
       expect(routes.some((r) => r.path === '/api/vectr/session-reindex')).toBe(true)
       expect(routes.some((r) => r.path === '/api/vectr/init')).toBe(true)
+      expect(routes.some((r) => r.path === '/api/vectr/upgrade')).toBe(true)
       expect(routes.some((r) => r.path === '/api/vectr/notes/recall')).toBe(true)
       expect(routes.some((r) => r.path === '/api/vectr/notes/resume')).toBe(true)
 
@@ -257,6 +335,216 @@ describe('Host RPC Bridge Layer', () => {
       )
       expect(responseStatus).toBe(200)
       expect(JSON.parse(responseBody).workspace).toBe('/my/code')
+    })
+
+    it('dispatches /api/vectr/init to initWorkspace and never calls upgradeWorkspace', async () => {
+      const routes: Array<{ path: string; handler: any }> = []
+      const mockWebServer = {
+        register: vi.fn((def) => {
+          routes.push(def)
+          return () => {}
+        }),
+      }
+
+      const mockCtx: any = {
+        get: vi.fn((key: string) => (key === 'webServer' ? mockWebServer : undefined)),
+        effect: vi.fn((fn: () => any) => fn()),
+      }
+
+      const mockSessionService: any = {
+        initWorkspace: vi.fn(async () => ({ ok: true, stdout: 'configured' })),
+        upgradeWorkspace: vi.fn(async () => ({ ok: true, mode: 'full' })),
+      }
+
+      registerSessionRoutes(mockCtx, mockSessionService)
+
+      const initRoute = routes.find((r) => r.path === '/api/vectr/init')!
+      expect(initRoute).toBeDefined()
+
+      let resStatus = 0
+      let resBody = ''
+      const mockRes: any = {
+        writeHead: vi.fn((code: number) => {
+          resStatus = code
+        }),
+        end: vi.fn((body: string) => {
+          resBody = body
+        }),
+      }
+
+      const reqStream: any = [Buffer.from(JSON.stringify({ workspace: '/my/code', memoryOnly: false }))]
+      reqStream.method = 'POST'
+
+      await initRoute.handler(reqStream, mockRes)
+
+      expect(resStatus).toBe(200)
+      expect(mockSessionService.initWorkspace).toHaveBeenCalledWith({
+        workspace: '/my/code',
+        hooks: false,
+        memoryOnly: false,
+      })
+      expect(mockSessionService.upgradeWorkspace).not.toHaveBeenCalled()
+      expect(JSON.parse(resBody).ok).toBe(true)
+    })
+
+    describe('/api/vectr/upgrade route', () => {
+      function setupUpgradeRoute(mockSessionService: any) {
+        const routes: Array<{ path: string; handler: any }> = []
+        const mockWebServer = {
+          register: vi.fn((def) => {
+            routes.push(def)
+            return () => {}
+          }),
+        }
+        const mockCtx: any = {
+          get: vi.fn((key: string) => (key === 'webServer' ? mockWebServer : undefined)),
+          effect: vi.fn((fn: () => any) => fn()),
+        }
+        registerSessionRoutes(mockCtx, mockSessionService)
+        const upgradeRoute = routes.find((r) => r.path === '/api/vectr/upgrade')!
+        return { upgradeRoute }
+      }
+
+      function createMockRes() {
+        let statusCode = 0
+        let responseBody = ''
+        const res: any = {
+          writeHead: vi.fn((code: number) => {
+            statusCode = code
+          }),
+          end: vi.fn((body: string) => {
+            responseBody = body
+          }),
+        }
+        return {
+          res,
+          getStatusCode: () => statusCode,
+          getBody: () => (responseBody ? JSON.parse(responseBody) : undefined),
+        }
+      }
+
+      it('dispatches POST /api/vectr/upgrade to sessionService.upgradeWorkspace(workspace) and returns 200 on success', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(async (ws: string) => ({
+            ok: true,
+            mode: 'full',
+            port: 8765,
+            message: `Workspace ${ws} upgraded successfully`,
+          })),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+        const mockRes = createMockRes()
+
+        const reqStream: any = [Buffer.from(JSON.stringify({ workspace: '/project/app' }))]
+        reqStream.method = 'POST'
+
+        await upgradeRoute.handler(reqStream, mockRes.res)
+
+        expect(mockRes.getStatusCode()).toBe(200)
+        expect(mockSessionService.upgradeWorkspace).toHaveBeenCalledWith('/project/app')
+        expect(mockRes.getBody().ok).toBe(true)
+        expect(mockRes.getBody().mode).toBe('full')
+      })
+
+      it('returns 400 when sessionService.upgradeWorkspace returns ok: false', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(async (ws: string) => ({
+            ok: false,
+            error: `Failed to upgrade workspace ${ws}`,
+          })),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+        const mockRes = createMockRes()
+
+        const reqStream: any = [Buffer.from(JSON.stringify({ workspace: '/project/failing' }))]
+        reqStream.method = 'POST'
+
+        await upgradeRoute.handler(reqStream, mockRes.res)
+
+        expect(mockRes.getStatusCode()).toBe(400)
+        expect(mockSessionService.upgradeWorkspace).toHaveBeenCalledWith('/project/failing')
+        expect(mockRes.getBody().ok).toBe(false)
+        expect(mockRes.getBody().error).toContain('Failed to upgrade')
+      })
+
+      it('returns 405 Method Not Allowed for non-POST requests', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+
+        for (const method of ['GET', 'PUT', 'DELETE', 'PATCH']) {
+          const mockRes = createMockRes()
+          await upgradeRoute.handler({ method, url: '/api/vectr/upgrade' }, mockRes.res)
+
+          expect(mockRes.getStatusCode()).toBe(405)
+          expect(mockRes.getBody().error).toBe('Method not allowed')
+          expect(mockSessionService.upgradeWorkspace).not.toHaveBeenCalled()
+        }
+      })
+
+      it('returns 400 when workspace is missing or empty', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+
+        const invalidBodies = [
+          {},
+          { workspace: '' },
+          { workspace: '   ' },
+          { workspace: null },
+          { workspace: 123 },
+        ]
+
+        for (const body of invalidBodies) {
+          const mockRes = createMockRes()
+          const reqStream: any = [Buffer.from(JSON.stringify(body))]
+          reqStream.method = 'POST'
+
+          await upgradeRoute.handler(reqStream, mockRes.res)
+
+          expect(mockRes.getStatusCode()).toBe(400)
+          expect(mockRes.getBody().error).toContain('Missing required field "workspace"')
+          expect(mockSessionService.upgradeWorkspace).not.toHaveBeenCalled()
+        }
+      })
+
+      it('returns 400 when JSON body is invalid', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+        const mockRes = createMockRes()
+
+        const reqStream: any = [Buffer.from('invalid-json{')]
+        reqStream.method = 'POST'
+
+        await upgradeRoute.handler(reqStream, mockRes.res)
+
+        expect(mockRes.getStatusCode()).toBe(400)
+        expect(mockRes.getBody().error).toContain('Invalid JSON body')
+        expect(mockSessionService.upgradeWorkspace).not.toHaveBeenCalled()
+      })
+
+      it('returns 500 when upgradeWorkspace throws an unexpected error', async () => {
+        const mockSessionService: any = {
+          upgradeWorkspace: vi.fn(async () => {
+            throw new Error('Database disk image is malformed')
+          }),
+        }
+        const { upgradeRoute } = setupUpgradeRoute(mockSessionService)
+        const mockRes = createMockRes()
+
+        const reqStream: any = [Buffer.from(JSON.stringify({ workspace: '/project/crashed' }))]
+        reqStream.method = 'POST'
+
+        await upgradeRoute.handler(reqStream, mockRes.res)
+
+        expect(mockRes.getStatusCode()).toBe(500)
+        expect(mockRes.getBody().ok).toBe(false)
+        expect(mockRes.getBody().error).toContain('Database disk image is malformed')
+      })
     })
   })
 })

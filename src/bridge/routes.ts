@@ -43,6 +43,7 @@ export async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000)
  * - `GET  /api/vectr/session-status?workspace=<path>`
  * - `POST /api/vectr/session-reindex`
  * - `POST /api/vectr/init`
+ * - `POST /api/vectr/upgrade`
  * - `POST /api/vectr/notes/recall`
  * - `GET  /api/vectr/notes/resume?workspace=<path>`
  *
@@ -126,6 +127,42 @@ export function registerSessionRoutes(ctx: Context, sessionService: ISessionStat
         },
       }),
     'vectr-client: POST /api/vectr/init',
+  )
+
+  // 2b. Vectr upgrade endpoint (memory-only -> full mode)
+  ctx.effect(
+    () =>
+      webServer.register({
+        kind: 'exact',
+        path: '/api/vectr/upgrade',
+        handler: async (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'Method not allowed' })
+            return
+          }
+          let body: unknown
+          try {
+            body = await readJsonBody(req)
+          } catch (error) {
+            sendJson(res, 400, { error: `Invalid JSON body: ${String(error)}` })
+            return
+          }
+
+          const opts = body as { workspace?: string }
+          if (!opts || typeof opts.workspace !== 'string' || opts.workspace.trim().length === 0) {
+            sendJson(res, 400, { error: 'Missing required field "workspace" in request body' })
+            return
+          }
+
+          try {
+            const result = await sessionService.upgradeWorkspace(opts.workspace.trim())
+            sendJson(res, result.ok ? 200 : 400, result)
+          } catch (error) {
+            sendJson(res, 500, { ok: false, error: String(error) })
+          }
+        },
+      }),
+    'vectr-client: POST /api/vectr/upgrade',
   )
 
   // 3. Working memory recall endpoint

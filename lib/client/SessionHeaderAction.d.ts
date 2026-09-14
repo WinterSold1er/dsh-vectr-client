@@ -15,6 +15,7 @@ export interface SessionHeaderActionProps {
     sessionId?: string | undefined;
     blank?: boolean | undefined;
     workspace?: string | undefined;
+    useSession?: (<T>(selector: (state: any) => T) => T) | undefined;
     useSessions?: (<T>(selector: (state: any) => T) => T) | undefined;
     [key: string]: unknown;
 }
@@ -27,5 +28,14 @@ export interface SessionsBoundHeaderActionProps extends SessionHeaderActionProps
     useSessions: <T>(selector: (state: any) => T) => T;
 }
 export declare function SessionsBoundHeaderAction(props: SessionsBoundHeaderActionProps): ReactNode;
+export interface SessionBoundHeaderActionProps extends SessionHeaderActionProps {
+    useSession: <T>(selector: (state: any) => T) => T;
+}
+export declare function SessionBoundHeaderAction(props: SessionBoundHeaderActionProps): ReactNode;
+export interface DualBoundHeaderActionProps extends SessionHeaderActionProps {
+    useSession: <T>(selector: (state: any) => T) => T;
+    useSessions: <T>(selector: (state: any) => T) => T;
+}
+export declare function DualBoundHeaderAction(props: DualBoundHeaderActionProps): ReactNode;
 export declare function SessionHeaderAction(props: SessionHeaderActionProps): ReactNode;
 //# sourceMappingURL=SessionHeaderAction.d.ts.map

@@ -170,9 +170,11 @@ describe('GET /api/vectr/codebases ?workspace= filter (改动3)', () => {
     ]
     saveCodebases(metaPath, entries)
     const list = await getList('?workspace=/wsA')
-    expect(list).toHaveLength(1)
-    expect(list[0]!.workspace).toBe('/wsA')
-    expect(list[0]!.serverName).toBe(deriveServerName('/wsA', 'a'))
+    expect(list.every(e => e.workspace === '/wsA')).toBe(true)
+    const nonPrimary = list.filter(e => !e.isPrimary)
+    expect(nonPrimary).toHaveLength(1)
+    expect(nonPrimary[0]!.workspace).toBe('/wsA')
+    expect(nonPrimary[0]!.serverName).toBe(deriveServerName('/wsA', 'a'))
   })
 
   it('returns all when no workspace query', async () => {
@@ -182,7 +184,8 @@ describe('GET /api/vectr/codebases ?workspace= filter (改动3)', () => {
     ]
     saveCodebases(metaPath, entries)
     const list = await getList('')
-    expect(list).toHaveLength(2)
+    const nonPrimary = list.filter(e => !e.isPrimary)
+    expect(nonPrimary).toHaveLength(2)
   })
 })
 
