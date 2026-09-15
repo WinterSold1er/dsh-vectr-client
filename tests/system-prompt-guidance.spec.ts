@@ -150,11 +150,8 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
       daemonTcpTimeoutMs: 300,
     }, agent)
 
-    // Wait for the liveness IIFE to settle on the real outcome.
-    await vi.waitFor(() => {
-      expect(promptFibers.has(agent)).toBe(true)
-    }, { timeout: 5000, interval: 25 })
-
+    // Prompt guidance is injected immediately without awaiting daemon probe
+    expect(promptFibers.has(agent)).toBe(true)
     expect(injectSpy).toHaveBeenCalledTimes(1)
     expect(injectSpy.mock.calls[0]?.[0]).toEqual(['systemPrompt'])
     expect(sectionSpy).toHaveBeenCalledTimes(2)
@@ -166,11 +163,15 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     expect(section2.name).toBe(VECTR_GREP_SECTION_NAME)
     expect(section2.order).toBe(VECTR_GREP_SECTION_ORDER)
     expect(section2.text).toBe(VECTR_GREP_SECTION_TEXT)
-    expect(handles.has(agent)).toBe(true) // tool bind also happened (same gate)
+
+    // Background daemon probe settles asynchronously and connects handles
+    await vi.waitFor(() => {
+      expect(handles.has(agent)).toBe(true)
+    }, { timeout: 5000, interval: 25 })
     killSpy.mockRestore()
   })
 
-  it('does NOT inject the guidance section when the daemon is dead', async () => {
+  it('injects guidance section immediately even when daemon is dead/unreachable, but handles remains empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-guidance-dead-'))
     roots.push(dir)
     const { file, cwd } = await writeInstances(dir, entryFor(cwd0(dir), 1234, 99_999)) // dead pid
@@ -193,17 +194,71 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
       daemonTcpTimeoutMs: 300,
     }, agent)
 
+    // Decoupled: guidance is injected immediately without waiting for probe
+    expect(promptFibers.has(agent)).toBe(true)
+    expect(injectSpy).toHaveBeenCalledTimes(1)
+    expect(sectionSpy).toHaveBeenCalledTimes(2)
+
     await vi.waitFor(() => {
       expect(warn.mock.calls.some(
         c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PROCESS_DEAD_ESRCH'),
       )).toBe(true)
     }, { timeout: 5000, interval: 25 })
 
-    expect(sectionSpy).not.toHaveBeenCalled() // no prompt injection
-    expect(injectSpy).not.toHaveBeenCalled()
-    expect(promptFibers.has(agent)).toBe(false)
     expect(handles.has(agent)).toBe(false)
     killSpy.mockRestore()
+  })
+
+  it('does NOT inject the guidance section when workspace has no codebase or daemon entry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-guidance-none-'))
+    roots.push(dir)
+    const file = join(dir, 'instances.json')
+    await writeFile(file, JSON.stringify({}))
+    const cwd = join(dir, 'ws-untracked')
+    const { agent, injectSpy, sectionSpy } = makeAgentWithInjectSpy('guidance-none', cwd)
+
+    const ctx = new Context()
+    install(ctx, handles, promptFibers, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    expect(promptFibers.has(agent)).toBe(false)
+    expect(handles.has(agent)).toBe(false)
+    expect(injectSpy).not.toHaveBeenCalled()
+    expect(sectionSpy).not.toHaveBeenCalled()
+  })
+
+  it('injects guidance section immediately when workspace matches a codebase entry (without primary daemon entry)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-guidance-codebase-'))
+    roots.push(dir)
+    const instancesFile = join(dir, 'instances.json')
+    await writeFile(instancesFile, JSON.stringify({}))
+    const codebasesFile = join(dir, 'codebases.json')
+    const cwd = join(dir, 'ws-codebase')
+    await writeFile(codebasesFile, JSON.stringify([
+      { id: 'cb-1', slug: 'cb-1', type: 'local', path: cwd, workspace: cwd, serverName: 'vectr_test_cb1', status: 'down' },
+    ]))
+    const { agent, injectSpy, sectionSpy } = makeAgentWithInjectSpy('guidance-codebase', cwd)
+
+    const ctx = new Context()
+    install(ctx, handles, promptFibers, instancesFile, {
+      instancesPath: instancesFile,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent, codebasesFile)
+
+    expect(promptFibers.has(agent)).toBe(true)
+    expect(injectSpy).toHaveBeenCalledTimes(1)
+    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    expect(handles.has(agent)).toBe(false)
   })
 
   it('disposes the guidance section when the prompt fiber is torn down', async () => {
@@ -224,10 +279,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
       daemonTcpTimeoutMs: 300,
     }, agent)
 
-    await vi.waitFor(() => {
-      expect(promptFibers.has(agent)).toBe(true)
-    }, { timeout: 5000, interval: 25 })
-
+    expect(promptFibers.has(agent)).toBe(true)
     expect(sectionSpy).toHaveBeenCalledTimes(2)
     // Simulate agent/disposed teardown: dispose the captured fiber.
     const fiber = promptFibers.get(agent) as { dispose: () => Promise<void> }

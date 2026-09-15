@@ -75,7 +75,7 @@ import {
 } from './probe'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
-import { isSystemPrimarySlug } from './domain'
+import { hasCodebase, isSystemPrimarySlug } from './domain'
 
 // Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
 export * from './domain'
@@ -289,7 +289,7 @@ export function install(
    * set so callers that do not seed live agents (unit tests) need not pass it. */
   disposed: Set<Agent> = new Set<Agent>(),
 ): void {
-  if (handles.has(agent)) return
+  if (handles.has(agent) || promptFibers.has(agent)) return
   const cwd = agent.session.header.cwd
   if (cwd === undefined) {
     // A session without a workspace cwd cannot be bound to any vectr daemon.
@@ -307,111 +307,106 @@ export function install(
     // An unparseable registry must not veto agent/created publication: skip
     // this agent with a diagnostic instead of throwing into the listener.
     ctx.logger.warn(`vectr-client: cannot read daemon registry at ${instancesPath} (${String(error)}); skipping bind for session ${agent.id}`)
-    return
   }
-  if (instances === undefined) return
-  const entry = resolveInstance(instances, cwd)
-  if (entry === undefined) {
+
+  let codebases: CodebaseEntry[] | undefined
+  if (codebasesPath !== undefined) {
+    try {
+      codebases = loadCodebases(codebasesPath)
+    } catch (error) {
+      ctx.logger.warn(`vectr-client: cannot read codebase metadata at ${codebasesPath} (${String(error)}); skipping codebase binds for session ${agent.id}`)
+    }
+  }
+
+  const entry = instances !== undefined ? resolveInstance(instances, cwd) : undefined
+  if (!hasCodebase({ workspace: cwd, entry, codebases })) {
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
     return
   }
-  // Liveness gate (D-2 / R3): a stale record must not bind tools to a dead
-  // daemon. alive = (pid alive OR TCP listening) AND HTTP /v1/status reachable,
-  // so a "pid alive + port listening but HTTP hung" daemon is correctly skipped
-  // (R3/R4). HTTP probe + budgets are injected from config (NFR2). Runs in a
-  // non-blocking IIFE so the probe never delays `agent/created` publication;
-  // failures are reported as warn + skip only and never thrown (NFR4).
-  void (async () => {
-    const diagnosis = await diagnoseDaemon(entry, {
-      httpProbe: (e, ms) => fetchStatus(e, ms),
-      httpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
-      tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
-    })
-    if (!diagnosis.alive) {
-      const pid = entry.pid === undefined ? 'n/a' : String(entry.pid)
-      const reason = diagnosis.reason ?? 'HTTP_PROBE_UNREACHABLE'
-      ctx.logger.warn(
-        `vectr-client: vectr daemon not alive, skipping bind for session ${agent.id} (cwd=${cwd}, workspace=${entry.workspace}, port=${entry.port}, pid=${pid}, reason=${reason})`,
-      )
-      return
-    }
-    const host = entry.host ?? DEFAULT_HOST
-    const port = entry.port
-    const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
-    // The SCOPED agent context routes every registration into that agent's
-    // tool layer; disposal of the scope (which the loop runs BEFORE emitting
-    // `agent/disposed`) unwinds the tools, so this listener only closes the
-    // HTTP connection.
-    const conn = startConnection(agent.ctx, {
-      transport: 'streamable-http',
-      serverName: config.serverName,
-      url: `http://${host}:${port}/mcp`,
-      headers: {},
-      toolCallTimeoutMs: config.toolCallTimeoutMs,
-      failOnStartupError: false,
-      // NOTE: `startConnection` ignores `config.reconnect` — the resolved
-      // `policy` passed as the third argument is the sole reconnect control
-      // (see packages/mcp/mcp-client/src/connection.ts: scheduleReconnect reads
-      // `policy`, never `config.reconnect`). Passing `config.reconnect` here
-      // would be dead, so only `policy` is supplied.
-    }, policy)
-    void conn.ready.then((outcome) => {
-      if (outcome.error !== undefined) {
-        // D-1: route the failure to the agent-visible channel when one is bound
-        // to the session, so the agent/user (not only the loader fiber) sees it.
-        // The message always carries cwd/port/error so it is self-diagnosing.
-        const message = `vectr-client: vectr connection failed for session ${agent.id} (cwd=${cwd}, port=${port}): ${String(outcome.error)}`
-        if (agent.ctx?.logger !== undefined) agent.ctx.logger.warn(message)
-        else ctx.logger.warn(message)
-      }
-    })
-    // P1: register the connection. If the agent was disposed during the probe
-    // window (between install() returning and this IIFE settling), the
-    // agent/disposed handler already ran and found nothing in `handles`, so
-    // tear the connection down immediately instead of leaking it to host
-    // teardown.
-    if (disposed.has(agent)) {
-      // ponytail: single-agent probe-window leak; the host restart reclaims it.
-      // If this race frequency climbs, move the dispose into the IIFE's own
-      // microtask ordering instead of a post-hoc disposed flag.
-      void conn.dispose().catch(() => {})
-    } else {
-      handles.set(agent, conn)
-    }
-    // (a) Inject the vectr MCP usage-guidance section into THIS agent's scope
-    // ONLY now that the daemon is verified alive (same gate as the tool bind).
-    // `agent.ctx.inject(['systemPrompt'], ...)` opens a scope-targeted fiber so
-    // the section shadows only for this agent; its disposer is the fiber itself.
-    // The `!promptFibers.has(agent)` guard prevents a duplicate same-name
-    // registration (which would throw from SystemPrompt.section).
-    if (!promptFibers.has(agent)) {
-      const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
-        scope.systemPrompt.section({
-          name: VECTR_GUIDANCE_SECTION_NAME,
-          order: VECTR_GUIDANCE_SECTION_ORDER,
-          text: VECTR_GUIDANCE_SECTION_TEXT,
-        })
-        scope.systemPrompt.section({
-          name: VECTR_GREP_SECTION_NAME,
-          order: scope.systemPrompt.getSectionOrder?.('TOOL_GREP') ?? VECTR_GREP_SECTION_ORDER,
-          text: VECTR_GREP_SECTION_TEXT,
-        })
+
+  // Immediately inject system prompt guidance sections unconditionally without awaiting daemon probe.
+  // As long as a codebase exists, the prompt guidance is active immediately.
+  if (!promptFibers.has(agent)) {
+    const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.section({
+        name: VECTR_GUIDANCE_SECTION_NAME,
+        order: VECTR_GUIDANCE_SECTION_ORDER,
+        text: VECTR_GUIDANCE_SECTION_TEXT,
       })
-      if (disposed.has(agent)) {
-        // P1: same probe-window race as the connection above — the section was
-        // just registered in the agent's scope but the disposed handler already
-        // ran and missed it, so dispose the fiber now. (ponytail: single-agent
-        // leak, host restart reclaims; revisit if frequency climbs.)
-        void fiber.dispose().catch(() => {})
-      } else {
-        promptFibers.set(agent, fiber)
-      }
+      scope.systemPrompt.section({
+        name: VECTR_GREP_SECTION_NAME,
+        order: scope.systemPrompt.getSectionOrder?.('TOOL_GREP') ?? VECTR_GREP_SECTION_ORDER,
+        text: VECTR_GREP_SECTION_TEXT,
+      })
+    })
+    if (disposed.has(agent)) {
+      void fiber.dispose().catch(() => {})
+    } else {
+      promptFibers.set(agent, fiber)
     }
-    // The probe window for this agent is now closed: whichever path above ran,
-    // the connection/fiber is either tracked or torn down, so the flag is no
-    // longer needed. Clearing it keeps the set bounded by live agents.
-    disposed.delete(agent)
-  })()
+  }
+
+  // Background daemon network probe & connection pipeline runs independently:
+  // When entry exists and not yet connected, asynchronously probe and startConnection.
+  // Probe failure or timeout logs warn and leaves handles empty, without affecting prompt guidance.
+  if (entry !== undefined && !handles.has(agent)) {
+    void (async () => {
+      try {
+        const diagnosis = await diagnoseDaemon(entry, {
+          httpProbe: (e, ms) => fetchStatus(e, ms),
+          httpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
+          tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
+        })
+        if (!diagnosis.alive) {
+          const pid = entry.pid === undefined ? 'n/a' : String(entry.pid)
+          const reason = diagnosis.reason ?? 'HTTP_PROBE_UNREACHABLE'
+          ctx.logger.warn(
+            `vectr-client: vectr daemon not alive, skipping bind for session ${agent.id} (cwd=${cwd}, workspace=${entry.workspace}, port=${entry.port}, pid=${pid}, reason=${reason})`,
+          )
+          return
+        }
+        const host = entry.host ?? DEFAULT_HOST
+        const port = entry.port
+        const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
+        // The SCOPED agent context routes every registration into that agent's
+        // tool layer; disposal of the scope (which the loop runs BEFORE emitting
+        // `agent/disposed`) unwinds the tools, so this listener only closes the
+        // HTTP connection.
+        const conn = startConnection(agent.ctx, {
+          transport: 'streamable-http',
+          serverName: config.serverName,
+          url: `http://${host}:${port}/mcp`,
+          headers: {},
+          toolCallTimeoutMs: config.toolCallTimeoutMs,
+          failOnStartupError: false,
+        }, policy)
+        void conn.ready.then((outcome) => {
+          if (outcome.error !== undefined) {
+            // D-1: route the failure to the agent-visible channel when one is bound
+            // to the session, so the agent/user (not only the loader fiber) sees it.
+            // The message always carries cwd/port/error so it is self-diagnosing.
+            const message = `vectr-client: vectr connection failed for session ${agent.id} (cwd=${cwd}, port=${port}): ${String(outcome.error)}`
+            if (agent.ctx?.logger !== undefined) agent.ctx.logger.warn(message)
+            else ctx.logger.warn(message)
+          }
+        })
+        // P1: register the connection. If the agent was disposed during the probe
+        // window (between install() returning and this IIFE settling), the
+        // agent/disposed handler already ran and found nothing in `handles`, so
+        // tear the connection down immediately instead of leaking it to host
+        // teardown.
+        if (disposed.has(agent)) {
+          void conn.dispose().catch(() => {})
+        } else {
+          handles.set(agent, conn)
+        }
+      } catch (err) {
+        ctx.logger.warn(`vectr-client: daemon probe error for session ${agent.id}: ${String(err)}`)
+      } finally {
+        disposed.delete(agent)
+      }
+    })()
+  }
 
   // Feature B: also bind every persisted codebase whose status is 'up'. These
   // are host-level MCP servers (each with a globally-unique serverName), so a

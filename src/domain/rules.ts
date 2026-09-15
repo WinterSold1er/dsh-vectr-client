@@ -8,7 +8,7 @@
  */
 
 import { isAbsolute } from 'node:path'
-import type { VectrMode, VectrStatus } from './types'
+import type { CodebaseEntry, InstanceEntry, VectrMode, VectrStatus } from './types'
 
 /**
  * Validation pattern for codebase slugs: alphanumeric, underscores, hyphens, 1-32 chars.
@@ -36,6 +36,37 @@ export const SYSTEM_PRIMARY_SLUG_PATTERN = /^primary(-[0-9a-f]{8,16})?$/i
 export function isReservedPrimarySlug(slug?: string | null): boolean {
   if (!slug || typeof slug !== 'string') return false
   return PRIMARY_RESERVED_PREFIX_PATTERN.test(slug.trim())
+}
+
+/**
+ * Input for determining whether a codebase exists for the given workspace.
+ */
+export interface HasCodebaseInput {
+  workspace?: string | null | undefined
+  entry?: InstanceEntry | null | undefined
+  codebases?: CodebaseEntry[] | null | undefined
+}
+
+/**
+ * Pure domain rule to determine whether a workspace is associated with a codebase.
+ *
+ * Rules:
+ * - If workspace is empty/null/undefined, returns false.
+ * - If entry is present (truthy), returns true.
+ * - If codebases array has any item whose workspace matches workspace, returns true.
+ * - Otherwise returns false.
+ */
+export function hasCodebase(input: HasCodebaseInput): boolean {
+  if (!input.workspace || typeof input.workspace !== 'string' || input.workspace.trim().length === 0) {
+    return false
+  }
+  if (input.entry !== undefined && input.entry !== null) {
+    return true
+  }
+  if (Array.isArray(input.codebases)) {
+    return input.codebases.some((item) => item?.workspace === input.workspace)
+  }
+  return false
 }
 
 /**

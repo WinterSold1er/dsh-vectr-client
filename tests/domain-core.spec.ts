@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   canReindex,
   formatMode,
+  hasCodebase,
   isMemoryOnly,
   isSearchOnly,
   SLUG_PATTERN,
@@ -63,6 +64,54 @@ describe('Domain Core: rules & validation', () => {
       const res = validateWorkspace('/home/user\0/hack')
       expect(res.valid).toBe(false)
       expect(res.error).toContain('null')
+    })
+  })
+
+  describe('hasCodebase domain rule', () => {
+    it('returns false when workspace is empty or undefined or null', () => {
+      expect(hasCodebase({})).toBe(false)
+      expect(hasCodebase({ workspace: null })).toBe(false)
+      expect(hasCodebase({ workspace: '' })).toBe(false)
+      expect(hasCodebase({ workspace: '   ' })).toBe(false)
+      expect(hasCodebase({ workspace: undefined, entry: { workspace: '/ws', port: 1234 } })).toBe(false)
+    })
+
+    it('returns true when entry is present', () => {
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/repo', port: 1234 },
+      })).toBe(true)
+    })
+
+    it('returns true when codebases array has a matching workspace', () => {
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: null,
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/other', workspace: '/other', serverName: 'v1' },
+          { id: '2', slug: '2', type: 'local', path: '/ws/repo', workspace: '/ws/repo', serverName: 'v2' },
+        ],
+      })).toBe(true)
+    })
+
+    it('returns false when neither entry nor codebases match workspace', () => {
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: null,
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/other', workspace: '/other', serverName: 'v1' },
+        ],
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: null,
+        codebases: [],
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: null,
+        codebases: null,
+      })).toBe(false)
     })
   })
 

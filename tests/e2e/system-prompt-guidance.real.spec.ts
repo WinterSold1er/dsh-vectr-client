@@ -13,7 +13,8 @@
  * Asserts:
  *  - the scoped assembly contains `vectr:mcp-guidance` with the exact text;
  *  - the GLOBAL assembly does NOT contain it;
- *  - a dead daemon (no /v1/status) does NOT inject;
+ *  - a dead daemon (no /v1/status) still injects the guidance section immediately;
+ *  - a workspace without any codebase does NOT inject;
  *  - disposing the agent scope truly removes the section from the scoped view.
  */
 import { createHash } from 'node:crypto'
@@ -174,7 +175,7 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
     disposeAgent()
   })
 
-  it('does NOT inject when the daemon is dead (no /v1/status)', async () => {
+  it('still injects guidance when the daemon is dead (no /v1/status)', async () => {
     // Point at a port nothing serves so diagnoseDaemon returns alive:false.
     const deadPort = 1 // privileged port, never bound → PORT_CLOSED
     await writeFile(join(instancesDir, 'instances.json'), JSON.stringify({
@@ -188,8 +189,26 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
       instancesPath: join(instancesDir, 'instances.json'),
     })
 
-    // Give the probe window time to settle on "dead" and skip injection.
-    await new Promise(resolve => setTimeout(resolve, 300))
+    // Decoupled: guidance is injected immediately because codebase entry exists
+    await vi.waitFor(async () => {
+      const scopedAssembly = await ctx.systemPrompt.assemble({ scope: agent })
+      expect(scopedAssembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(true)
+    }, { timeout: 5000 })
+
+    disposeAgent()
+  })
+
+  it('does NOT inject when the workspace has no codebase entry', async () => {
+    await writeFile(join(instancesDir, 'instances.json'), JSON.stringify({}))
+    const ctx = await mountRegistry()
+    liveContexts.add(ctx)
+    const { agent, disposeAgent } = await mintAgent(ctx, cwd)
+
+    await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
+      instancesPath: join(instancesDir, 'instances.json'),
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 100))
     const scopedAssembly = await ctx.systemPrompt.assemble({ scope: agent })
     expect(scopedAssembly.sections.some(s => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBe(false)
 

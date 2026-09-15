@@ -6,7 +6,7 @@
  *
  * @module dsh-vectr-client/domain/rules
  */
-import type { VectrMode, VectrStatus } from './types';
+import type { CodebaseEntry, InstanceEntry, VectrMode, VectrStatus } from './types';
 /**
  * Validation pattern for codebase slugs: alphanumeric, underscores, hyphens, 1-32 chars.
  */
@@ -28,6 +28,24 @@ export declare const SYSTEM_PRIMARY_SLUG_PATTERN: RegExp;
  * Slugs that match this pattern cannot be created or registered by users.
  */
 export declare function isReservedPrimarySlug(slug?: string | null): boolean;
+/**
+ * Input for determining whether a codebase exists for the given workspace.
+ */
+export interface HasCodebaseInput {
+    workspace?: string | null | undefined;
+    entry?: InstanceEntry | null | undefined;
+    codebases?: CodebaseEntry[] | null | undefined;
+}
+/**
+ * Pure domain rule to determine whether a workspace is associated with a codebase.
+ *
+ * Rules:
+ * - If workspace is empty/null/undefined, returns false.
+ * - If entry is present (truthy), returns true.
+ * - If codebases array has any item whose workspace matches workspace, returns true.
+ * - Otherwise returns false.
+ */
+export declare function hasCodebase(input: HasCodebaseInput): boolean;
 /**
  * Test whether a slug represents a system-generated Primary codebase.
  * Matches the reserved 'primary' name, legacy 8-char hex keys, current
