@@ -75,7 +75,7 @@ import {
 } from './probe'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
-import { hasCodebase, isSystemPrimarySlug } from './domain'
+import { hasCodebase, isSystemPrimarySlug, isValidInstanceEntry } from './domain'
 
 // Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
 export * from './domain'
@@ -153,7 +153,7 @@ export interface Config {
   serverName?: string
   /** Per-tool-call timeout in milliseconds (default 60000). */
   toolCallTimeoutMs?: number
-  /** Automatic reconnect policy after a lost connection; default `{ enabled: false }`. */
+  /** Automatic reconnect policy after a lost connection; default `{ enabled: true }`. */
   reconnect?: ReconnectConfig
   /** Path of the multi-codebase metadata file (feature B; default `~/.dsh/vectr-codebases.json`). */
   codebasesPath?: string
@@ -213,7 +213,7 @@ export function startupHealEligible(
 }
 
 const Reconnect: z<ReconnectConfig> = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   initialDelayMs: z.number().min(1).default(500),
   maxDelayMs: z.number().min(1).default(30_000),
   maxAttempts: z.number().step(1).min(1).default(10),
@@ -223,7 +223,7 @@ export const Config: z<Config> = z.object({
   instancesPath: z.string().default(DEFAULT_INSTANCES_FILE),
   serverName: z.string().default(DEFAULT_SERVER_NAME),
   toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
-  reconnect: Reconnect.default({ enabled: false }),
+  reconnect: Reconnect.default({ enabled: true }),
   codebasesPath: z.string().default(DEFAULT_CODEBASES_FILE),
   secretsPath: z.string().default(DEFAULT_SECRETS_FILE),
   daemonHttpTimeoutMs: z.number().min(1).default(DEFAULT_DAEMON_HTTP_TIMEOUT_MS),
@@ -245,7 +245,7 @@ export const Config: z<Config> = z.object({
 export const VECTR_GUIDANCE_SECTION_NAME = 'vectr:mcp-guidance'
 export const VECTR_GUIDANCE_SECTION_ORDER = 95
 export const VECTR_GUIDANCE_SECTION_TEXT =
-  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr__*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.'
+  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.'
 
 /**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
@@ -256,10 +256,7 @@ export const VECTR_GUIDANCE_SECTION_TEXT =
 export const VECTR_GREP_SECTION_NAME = 'tool:grep'
 export const VECTR_GREP_SECTION_ORDER = 1500
 export const VECTR_GREP_SECTION_TEXT =
-  'Prioritize querying code via vectr tools (mcp__vectr__*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
-
-/** Agents that have already established connections to persisted codebases. */
-const codebaseBoundAgents = new WeakSet<Agent>()
+  'Prioritize querying code via vectr tools (mcp__vectr*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
 
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
@@ -291,6 +288,8 @@ export function install(
    * prompt fiber instead of leaking it to host teardown. Defaults to an empty
    * set so callers that do not seed live agents (unit tests) need not pass it. */
   disposed: WeakSet<Agent> = new WeakSet<Agent>(),
+  inFlightConnections: WeakSet<Agent> = new WeakSet<Agent>(),
+  codebaseBoundAgents: WeakSet<Agent> = new WeakSet<Agent>(),
 ): void {
   // Completely decouple prompt injection from daemon connection retry.
   // Prompt injection is guarded solely by !promptFibers.has(agent).
@@ -328,7 +327,13 @@ export function install(
   }
 
   const entry = instances !== undefined ? resolveInstance(instances, cwd) : undefined
-  if (!hasCodebase({ workspace: cwd, entry, codebases })) {
+  if (entry !== undefined && !isValidInstanceEntry(entry)) {
+    ctx.logger.warn(
+      `vectr-client: invalid instance entry for session ${agent.id} (cwd=${cwd}): ${JSON.stringify(entry)}, skipping connection`,
+    )
+  }
+  const validEntry = entry !== undefined && isValidInstanceEntry(entry) ? entry : undefined
+  if (!hasCodebase({ workspace: cwd, entry: validEntry, codebases })) {
     ctx.logger.info(`vectr-client: no vectr daemon for ${cwd}, skipping`)
     return
   }
@@ -355,64 +360,73 @@ export function install(
     }
   }
 
-  // Background daemon network probe & connection pipeline runs independently:
-  // When entry exists and not yet connected, asynchronously probe and startConnection.
-  // Probe failure or timeout logs warn and leaves handles empty, without affecting prompt guidance.
-  if (entry !== undefined && !handles.has(agent)) {
+  // Main workspace connection establishment with de-vetoing and reconnect resilience:
+  // Aligned with installCodebaseConnections:
+  // 1. Guard with isValidInstanceEntry(entry). Invalid entry logs a warning and skips connection.
+  // 2. Concurrency debounce with inFlightConnections and !handles.has(agent).
+  // 3. Immediately invoke startConnection.
+  // 4. Background advisory telemetry via diagnoseDaemon logs slow response/not alive warnings,
+  //    strictly forbidding abort or vetoing the connection handle.
+  if (validEntry !== undefined && !handles.has(agent) && !inFlightConnections.has(agent)) {
+    inFlightConnections.add(agent)
+    try {
+      const host = validEntry.host ?? DEFAULT_HOST
+      const port = validEntry.port
+      const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
+      // The SCOPED agent context routes every registration into that agent's
+      // tool layer; disposal of the scope (which the loop runs BEFORE emitting
+      // `agent/disposed`) unwinds the tools, so this listener only closes the
+      // HTTP connection.
+      const conn = startConnection(agent.ctx, {
+        transport: 'streamable-http',
+        serverName: config.serverName,
+        url: `http://${host}:${port}/mcp`,
+        headers: {},
+        toolCallTimeoutMs: config.toolCallTimeoutMs,
+        failOnStartupError: false,
+      }, policy)
+
+      void conn.ready.then((outcome) => {
+        if (outcome.error !== undefined) {
+          // D-1: route the failure to the agent-visible channel when one is bound
+          // to the session, so the agent/user (not only the loader fiber) sees it.
+          // The message always carries cwd/port/error so it is self-diagnosing.
+          const message = `vectr-client: vectr connection failed for session ${agent.id} (cwd=${cwd}, port=${port}): ${String(outcome.error)}`
+          if (agent.ctx?.logger !== undefined) agent.ctx.logger.warn(message)
+          else ctx.logger.warn(message)
+        }
+      })
+
+      // P1: register the connection. If the agent was disposed during the connection
+      // window, tear the connection down immediately.
+      if (disposed.has(agent)) {
+        void conn.dispose().catch(() => {})
+      } else {
+        handles.set(agent, conn)
+      }
+    } finally {
+      inFlightConnections.delete(agent)
+    }
+
+    // Background advisory telemetry probe (non-blocking, non-vetoing):
+    // Runs independently to diagnose and log warnings (e.g. slow response, hung process, port closed),
+    // but NEVER aborts or disposes the connection handle, allowing MCP reconnect policy to self-heal.
     void (async () => {
       try {
-        const diagnosis = await diagnoseDaemon(entry, {
+        const diagnosis = await diagnoseDaemon(validEntry, {
           httpProbe: (e, ms) => fetchStatus(e, ms),
           httpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
           tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_DAEMON_TCP_TIMEOUT_MS,
         })
         if (!diagnosis.alive) {
-          const pid = entry.pid === undefined ? 'n/a' : String(entry.pid)
+          const pid = validEntry.pid === undefined ? 'n/a' : String(validEntry.pid)
           const reason = diagnosis.reason ?? 'HTTP_PROBE_UNREACHABLE'
           ctx.logger.warn(
-            `vectr-client: vectr daemon not alive, skipping bind for session ${agent.id} (cwd=${cwd}, workspace=${entry.workspace}, port=${entry.port}, pid=${pid}, reason=${reason})`,
+            `vectr-client: vectr daemon not alive, advisory telemetry warning for session ${agent.id} (cwd=${cwd}, workspace=${validEntry.workspace}, port=${validEntry.port}, pid=${pid}, reason=${reason})`,
           )
-          return
-        }
-        const host = entry.host ?? DEFAULT_HOST
-        const port = entry.port
-        const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
-        // The SCOPED agent context routes every registration into that agent's
-        // tool layer; disposal of the scope (which the loop runs BEFORE emitting
-        // `agent/disposed`) unwinds the tools, so this listener only closes the
-        // HTTP connection.
-        const conn = startConnection(agent.ctx, {
-          transport: 'streamable-http',
-          serverName: config.serverName,
-          url: `http://${host}:${port}/mcp`,
-          headers: {},
-          toolCallTimeoutMs: config.toolCallTimeoutMs,
-          failOnStartupError: false,
-        }, policy)
-        void conn.ready.then((outcome) => {
-          if (outcome.error !== undefined) {
-            // D-1: route the failure to the agent-visible channel when one is bound
-            // to the session, so the agent/user (not only the loader fiber) sees it.
-            // The message always carries cwd/port/error so it is self-diagnosing.
-            const message = `vectr-client: vectr connection failed for session ${agent.id} (cwd=${cwd}, port=${port}): ${String(outcome.error)}`
-            if (agent.ctx?.logger !== undefined) agent.ctx.logger.warn(message)
-            else ctx.logger.warn(message)
-          }
-        })
-        // P1: register the connection. If the agent was disposed during the probe
-        // window (between install() returning and this IIFE settling), the
-        // agent/disposed handler already ran and found nothing in `handles`, so
-        // tear the connection down immediately instead of leaking it to host
-        // teardown.
-        if (disposed.has(agent)) {
-          void conn.dispose().catch(() => {})
-        } else {
-          handles.set(agent, conn)
         }
       } catch (err) {
         ctx.logger.warn(`vectr-client: daemon probe error for session ${agent.id}: ${String(err)}`)
-      } finally {
-        disposed.delete(agent)
       }
     })()
   }
@@ -510,7 +524,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     instancesPath: config.instancesPath ?? DEFAULT_INSTANCES_FILE,
     serverName: config.serverName ?? DEFAULT_SERVER_NAME,
     toolCallTimeoutMs: config.toolCallTimeoutMs ?? DEFAULT_TOOL_CALL_TIMEOUT_MS,
-    reconnect: config.reconnect ?? { enabled: false },
+    reconnect: {
+      enabled: config.reconnect?.enabled ?? true,
+      initialDelayMs: config.reconnect?.initialDelayMs ?? 500,
+      maxDelayMs: config.reconnect?.maxDelayMs ?? 30_000,
+      maxAttempts: config.reconnect?.maxAttempts ?? 10,
+    },
     codebasesPath: config.codebasesPath ?? DEFAULT_CODEBASES_FILE,
     secretsPath: config.secretsPath ?? DEFAULT_SECRETS_FILE,
     daemonHttpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
@@ -601,15 +620,22 @@ export function apply(ctx: Context, config: Config = {}): void {
   // lets the IIFE detect that and dispose the freshly-created registration.
   // WeakSet eliminates strong reference accumulation for discarded Agent objects.
   const disposed = new WeakSet<Agent>()
+  const inFlightConnections = new WeakSet<Agent>()
+  const codebaseBoundAgents = new WeakSet<Agent>()
 
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
   // metadata path is passed so install also binds up codebases.
-  for (const agent of ctx.agents.list()) install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed)
-  ctx.on('agent/created', ({ agent }) => { install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed) })
+  for (const agent of ctx.agents.list()) {
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, inFlightConnections, codebaseBoundAgents)
+  }
+  ctx.on('agent/created', ({ agent }) => {
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, inFlightConnections, codebaseBoundAgents)
+  })
   ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
     codebaseBoundAgents.delete(agent)
+    inFlightConnections.delete(agent)
     void handles.get(agent)?.dispose()
     handles.delete(agent)
     const fiber = promptFibers.get(agent)

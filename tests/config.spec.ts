@@ -34,7 +34,7 @@ describe('Config schema defaults and validation', () => {
     expect(resolved.instancesPath).toBe(DEFAULT_INSTANCES_FILE)
     expect(resolved.serverName).toBe(DEFAULT_SERVER_NAME)
     expect(resolved.toolCallTimeoutMs).toBe(DEFAULT_TOOL_CALL_TIMEOUT_MS)
-    expect(resolved.reconnect).toEqual({ enabled: false, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 })
+    expect(resolved.reconnect).toEqual({ enabled: true, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 })
     expect(resolved.daemonHttpTimeoutMs).toBe(DEFAULT_DAEMON_HTTP_TIMEOUT_MS)
     expect(resolved.daemonTcpTimeoutMs).toBe(DEFAULT_DAEMON_TCP_TIMEOUT_MS)
     expect(resolved.cliTimeoutMs).toBe(30_000)
@@ -51,7 +51,7 @@ describe('Config schema defaults and validation', () => {
     expect(resolved.instancesPath).toBe('/tmp/custom-instances.json')
     expect(resolved.serverName).toBe('workspace-vectr')
     expect(resolved.toolCallTimeoutMs).toBe(30_000)
-    expect(resolved.reconnect).toEqual({ enabled: false, initialDelayMs: 100, maxDelayMs: 30_000, maxAttempts: 10 })
+    expect(resolved.reconnect).toEqual({ enabled: true, initialDelayMs: 100, maxDelayMs: 30_000, maxAttempts: 10 })
   })
 
   it('rejects a non-numeric toolCallTimeoutMs', () => {

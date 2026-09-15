@@ -22,7 +22,8 @@
 | `DEFAULT_TUNNEL_PROBE_MS` | `800` (800ms) | `src/codebases.ts` | 远程代码库本地映射端口复用前的 TCP 快速探活超时 | 可抽象为 `Config.tunnelProbeTimeoutMs` |
 | `TUNNEL_PORT_MIN` ~ `TUNNEL_PORT_MAX` | `8760` ~ `8799` (40个端口) | `src/codebases.ts` | 远程代码库 SSH 隧道本地映射的连续端口保留区间，避免端口冲突 | 可在 `Config` 中增加 `tunnelPortRange: { min: number, max: number }` |
 | `DEFAULT_HOST` | `'127.0.0.1'` | `src/registry.ts`, `src/bridge/session-service.ts` | 本地环回地址，防止守护进程未授权暴露在外部网络接口 | 守护进程启动参数可自定义 `--host`，注册表中记录的 `host` 会优先于此值 |
-| `DEFAULT_SERVER_NAME` | `'vectr'` | `src/index.ts` | 工具在 DSH 暴露的 MCP 前缀 (`mcp__vectr__*`) | 可通过 `Config.serverName` 配置为自定义前缀 |
+| `DEFAULT_SERVER_NAME` | `'vectr'` | `src/index.ts` | 工具在 DSH 暴露的 MCP 前缀 (`mcp__vectr*`)，支持通配主连接与代码库工具 | 可通过 `Config.serverName` 配置为自定义前缀 |
+| `reconnect.enabled` | `true` | `src/index.ts` | 长连接重连策略默认开关，保障守护进程启动慢、网络抖动时的自愈韧性 | 可在 `Config.reconnect.enabled` 中外部化显式配置为 `false` |
 | `SLUG_PATTERN` | `/^[A-Za-z0-9_-]{1,32}$/` | `src/domain/rules.ts` | 代码库唯一标识符校验正则，确保文件系统、URL 路由与环境命名安全 | 核心安全不变式（Invariant），不建议随意放宽 |
 | `WORKSPACE_KEY_LENGTH` | `12` | `src/registry.ts` | Vectr 原生 instances.json 中工作区路径 SHA-256 截断散列长度 | 严格对齐 Vectr 协议规范 |
 | 远程端口 (Remote Port) | 无默认值（默认留空） | `src/client/CodebaseModal.tsx` | 前端组件移除写死的 8765 端口，支持留空以触发后端自动探测与自愈解析 | 用户可在前端表单输入自定义远程端口，或由后端自动查询远程 `instances.json` 与 `vectr start` 输出 |
@@ -52,12 +53,20 @@
    - 假设：当指定密码认证时，密码不得持久化到明文元数据文件，且必须成功加载。
    - 校验：若配置 `auth: 'password'` 但未提供密码或密钥库无法解析密码，后端立即拦截报错，禁止静默降级为免密 SSH 导致难以排查的网络探测失败。密码写入受保护的凭据库（0600 权限），元数据中仅保存引用键名。
 
-4. **系统提示词注入与代码库判定（解耦网络探针）**：
+4. **系统提示词注入与代码库判定（解耦网络探针与前缀通配）**：
    - 假设：只要当前工作区存在有效实例或已登记代码库，系统提示词（`vectr:mcp-guidance` 及 `tool:grep` 遮蔽）应立即、无条件生效，不再等待或依赖守护进程 HTTP/TCP 网络探针。
    - 校验：
-     - 在 `src/domain/rules.ts` 的 `hasCodebase` 纯领域规则中显式校验：`workspace` 必须为有效非空字符串；当且仅当 `entry` 存在或 `codebases` 中存在 `item.workspace === workspace` 时返回 `true`。
+     - 在 `src/domain/rules.ts` 的 `hasCodebase` 纯领域规则中显式校验：`workspace` 必须为有效非空字符串；当且仅当 `isValidInstanceEntry(entry)` 为 true 或 `codebases` 中存在 `item.workspace === workspace` 时返回 `true`。
      - 若 `hasCodebase` 返回 `false`，则不注入系统提示词；
-     - 若返回 `true`，立即同步注入系统提示词并绑定至 `promptFibers`；后台网络探针与连接流水线完全独立异步运行，超时或异常仅记录警告日志，handles 保持为空，绝不波及系统提示词。
+     - 若返回 `true`，立即同步注入系统提示词并绑定至 `promptFibers`；系统提示词中的工具通配符放宽为 `(mcp__vectr*)`，确保覆盖代码库工具 `mcp__vectr_<id>__*`；后台网络探针与连接流水线完全独立异步运行，超时或异常仅记录警告日志，绝不波及系统提示词。
+
+5. **主连接去一票否决与自愈韧性（顾问遥测）**：
+   - 假设：只要注册表中的 `InstanceEntry` 结构有效（`isValidInstanceEntry(entry)`），应立即发起 MCP 客户端连接并开启退避重连自愈机制，不能因初始探针超时或网络抖动一票否决。
+   - 校验：
+     - 在发起主连接前显式校验 `isValidInstanceEntry(entry)`，非法 entry（端口非法、路径为空等）记录 warn 并跳过；
+     - 通过 `inFlightConnections: WeakSet<Agent>` 对并发建连请求执行防抖保护，严防并发重复创建；
+     - 建立连接时对齐多代码库模式，立即调用 `startConnection` 并配置默认启用的 `reconnect` 退避策略；
+     - 异步探针 `diagnoseDaemon` 作为后台“顾问遥测（Advisory Telemetry）”运行，检测到慢响应或假死时输出告警，但**严禁 abort 或 veto 连接句柄**，完全由底层重连策略接管自愈。
 
 ---
 

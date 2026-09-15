@@ -209,7 +209,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
       )).toBe(true)
     }, { timeout: 5000, interval: 25 })
 
-    expect(handles.has(agent)).toBe(false)
+    expect(handles.has(agent)).toBe(true)
     killSpy.mockRestore()
   })
 
@@ -326,9 +326,9 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     expect(injectSpy).toHaveBeenCalledTimes(1)
     expect(sectionSpy).toHaveBeenCalledTimes(2)
 
-    // Allow Round 1 probe to settle and fail
+    // Allow Round 1 probe to settle and fail in background telemetry
     await new Promise((r) => setTimeout(r, 150))
-    expect(handles.has(agent)).toBe(false)
+    expect(handles.has(agent)).toBe(true)
 
     // Round 2: Daemon has recovered and is now alive!
     daemonAlive = true

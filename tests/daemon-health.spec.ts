@@ -171,8 +171,8 @@ describe('isDaemonAlive / isPortListening (D-2 primitives)', () => {
   })
 })
 
-describe('install liveness gate (D-2 / R3)', () => {
-  it('skips a dead pid entry: no connect, warn carries workspace/cwd/port/pid + reason', async () => {
+describe('install liveness gate and advisory telemetry (方案 B)', () => {
+  it('advisory telemetry: dead pid entry connects with reconnect policy and logs advisory warning', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d2-deadpid-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
@@ -192,27 +192,27 @@ describe('install liveness gate (D-2 / R3)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    // N2/T5: wait for the liveness IIFE to settle on its REAL outcome (the
-    // skip warn) instead of a fixed 20ms window that flakes under event-loop
-    // load.
+
+    expect(startConnectionMock).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
+
+    // Wait for the background advisory telemetry probe to emit warning
     await vi.waitFor(() => {
       expect(warn.mock.calls.some(
         c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PROCESS_DEAD_ESRCH'),
       )).toBe(true)
     }, { timeout: 5000, interval: 25 })
 
-    expect(startConnectionMock).not.toHaveBeenCalled()
-    expect(handles.has(agent)).toBe(false)
     const warned = warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('pid=99999') && String(c[0]).includes('reason=PROCESS_DEAD_ESRCH'))
     expect(warned).toBe(true)
     spy.mockRestore()
   })
 
-  it('skips an entry whose port is not listening (no pid): no connect', async () => {
+  it('advisory telemetry: entry whose port is not listening connects with reconnect policy and logs warning', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-d2-deadport-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
@@ -227,19 +227,20 @@ describe('install liveness gate (D-2 / R3)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    // T5: wait for the real skip warn instead of a fixed 20ms window.
+
+    expect(startConnectionMock).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
+
     await vi.waitFor(() => {
       expect(warn.mock.calls.some(
         c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PORT_CLOSED'),
       )).toBe(true)
     }, { timeout: 5000, interval: 25 })
 
-    expect(startConnectionMock).not.toHaveBeenCalled()
-    expect(handles.has(agent)).toBe(false)
     expect(warn.mock.calls.some(c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=PORT_CLOSED'))).toBe(true)
   })
 
@@ -257,13 +258,11 @@ describe('install liveness gate (D-2 / R3)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, agent)
-    // T5: wait for the real bind outcome (handle registered) instead of a
-    // fixed 20ms window; the HTTP probe to the status server is the slowest
-    // step in the IIFE.
+
     await vi.waitFor(() => {
       expect(handles.has(agent)).toBe(true)
     }, { timeout: 5000, interval: 25 })
@@ -273,7 +272,7 @@ describe('install liveness gate (D-2 / R3)', () => {
     spy.mockRestore()
   })
 
-  it('R3/R4: pid alive + port listening but HTTP hung → skip (graceful, no throw)', async () => {
+  it('R3/R4: pid alive + port listening but HTTP hung logs advisory warning, startConnection called and handle stored', async () => {
     const hangServer = await startHangingServer()
     const hangPort = portOf(hangServer)
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-r3-hang-'))
@@ -291,27 +290,24 @@ describe('install liveness gate (D-2 / R3)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       // Small budgets so the hang is judged dead quickly.
       daemonHttpTimeoutMs: 30,
       daemonTcpTimeoutMs: 30,
     }, agent)
-    // The HTTP probe aborts after daemonHttpTimeoutMs (30ms) and install() then
-    // emits the graceful-skip warn from its async liveness IIFE. A fixed
-    // `setTimeout(100)` flaked under event-loop load — the fetch→abort→warn
-    // chain can take longer than 100ms to settle, so the warn had not been
-    // emitted yet when the assertions ran. Poll for the REAL warn to appear
-    // (up to a generous 2s budget) instead of sleeping a fixed window.
-    // Semantic unchanged: we still assert the daemon was judged not alive via
-    // HTTP_PROBE_UNREACHABLE and that no connection was ever attempted.
+
+    expect(startConnectionMock).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
+
+    // The HTTP probe aborts after daemonHttpTimeoutMs (30ms) and logs advisory warning
     await vi.waitFor(() => {
       expect(warn.mock.calls.some(
         c => String(c[0]).includes('not alive') && String(c[0]).includes('reason=HTTP_PROBE_UNREACHABLE'),
       )).toBe(true)
     }, { timeout: 2000, interval: 25 })
 
-    expect(startConnectionMock).not.toHaveBeenCalled()
-    expect(handles.has(agent)).toBe(false)
+    expect(startConnectionMock).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
     spy.mockRestore()
     await new Promise<void>((r) => hangServer.close(() => r()))
   })
@@ -409,7 +405,7 @@ describe('registry re-read on every call (D-7)', () => {
 })
 
 describe('subagent / multi-agent scenario (D-2 / R4)', () => {
-  it('binds the live parent daemon but skips a child whose daemon is dead', async () => {
+  it('attempts connection for both parent and child with reconnect resilience', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-subagent-'))
     roots.push(dir)
     const parentCwd = join(dir, 'parent')
@@ -437,7 +433,7 @@ describe('subagent / multi-agent scenario (D-2 / R4)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, parent)
@@ -445,18 +441,14 @@ describe('subagent / multi-agent scenario (D-2 / R4)', () => {
       instancesPath: file,
       serverName: 'vectr',
       toolCallTimeoutMs: 60_000,
-      reconnect: { enabled: false },
+      reconnect: { enabled: true },
       daemonHttpTimeoutMs: 5000,
       daemonTcpTimeoutMs: 300,
     }, child)
-    // T5: wait until the parent bind has settled, then assert the child was
-    // skipped.
-    await vi.waitFor(() => {
-      expect(handles.has(parent)).toBe(true)
-    }, { timeout: 5000, interval: 25 })
 
     expect(handles.has(parent)).toBe(true) // live daemon → registered
-    expect(handles.has(child)).toBe(false) // dead daemon → skipped
+    expect(handles.has(child)).toBe(true) // child daemon connects with reconnect policy
+    expect(startConnectionMock).toHaveBeenCalledTimes(2)
     killSpy.mockRestore()
   })
 })
@@ -471,5 +463,127 @@ describe('readInstancesFile still used by install (D-7 integration)', () => {
     const ctx = new Context()
     const parsed = readInstancesFile(ctx, file)
     expect(parsed?.[keyOf('/w')]?.port).toBe(statusPort)
+  })
+})
+
+describe('concurrent install() debouncing and inFlightConnections safety', () => {
+  it('debounces rapid concurrent install() invocations for the same agent, calling startConnection exactly once', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-debounce-'))
+    roots.push(dir)
+    const cwd = join(dir, 'ws')
+    const file = join(dir, 'instances.json')
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, statusPort, 1) }))
+
+    const ctx = new Context()
+    const inFlightConnections = new WeakSet<Agent>()
+    const agent = makeAgent('debounce-agent', cwd)
+    const disposed = new WeakSet<Agent>()
+    const codebaseBound = new WeakSet<Agent>()
+
+    // Concurrently invoke install 5 times
+    for (let i = 0; i < 5; i++) {
+      install(
+        ctx,
+        handles as Map<Agent, never>,
+        promptFibers as Map<Agent, never>,
+        file,
+        {
+          instancesPath: file,
+          serverName: 'vectr',
+          toolCallTimeoutMs: 60_000,
+          reconnect: { enabled: true },
+          daemonHttpTimeoutMs: 5000,
+          daemonTcpTimeoutMs: 300,
+        },
+        agent,
+        undefined,
+        disposed,
+        inFlightConnections,
+        codebaseBound,
+      )
+    }
+
+    expect(startConnectionMock).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
+  })
+})
+
+describe('illegal entry filtering via isValidInstanceEntry', () => {
+  it('skips connection and logs warning when entry has non-positive or invalid port', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-invalid-port-'))
+    roots.push(dir)
+    const cwd = join(dir, 'ws')
+    const file = join(dir, 'instances.json')
+    // Illegal port 0
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: { workspace: cwd, port: 0 } }))
+
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const agent = makeAgent('invalid-port-agent', cwd)
+
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: true },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    expect(startConnectionMock).not.toHaveBeenCalled()
+    expect(handles.has(agent)).toBe(false)
+    expect(warn.mock.calls.some(c => String(c[0]).includes('invalid instance entry'))).toBe(true)
+  })
+
+  it('skips connection and logs warning when entry port is > 65535 or non-integer', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-invalid-port2-'))
+    roots.push(dir)
+    const cwd = join(dir, 'ws')
+    const file = join(dir, 'instances.json')
+    // Illegal port 70000
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: { workspace: cwd, port: 70000 } }))
+
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const agent = makeAgent('invalid-port2-agent', cwd)
+
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: true },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    expect(startConnectionMock).not.toHaveBeenCalled()
+    expect(handles.has(agent)).toBe(false)
+    expect(warn.mock.calls.some(c => String(c[0]).includes('invalid instance entry'))).toBe(true)
+  })
+
+  it('skips connection and logs warning when entry workspace is empty or whitespace', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-invalid-ws-'))
+    roots.push(dir)
+    const cwd = join(dir, 'ws')
+    const file = join(dir, 'instances.json')
+    // Illegal empty workspace
+    await writeFile(file, JSON.stringify({ [keyOf(cwd)]: { workspace: '   ', port: 8080 } }))
+
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const agent = makeAgent('invalid-ws-agent', cwd)
+
+    install(ctx, handles as Map<Agent, never>, promptFibers as Map<Agent, never>, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: true },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    expect(startConnectionMock).not.toHaveBeenCalled()
+    expect(handles.has(agent)).toBe(false)
+    expect(warn.mock.calls.some(c => String(c[0]).includes('invalid instance entry'))).toBe(true)
   })
 })
