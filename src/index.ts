@@ -244,8 +244,15 @@ export const Config: z<Config> = z.object({
  */
 export const VECTR_GUIDANCE_SECTION_NAME = 'vectr:mcp-guidance'
 export const VECTR_GUIDANCE_SECTION_ORDER = 95
-export const VECTR_GUIDANCE_SECTION_TEXT =
-  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.'
+
+/**
+ * Generate guidance prompt text dynamically adapted to `serverName` (defaults to `vectr`).
+ */
+export function getVectrGuidanceText(serverName: string = DEFAULT_SERVER_NAME): string {
+  return `When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__${serverName}*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.`
+}
+
+export const VECTR_GUIDANCE_SECTION_TEXT = getVectrGuidanceText(DEFAULT_SERVER_NAME)
 
 /**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
@@ -255,8 +262,15 @@ export const VECTR_GUIDANCE_SECTION_TEXT =
  */
 export const VECTR_GREP_SECTION_NAME = 'tool:grep'
 export const VECTR_GREP_SECTION_ORDER = 1500
-export const VECTR_GREP_SECTION_TEXT =
-  'Prioritize querying code via vectr tools (mcp__vectr*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
+
+/**
+ * Generate grep shadow prompt text dynamically adapted to `serverName` (defaults to `vectr`).
+ */
+export function getVectrGrepText(serverName: string = DEFAULT_SERVER_NAME): string {
+  return `Prioritize querying code via vectr tools (mcp__${serverName}*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.`
+}
+
+export const VECTR_GREP_SECTION_TEXT = getVectrGrepText(DEFAULT_SERVER_NAME)
 
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
@@ -288,9 +302,12 @@ export function install(
    * prompt fiber instead of leaking it to host teardown. Defaults to an empty
    * set so callers that do not seed live agents (unit tests) need not pass it. */
   disposed: WeakSet<Agent> = new WeakSet<Agent>(),
-  inFlightConnections: WeakSet<Agent> = new WeakSet<Agent>(),
   codebaseBoundAgents: WeakSet<Agent> = new WeakSet<Agent>(),
+  codebaseHandles?: Map<Agent, ConnectionHandle[]>,
 ): void {
+  // Guard against already-disposed agents immediately at the function entry
+  if (disposed.has(agent)) return
+
   // Completely decouple prompt injection from daemon connection retry.
   // Prompt injection is guarded solely by !promptFibers.has(agent).
   // Connection establishment is guarded solely by entry !== undefined && !handles.has(agent).
@@ -340,17 +357,18 @@ export function install(
 
   // Immediately inject system prompt guidance sections unconditionally without awaiting daemon probe.
   // As long as a codebase exists, the prompt guidance is active immediately.
+  const serverName = config.serverName || DEFAULT_SERVER_NAME
   if (!promptFibers.has(agent)) {
     const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
       scope.systemPrompt.section({
         name: VECTR_GUIDANCE_SECTION_NAME,
         order: VECTR_GUIDANCE_SECTION_ORDER,
-        text: VECTR_GUIDANCE_SECTION_TEXT,
+        text: getVectrGuidanceText(serverName),
       })
       scope.systemPrompt.section({
         name: VECTR_GREP_SECTION_NAME,
         order: scope.systemPrompt.getSectionOrder?.('TOOL_GREP') ?? VECTR_GREP_SECTION_ORDER,
-        text: VECTR_GREP_SECTION_TEXT,
+        text: getVectrGrepText(serverName),
       })
     })
     if (disposed.has(agent)) {
@@ -363,12 +381,11 @@ export function install(
   // Main workspace connection establishment with de-vetoing and reconnect resilience:
   // Aligned with installCodebaseConnections:
   // 1. Guard with isValidInstanceEntry(entry). Invalid entry logs a warning and skips connection.
-  // 2. Concurrency debounce with inFlightConnections and !handles.has(agent).
-  // 3. Immediately invoke startConnection.
+  // 2. Concurrency debounced synchronously via !handles.has(agent).
+  // 3. Isolated with try-catch so synchronous startup exceptions never crash agent/created.
   // 4. Background advisory telemetry via diagnoseDaemon logs slow response/not alive warnings,
   //    strictly forbidding abort or vetoing the connection handle.
-  if (validEntry !== undefined && !handles.has(agent) && !inFlightConnections.has(agent)) {
-    inFlightConnections.add(agent)
+  if (validEntry !== undefined && !handles.has(agent)) {
     try {
       const host = validEntry.host ?? DEFAULT_HOST
       const port = validEntry.port
@@ -404,8 +421,10 @@ export function install(
       } else {
         handles.set(agent, conn)
       }
-    } finally {
-      inFlightConnections.delete(agent)
+    } catch (error) {
+      ctx.logger.warn(
+        `vectr-client: failed to initialize main connection for session ${agent.id} (cwd=${cwd}): ${String(error)}`,
+      )
     }
 
     // Background advisory telemetry probe (non-blocking, non-vetoing):
@@ -437,7 +456,7 @@ export function install(
   // agent.
   if (codebasesPath !== undefined && !codebaseBoundAgents.has(agent)) {
     codebaseBoundAgents.add(agent)
-    void installCodebaseConnections(ctx, config, agent, codebasesPath, instances, cwd)
+    void installCodebaseConnections(ctx, config, agent, codebasesPath, instances, cwd, disposed, codebaseHandles)
   }
 }
 
@@ -459,7 +478,12 @@ export async function installCodebaseConnections(
   codebasesPath: string,
   instances?: InstancesFile,
   cwd?: string,
+  disposed: WeakSet<Agent> = new WeakSet<Agent>(),
+  codebaseHandles?: Map<Agent, ConnectionHandle[]>,
 ): Promise<void> {
+  // Guard against already-disposed agents immediately at function entry
+  if (disposed.has(agent)) return
+
   let entries: CodebaseEntry[]
   try {
     entries = loadCodebases(codebasesPath)
@@ -485,6 +509,7 @@ export async function installCodebaseConnections(
   const knownWorkspaces = new Set(Object.values(instances ?? {}).map((e) => e.workspace))
   const policy = resolveReconnectPolicy(config.reconnect, 'vectr-client(codebase): reconnect')
   for (const entry of entries) {
+    if (disposed.has(agent)) return
     if (entry.status !== 'up' || entry.localPort === undefined) continue
     if (agentWs !== undefined) {
       if (entry.workspace !== agentWs) continue
@@ -507,6 +532,16 @@ export async function installCodebaseConnections(
           else ctx.logger.warn(message)
         }
       })
+      if (disposed.has(agent)) {
+        void conn.dispose().catch(() => {})
+      } else if (codebaseHandles !== undefined) {
+        let list = codebaseHandles.get(agent)
+        if (list === undefined) {
+          list = []
+          codebaseHandles.set(agent, list)
+        }
+        list.push(conn)
+      }
     } catch (error) {
       ctx.logger.warn(`vectr-client: codebase bind threw for ${entry.serverName} (session ${agent.id}): ${String(error)}`)
     }
@@ -609,6 +644,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
   }
   const handles = new Map<Agent, ConnectionHandle>()
+  const codebaseHandles = new Map<Agent, ConnectionHandle[]>()
   // Per-agent system-prompt injection fibers (feature A-2): the guidance
   // section is contributed only when the daemon is verified alive, and disposed
   // together with the agent. Keyed separately from `handles` because the fiber
@@ -620,24 +656,29 @@ export function apply(ctx: Context, config: Config = {}): void {
   // lets the IIFE detect that and dispose the freshly-created registration.
   // WeakSet eliminates strong reference accumulation for discarded Agent objects.
   const disposed = new WeakSet<Agent>()
-  const inFlightConnections = new WeakSet<Agent>()
   const codebaseBoundAgents = new WeakSet<Agent>()
 
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
   // metadata path is passed so install also binds up codebases.
   for (const agent of ctx.agents.list()) {
-    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, inFlightConnections, codebaseBoundAgents)
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles)
   }
   ctx.on('agent/created', ({ agent }) => {
-    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, inFlightConnections, codebaseBoundAgents)
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles)
   })
   ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
     codebaseBoundAgents.delete(agent)
-    inFlightConnections.delete(agent)
     void handles.get(agent)?.dispose()
     handles.delete(agent)
+
+    const list = codebaseHandles.get(agent)
+    if (list !== undefined) {
+      for (const conn of list) void conn.dispose().catch(() => {})
+      codebaseHandles.delete(agent)
+    }
+
     const fiber = promptFibers.get(agent)
     if (fiber !== undefined) {
       void fiber.dispose().catch((error: unknown) => {
@@ -651,6 +692,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(() => async () => {
     for (const conn of handles.values()) void conn.dispose()
     handles.clear()
+    for (const list of codebaseHandles.values()) {
+      for (const conn of list) void conn.dispose().catch(() => {})
+    }
+    codebaseHandles.clear()
     for (const fiber of promptFibers.values()) void fiber.dispose().catch(() => {})
     promptFibers.clear()
     // Kill any surviving ssh tunnels recorded in the codebase metadata so a

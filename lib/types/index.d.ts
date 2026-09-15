@@ -129,7 +129,11 @@ export declare const Config: z<Config>;
  */
 export declare const VECTR_GUIDANCE_SECTION_NAME = "vectr:mcp-guidance";
 export declare const VECTR_GUIDANCE_SECTION_ORDER = 95;
-export declare const VECTR_GUIDANCE_SECTION_TEXT = "When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.";
+/**
+ * Generate guidance prompt text dynamically adapted to `serverName` (defaults to `vectr`).
+ */
+export declare function getVectrGuidanceText(serverName?: string): string;
+export declare const VECTR_GUIDANCE_SECTION_TEXT: string;
 /**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
  * in a verified vectr workspace. Instead of directly telling the model to use
@@ -138,7 +142,11 @@ export declare const VECTR_GUIDANCE_SECTION_TEXT = "When answering code-query or
  */
 export declare const VECTR_GREP_SECTION_NAME = "tool:grep";
 export declare const VECTR_GREP_SECTION_ORDER = 1500;
-export declare const VECTR_GREP_SECTION_TEXT = "Prioritize querying code via vectr tools (mcp__vectr*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool \u2014 not shell grep or rg \u2014 to search file contents. Use read on a matched file when you need surrounding context.";
+/**
+ * Generate grep shadow prompt text dynamically adapted to `serverName` (defaults to `vectr`).
+ */
+export declare function getVectrGrepText(serverName?: string): string;
+export declare const VECTR_GREP_SECTION_TEXT: string;
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
  * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
@@ -161,7 +169,7 @@ export declare function install(ctx: Context, handles: Map<Agent, ConnectionHand
  * `apply`). When set, the IIFE tears down the freshly-created connection /
  * prompt fiber instead of leaking it to host teardown. Defaults to an empty
  * set so callers that do not seed live agents (unit tests) need not pass it. */
-disposed?: WeakSet<Agent>, inFlightConnections?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>): void;
+disposed?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>): void;
 /**
  * Connect the agent to every persisted codebase entry with `status === 'up'`.
  * Each entry exposes a Streamable HTTP MCP endpoint at
@@ -173,7 +181,7 @@ disposed?: WeakSet<Agent>, inFlightConnections?: WeakSet<Agent>, codebaseBoundAg
  * @param agent - the agent to bind the codebase tools to.
  * @param codebasesPath - absolute path of the codebase metadata file.
  */
-export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string): Promise<void>;
+export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string, disposed?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>): Promise<void>;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.

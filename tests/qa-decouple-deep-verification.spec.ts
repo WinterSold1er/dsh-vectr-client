@@ -20,7 +20,10 @@ import { startConnection, type ConnectionHandle } from '@deepseek-ai/dsh-mcp-cli
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   install,
+  installCodebaseConnections,
   apply,
+  getVectrGuidanceText,
+  getVectrGrepText,
   VECTR_GUIDANCE_SECTION_NAME,
   VECTR_GUIDANCE_SECTION_ORDER,
   VECTR_GUIDANCE_SECTION_TEXT,
@@ -523,8 +526,8 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       expect(disposeFiberSpy).toHaveBeenCalledTimes(1)
     })
 
-    it('cancels and disposes connection if agent is disposed while probe is in flight', async () => {
-      const dir = await mkdtemp(join(tmpdir(), 'qa-inflight-disposal-'))
+    it('immediately aborts and drops all operations if agent is already disposed before install()', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'qa-disposed-guard-'))
       roots.push(dir)
       const instancesPath = join(dir, 'instances.json')
       const ws = join(dir, 'my-ws')
@@ -536,19 +539,170 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       const handles = new Map<Agent, ConnectionHandle>()
       const promptFibers = new Map<Agent, Fiber>()
       const disposed = new WeakSet<Agent>()
-      const { agent } = makeMockAgent('test-inflight', ws)
+      const { agent, injectSpy } = makeMockAgent('test-disposed-guard', ws)
 
-      // Agent is disposed prior to/during install
+      // Mark agent disposed prior to install()
       disposed.add(agent)
 
-      // Install checks disposed set
       install(ctx, handles, promptFibers, instancesPath, { ...baseConfig, instancesPath }, agent, undefined, disposed)
 
-      // Wait for probe to complete
-      await new Promise((r) => setTimeout(r, 150))
-
-      // Handle must NOT be added to handles map because agent was disposed
+      // Guard at line 1 returns immediately
+      expect(promptFibers.has(agent)).toBe(false)
+      expect(injectSpy).not.toHaveBeenCalled()
+      expect(startConnectionMock).not.toHaveBeenCalled()
       expect(handles.has(agent)).toBe(false)
+    })
+
+    it('immediately aborts installCodebaseConnections if agent is already disposed', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'qa-disposed-cb-'))
+      roots.push(dir)
+      const codebasesPath = join(dir, 'codebases.json')
+      const ws = join(dir, 'my-ws')
+      await writeFile(codebasesPath, JSON.stringify([
+        { id: 'cb1', slug: 'my-cb', type: 'local', path: ws, serverName: 'my_cb', status: 'up', localPort: mockHttpPort },
+      ]))
+
+      const ctx = new Context()
+      const disposed = new WeakSet<Agent>()
+      const codebaseHandles = new Map<Agent, ConnectionHandle[]>()
+      const { agent } = makeMockAgent('test-cb-disposed', ws)
+
+      disposed.add(agent)
+
+      await installCodebaseConnections(
+        ctx,
+        baseConfig,
+        agent,
+        codebasesPath,
+        undefined,
+        ws,
+        disposed,
+        codebaseHandles,
+      )
+
+      expect(startConnectionMock).not.toHaveBeenCalled()
+      expect(codebaseHandles.has(agent)).toBe(false)
+    })
+
+    it('tracks codebase handles and cleanly disposes them on agent/disposed and host teardown', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'qa-cb-handles-lifecycle-'))
+      roots.push(dir)
+      const instancesPath = join(dir, 'instances.json')
+      const codebasesPath = join(dir, 'codebases.json')
+      const ws = join(dir, 'my-ws')
+
+      await writeFile(instancesPath, JSON.stringify({
+        'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+      }))
+      await writeFile(codebasesPath, JSON.stringify([
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws },
+      ]))
+
+      const ctx = new Context()
+      ;(ctx as any).agents = { list: () => [] }
+
+      let registeredCreatedHandler: ((data: { agent: Agent }) => void) | undefined
+      let registeredDisposedHandler: ((data: { agent: Agent }) => void) | undefined
+      let teardownDisposer: (() => Promise<void>) | undefined
+
+      vi.spyOn(ctx, 'on').mockImplementation(((event: string, handler: any) => {
+        if (event === 'agent/created') registeredCreatedHandler = handler
+        if (event === 'agent/disposed') registeredDisposedHandler = handler
+      }) as any)
+
+      vi.spyOn(ctx, 'effect').mockImplementation(((fn: any) => {
+        teardownDisposer = fn()
+      }) as any)
+
+      apply(ctx, {
+        instancesPath,
+        codebasesPath,
+        daemonHttpTimeoutMs: 100,
+        daemonTcpTimeoutMs: 50,
+      })
+
+      const mainDispose = vi.fn().mockResolvedValue(undefined)
+      const codebaseDispose = vi.fn().mockResolvedValue(undefined)
+      let callCount = 0
+      startConnectionMock.mockImplementation(() => {
+        callCount++
+        return {
+          ready: Promise.resolve({}),
+          dispose: callCount % 2 === 1 ? mainDispose : codebaseDispose,
+        }
+      })
+
+      const { agent } = makeMockAgent('test-cb-lifecycle', ws)
+
+      // Agent created
+      registeredCreatedHandler!({ agent })
+
+      // Wait for async codebase connection to finish
+      await vi.waitFor(() => {
+        expect(startConnectionMock).toHaveBeenCalledTimes(2)
+      }, { timeout: 3000, interval: 20 })
+
+      // Fire agent/disposed
+      registeredDisposedHandler!({ agent })
+
+      // Main connection & codebase connection both disposed
+      expect(mainDispose).toHaveBeenCalledTimes(1)
+      expect(codebaseDispose).toHaveBeenCalledTimes(1)
+
+      // Second agent for teardown test
+      const { agent: agent2 } = makeMockAgent('test-cb-teardown', ws)
+      const mainDispose2 = vi.fn().mockResolvedValue(undefined)
+      const codebaseDispose2 = vi.fn().mockResolvedValue(undefined)
+      let callCount2 = 0
+      startConnectionMock.mockImplementation(() => {
+        callCount2++
+        return {
+          ready: Promise.resolve({}),
+          dispose: callCount2 % 2 === 1 ? mainDispose2 : codebaseDispose2,
+        }
+      })
+
+      registeredCreatedHandler!({ agent: agent2 })
+      await vi.waitFor(() => {
+        expect(startConnectionMock).toHaveBeenCalledTimes(4)
+      }, { timeout: 3000, interval: 20 })
+
+      // Teardown plugin
+      expect(teardownDisposer).toBeDefined()
+      await teardownDisposer!()
+
+      expect(mainDispose2).toHaveBeenCalledTimes(1)
+      expect(codebaseDispose2).toHaveBeenCalledTimes(1)
+    })
+
+    it('isolates synchronous startConnection errors with try-catch and does not crash agent/created', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'qa-startconn-err-'))
+      roots.push(dir)
+      const instancesPath = join(dir, 'instances.json')
+      const ws = join(dir, 'my-ws')
+      await writeFile(instancesPath, JSON.stringify({
+        'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+      }))
+
+      startConnectionMock.mockImplementationOnce(() => {
+        throw new Error('Immediate startConnection crash!')
+      })
+
+      const ctx = new Context()
+      const warnSpy = vi.spyOn(ctx.logger, 'warn')
+      const handles = new Map<Agent, ConnectionHandle>()
+      const promptFibers = new Map<Agent, Fiber>()
+      const { agent } = makeMockAgent('test-sync-error', ws)
+
+      expect(() => {
+        install(ctx, handles, promptFibers, instancesPath, { ...baseConfig, instancesPath }, agent)
+      }).not.toThrow()
+
+      expect(promptFibers.has(agent)).toBe(true)
+      expect(handles.has(agent)).toBe(false)
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('failed to initialize main connection for session test-sync-error'),
+      )
     })
 
     it('resiliently survives and logs warning when fiber.dispose() throws during agent/disposed event', async () => {
@@ -626,6 +780,49 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       disposed.add(agentRef)
       expect(disposed.has(agentRef)).toBe(true)
       agentRef = null // cleared from reference, ready for GC
+    })
+  })
+
+  describe('6. Dynamic Prompt Text Adaptation (serverName)', () => {
+    it('generates prompt text with custom serverName wildcard prefix', () => {
+      const guidanceCustom = getVectrGuidanceText('custom_mcp')
+      expect(guidanceCustom).toContain('mcp__custom_mcp*')
+      expect(guidanceCustom).toContain('when available')
+
+      const grepCustom = getVectrGrepText('custom_mcp')
+      expect(grepCustom).toContain('mcp__custom_mcp*')
+      expect(grepCustom).toContain('when available')
+
+      // Default preserves original text
+      expect(getVectrGuidanceText()).toBe(VECTR_GUIDANCE_SECTION_TEXT)
+      expect(getVectrGrepText()).toBe(VECTR_GREP_SECTION_TEXT)
+    })
+
+    it('injects prompt sections with dynamic serverName when configured', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'qa-dyn-prompt-'))
+      roots.push(dir)
+      const instancesPath = join(dir, 'instances.json')
+      const ws = join(dir, 'my-ws')
+      await writeFile(instancesPath, JSON.stringify({
+        'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+      }))
+
+      const ctx = new Context()
+      const handles = new Map<Agent, ConnectionHandle>()
+      const promptFibers = new Map<Agent, Fiber>()
+      const { agent, sectionSpy } = makeMockAgent('test-dyn-prompt', ws)
+
+      install(ctx, handles, promptFibers, instancesPath, {
+        ...baseConfig,
+        instancesPath,
+        serverName: 'vectr_team_a',
+      }, agent)
+
+      expect(sectionSpy).toHaveBeenCalledTimes(2)
+      const sec1 = sectionSpy.mock.calls[0][0]
+      const sec2 = sectionSpy.mock.calls[1][0]
+      expect(sec1.text).toContain('mcp__vectr_team_a*')
+      expect(sec2.text).toContain('mcp__vectr_team_a*')
     })
   })
 })

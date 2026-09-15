@@ -466,8 +466,8 @@ describe('readInstancesFile still used by install (D-7 integration)', () => {
   })
 })
 
-describe('concurrent install() debouncing and inFlightConnections safety', () => {
-  it('debounces rapid concurrent install() invocations for the same agent, calling startConnection exactly once', async () => {
+describe('concurrent install() debouncing and connection deduplication safety', () => {
+  it('debounces rapid concurrent install() invocations for the same agent via synchronous handles registration, calling startConnection exactly once', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-debounce-'))
     roots.push(dir)
     const cwd = join(dir, 'ws')
@@ -475,7 +475,6 @@ describe('concurrent install() debouncing and inFlightConnections safety', () =>
     await writeFile(file, JSON.stringify({ [keyOf(cwd)]: entryFor(cwd, statusPort, 1) }))
 
     const ctx = new Context()
-    const inFlightConnections = new WeakSet<Agent>()
     const agent = makeAgent('debounce-agent', cwd)
     const disposed = new WeakSet<Agent>()
     const codebaseBound = new WeakSet<Agent>()
@@ -498,7 +497,6 @@ describe('concurrent install() debouncing and inFlightConnections safety', () =>
         agent,
         undefined,
         disposed,
-        inFlightConnections,
         codebaseBound,
       )
     }
