@@ -94,6 +94,130 @@ describe('Domain Core: rules & validation', () => {
       })).toBe(true)
     })
 
+    it('tolerates trailing slashes on workspace and targets', () => {
+      // workspace has trailing slash, codebase path does not
+      expect(hasCodebase({
+        workspace: '/ws/repo/',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/repo', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // workspace does not have trailing slash, codebase path does
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/repo/', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // Both have multiple trailing slashes
+      expect(hasCodebase({
+        workspace: '/ws/repo///',
+        entry: { workspace: '/ws/repo//', port: 1234 },
+      })).toBe(true)
+    })
+
+    it('supports subdirectory launch workspace matching (workspace inside codebase)', () => {
+      // workspace is a deep subdirectory of codebase path
+      expect(hasCodebase({
+        workspace: '/ws/repo/packages/core/src',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/repo', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // workspace is a subdirectory of codebase workspace field
+      expect(hasCodebase({
+        workspace: '/ws/repo/sub-module',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/other/path', workspace: '/ws/repo', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // workspace is a subdirectory of daemon instance entry
+      expect(hasCodebase({
+        workspace: '/ws/repo/sub/dir',
+        entry: { workspace: '/ws/repo', port: 1234 },
+      })).toBe(true)
+
+      // prefix collision should NOT match (must match exactly or followed by '/')
+      expect(hasCodebase({
+        workspace: '/ws/repo-other/sub',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/repo', serverName: 'v1' },
+        ],
+      })).toBe(false)
+    })
+
+    it('matches against both path and workspace fields in CodebaseEntry', () => {
+      // matches item.path when workspace is undefined
+      expect(hasCodebase({
+        workspace: '/ws/local-path',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/local-path', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // matches item.path when workspace is __unassigned__ sentinel
+      expect(hasCodebase({
+        workspace: '/ws/unassigned-repo',
+        codebases: [
+          { id: '1', slug: '1', type: 'local', path: '/ws/unassigned-repo', workspace: '__unassigned__', serverName: 'v1' },
+        ],
+      })).toBe(true)
+
+      // matches item.workspace when path is different remote path
+      expect(hasCodebase({
+        workspace: '/ws/remote-bound',
+        codebases: [
+          { id: '2', slug: '2', type: 'remote', path: '/remote/source/repo', workspace: '/ws/remote-bound', serverName: 'v2' },
+        ],
+      })).toBe(true)
+    })
+
+    it('enforces entry validity and runtime type safety', () => {
+      // empty entry object
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: {} as any,
+      })).toBe(false)
+
+      // invalid or non-positive port
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/repo', port: 0 },
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/repo', port: -100 },
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/repo', port: NaN },
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/repo', port: '1234' as any },
+      })).toBe(false)
+
+      // invalid workspace field in entry
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '', port: 1234 },
+      })).toBe(false)
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '   ', port: 1234 },
+      })).toBe(false)
+
+      // entry workspace does not match current workspace
+      expect(hasCodebase({
+        workspace: '/ws/repo',
+        entry: { workspace: '/ws/completely-different', port: 1234 },
+      })).toBe(false)
+    })
+
     it('returns false when neither entry nor codebases match workspace', () => {
       expect(hasCodebase({
         workspace: '/ws/repo',

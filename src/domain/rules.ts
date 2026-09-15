@@ -48,23 +48,76 @@ export interface HasCodebaseInput {
 }
 
 /**
+ * Normalize directory path by trimming whitespace and stripping trailing slashes.
+ * Preserves the root path '/' if it is exactly '/'.
+ */
+export function normalizePath(p?: string | null): string {
+  if (!p || typeof p !== 'string') return ''
+  const trimmed = p.trim()
+  if (trimmed === '/') return '/'
+  return trimmed.replace(/\/+$/, '')
+}
+
+/**
+ * Check if an active workspace matches a target codebase path or workspace.
+ * Supports exact match and subdirectory workspace match (e.g. workspace is
+ * a subfolder of the target codebase root).
+ */
+export function isWorkspaceMatch(ws: string, target?: string | null): boolean {
+  if (!target || typeof target !== 'string') return false
+  const normTarget = normalizePath(target)
+  if (!normTarget || normTarget === '__unassigned__') return false
+  if (normTarget === '/') return ws.startsWith('/')
+  return ws === normTarget || ws.startsWith(normTarget + '/')
+}
+
+/**
+ * Validate that an InstanceEntry possesses valid structural types and runtime values.
+ */
+export function isValidInstanceEntry(entry: unknown): entry is InstanceEntry {
+  if (!entry || typeof entry !== 'object') return false
+  const e = entry as Partial<InstanceEntry>
+  if (
+    typeof e.port !== 'number' ||
+    !Number.isFinite(e.port) ||
+    !Number.isInteger(e.port) ||
+    e.port <= 0 ||
+    e.port > 65535
+  ) {
+    return false
+  }
+  if (typeof e.workspace !== 'string' || e.workspace.trim().length === 0) {
+    return false
+  }
+  return true
+}
+
+/**
  * Pure domain rule to determine whether a workspace is associated with a codebase.
  *
  * Rules:
  * - If workspace is empty/null/undefined, returns false.
- * - If entry is present (truthy), returns true.
- * - If codebases array has any item whose workspace matches workspace, returns true.
+ * - Normalizes paths with trailing slash tolerance (trim().replace(/\/+$/, '')).
+ * - Supports subdirectory workspace match (ws === target || ws.startsWith(target + '/')).
+ * - Validates entry type safety and matches entry.workspace against workspace.
+ * - Checks codebases array matching against either item.path or item.workspace.
  * - Otherwise returns false.
  */
 export function hasCodebase(input: HasCodebaseInput): boolean {
-  if (!input.workspace || typeof input.workspace !== 'string' || input.workspace.trim().length === 0) {
+  const ws = normalizePath(input.workspace)
+  if (ws.length === 0) {
     return false
   }
-  if (input.entry !== undefined && input.entry !== null) {
-    return true
+  if (isValidInstanceEntry(input.entry)) {
+    if (isWorkspaceMatch(ws, input.entry.workspace)) {
+      return true
+    }
   }
   if (Array.isArray(input.codebases)) {
-    return input.codebases.some((item) => item?.workspace === input.workspace)
+    return input.codebases.some((item) => {
+      if (!item || typeof item !== 'object') return false
+      return isWorkspaceMatch(ws, item.path) || isWorkspaceMatch(ws, item.workspace)
+    })
   }
   return false
 }

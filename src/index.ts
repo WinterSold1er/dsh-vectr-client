@@ -245,7 +245,7 @@ export const Config: z<Config> = z.object({
 export const VECTR_GUIDANCE_SECTION_NAME = 'vectr:mcp-guidance'
 export const VECTR_GUIDANCE_SECTION_ORDER = 95
 export const VECTR_GUIDANCE_SECTION_TEXT =
-  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr__*) over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep only if vectr query fails or returns no matches.'
+  'When answering code-query or codebase-navigation questions, prioritize the vectr MCP tools (mcp__vectr__*) when available over grep and blind file reads. Search, retrieve, and reason over the indexed workspace using vectr first; fall back to grep if vectr tools are not available, query fails, or yields no results.'
 
 /**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
@@ -256,7 +256,10 @@ export const VECTR_GUIDANCE_SECTION_TEXT =
 export const VECTR_GREP_SECTION_NAME = 'tool:grep'
 export const VECTR_GREP_SECTION_ORDER = 1500
 export const VECTR_GREP_SECTION_TEXT =
-  'Prioritize querying code via vectr tools (mcp__vectr__*). If vectr query fails or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
+  'Prioritize querying code via vectr tools (mcp__vectr__*) when available. If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.'
+
+/** Agents that have already established connections to persisted codebases. */
+const codebaseBoundAgents = new WeakSet<Agent>()
 
 /**
  * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
@@ -287,9 +290,15 @@ export function install(
    * `apply`). When set, the IIFE tears down the freshly-created connection /
    * prompt fiber instead of leaking it to host teardown. Defaults to an empty
    * set so callers that do not seed live agents (unit tests) need not pass it. */
-  disposed: Set<Agent> = new Set<Agent>(),
+  disposed: WeakSet<Agent> = new WeakSet<Agent>(),
 ): void {
-  if (handles.has(agent) || promptFibers.has(agent)) return
+  // Completely decouple prompt injection from daemon connection retry.
+  // Prompt injection is guarded solely by !promptFibers.has(agent).
+  // Connection establishment is guarded solely by entry !== undefined && !handles.has(agent).
+  // If both prompt guidance and main connection are already established, early return.
+  // CRITICAL: NEVER early return merely because promptFibers exists, or a failed initial probe
+  // will permanently prevent retry / reconnection!
+  if (handles.has(agent) && promptFibers.has(agent)) return
   const cwd = agent.session.header.cwd
   if (cwd === undefined) {
     // A session without a workspace cwd cannot be bound to any vectr daemon.
@@ -411,8 +420,9 @@ export function install(
   // Feature B: also bind every persisted codebase whose status is 'up'. These
   // are host-level MCP servers (each with a globally-unique serverName), so a
   // failed bind must not veto the agent and only logs a warning. Runs once per
-  // agent (guarded by `handles.has(agent)` at the top of install).
-  if (codebasesPath !== undefined) {
+  // agent.
+  if (codebasesPath !== undefined && !codebaseBoundAgents.has(agent)) {
+    codebaseBoundAgents.add(agent)
     void installCodebaseConnections(ctx, config, agent, codebasesPath, instances, cwd)
   }
 }
@@ -589,7 +599,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   // registers the fiber/connection only after the await; if the agent is torn
   // down before then, the disposed handler finds nothing in the maps. This set
   // lets the IIFE detect that and dispose the freshly-created registration.
-  const disposed = new Set<Agent>()
+  // WeakSet eliminates strong reference accumulation for discarded Agent objects.
+  const disposed = new WeakSet<Agent>()
 
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
@@ -598,6 +609,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('agent/created', ({ agent }) => { install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed) })
   ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
+    codebaseBoundAgents.delete(agent)
     void handles.get(agent)?.dispose()
     handles.delete(agent)
     const fiber = promptFibers.get(agent)

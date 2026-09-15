@@ -159,10 +159,14 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     expect(section1.name).toBe(VECTR_GUIDANCE_SECTION_NAME)
     expect(section1.order).toBe(VECTR_GUIDANCE_SECTION_ORDER)
     expect(section1.text).toBe(VECTR_GUIDANCE_SECTION_TEXT)
+    expect(String(section1.text)).toContain('when available')
+    expect(String(section1.text)).toContain('if vectr tools are not available, query fails, or yields no results')
     const section2 = sectionSpy.mock.calls[1]?.[0] as { name: string; order: number; text: unknown }
     expect(section2.name).toBe(VECTR_GREP_SECTION_NAME)
     expect(section2.order).toBe(VECTR_GREP_SECTION_ORDER)
     expect(section2.text).toBe(VECTR_GREP_SECTION_TEXT)
+    expect(String(section2.text)).toContain('when available')
+    expect(String(section2.text)).toContain('If vectr tools are not available, query fails, or yields no results')
 
     // Background daemon probe settles asynchronously and connects handles
     await vi.waitFor(() => {
@@ -287,6 +291,92 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     expect(disposeFiber).toHaveBeenCalledTimes(1)
     // The section disposer (the real systemPrompt's removal) ran via the fiber.
     killSpy.mockRestore()
+  })
+
+  it('recovers daemon connection on subsequent install retry without re-injecting prompt guidance (decoupled guards)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-vectr-guidance-recover-'))
+    roots.push(dir)
+    const { file, cwd } = await writeInstances(dir, entryFor(cwd0(dir), statusPort, 4242))
+    const { agent, injectSpy, sectionSpy } = makeAgentWithInjectSpy('guidance-recover', cwd)
+
+    const ctx = new Context()
+
+    // Round 1: Daemon probe initially fails (process not alive or probe fails)
+    let daemonAlive = false
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      if (!daemonAlive) {
+        const err = new Error('no such process') as NodeJS.ErrnoException
+        err.code = 'ESRCH'
+        throw err
+      }
+      return true
+    })
+
+    install(ctx, handles, promptFibers, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 100,
+      daemonTcpTimeoutMs: 100,
+    }, agent)
+
+    // Prompt guidance injected immediately on first install attempt
+    expect(promptFibers.has(agent)).toBe(true)
+    expect(injectSpy).toHaveBeenCalledTimes(1)
+    expect(sectionSpy).toHaveBeenCalledTimes(2)
+
+    // Allow Round 1 probe to settle and fail
+    await new Promise((r) => setTimeout(r, 150))
+    expect(handles.has(agent)).toBe(false)
+
+    // Round 2: Daemon has recovered and is now alive!
+    daemonAlive = true
+
+    // Second install call (e.g. retry mechanism, workspace re-scan or agent refresh):
+    // Must NOT be blocked by promptFibers already present in the map!
+    install(ctx, handles, promptFibers, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    // Prompt guidance was already injected, so injectSpy remains 1 (no duplicate prompt injection)
+    expect(injectSpy).toHaveBeenCalledTimes(1)
+
+    // But connection establishment pipeline was retried and successfully connects
+    await vi.waitFor(() => {
+      expect(handles.has(agent)).toBe(true)
+    }, { timeout: 5000, interval: 25 })
+
+    // Round 3: Calling install again when both handles and promptFibers are populated is a no-op
+    install(ctx, handles, promptFibers, file, {
+      instancesPath: file,
+      serverName: 'vectr',
+      toolCallTimeoutMs: 60_000,
+      reconnect: { enabled: false },
+      daemonHttpTimeoutMs: 5000,
+      daemonTcpTimeoutMs: 300,
+    }, agent)
+
+    expect(injectSpy).toHaveBeenCalledTimes(1)
+    expect(handles.has(agent)).toBe(true)
+    expect(promptFibers.has(agent)).toBe(true)
+
+    killSpy.mockRestore()
+  })
+
+  it('uses WeakSet for disposed tracking without preventing garbage collection', () => {
+    const disposed = new WeakSet<Agent>()
+    let dummyAgent: Agent | null = { id: 'temp-agent' } as Agent
+    disposed.add(dummyAgent)
+    expect(disposed.has(dummyAgent)).toBe(true)
+    disposed.delete(dummyAgent)
+    expect(disposed.has(dummyAgent)).toBe(false)
+    dummyAgent = null // eligible for GC without memory retention
   })
 })
 

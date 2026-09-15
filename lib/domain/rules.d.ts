@@ -37,12 +37,29 @@ export interface HasCodebaseInput {
     codebases?: CodebaseEntry[] | null | undefined;
 }
 /**
+ * Normalize directory path by trimming whitespace and stripping trailing slashes.
+ * Preserves the root path '/' if it is exactly '/'.
+ */
+export declare function normalizePath(p?: string | null): string;
+/**
+ * Check if an active workspace matches a target codebase path or workspace.
+ * Supports exact match and subdirectory workspace match (e.g. workspace is
+ * a subfolder of the target codebase root).
+ */
+export declare function isWorkspaceMatch(ws: string, target?: string | null): boolean;
+/**
+ * Validate that an InstanceEntry possesses valid structural types and runtime values.
+ */
+export declare function isValidInstanceEntry(entry: unknown): entry is InstanceEntry;
+/**
  * Pure domain rule to determine whether a workspace is associated with a codebase.
  *
  * Rules:
  * - If workspace is empty/null/undefined, returns false.
- * - If entry is present (truthy), returns true.
- * - If codebases array has any item whose workspace matches workspace, returns true.
+ * - Normalizes paths with trailing slash tolerance (trim().replace(/\/+$/, '')).
+ * - Supports subdirectory workspace match (ws === target || ws.startsWith(target + '/')).
+ * - Validates entry type safety and matches entry.workspace against workspace.
+ * - Checks codebases array matching against either item.path or item.workspace.
  * - Otherwise returns false.
  */
 export declare function hasCodebase(input: HasCodebaseInput): boolean;
