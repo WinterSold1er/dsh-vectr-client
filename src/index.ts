@@ -666,6 +666,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
   ctx.on('agent/created', ({ agent }) => {
     install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles)
+    return undefined
   })
   ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)

@@ -45,8 +45,8 @@ export const DEFAULT_TUNNEL_PROBE_MS = 800
  * `ensureTunnelUp` allocate from this same window so the forwarded
  * Streamable-HTTP endpoints stay in one predictable band. Shared as a constant
  * so the two call sites cannot drift apart. */
-export const TUNNEL_PORT_MIN = (process.env.VECTR_TUNNEL_PORT_MIN ? parseInt(process.env.VECTR_TUNNEL_PORT_MIN, 10) : undefined) || 8760
-export const TUNNEL_PORT_MAX = (process.env.VECTR_TUNNEL_PORT_MAX ? parseInt(process.env.VECTR_TUNNEL_PORT_MAX, 10) : undefined) || 8799
+export const TUNNEL_PORT_MIN = (process.env.VECTR_TUNNEL_PORT_MIN ? parseInt(process.env.VECTR_TUNNEL_PORT_MIN, 10) : undefined) || 8900
+export const TUNNEL_PORT_MAX = (process.env.VECTR_TUNNEL_PORT_MAX ? parseInt(process.env.VECTR_TUNNEL_PORT_MAX, 10) : undefined) || 8999
 
 /**
  * Secret store seam. Implemented either by a wrapper over `ctx.credentials`
@@ -1046,11 +1046,13 @@ async function healTunnelOnce(
   // reopen (a dead forward bound to an agent is the silent-dead defect).
   const masterUp = (await probeTunnel(entry, deps)).alive
   if (masterUp) {
-    if (entry.localPort !== undefined
-      && await isPortListening('127.0.0.1', entry.localPort, DEFAULT_TUNNEL_PROBE_MS)) {
+    const inRange = entry.localPort !== undefined
+      && entry.localPort >= TUNNEL_PORT_MIN
+      && entry.localPort <= TUNNEL_PORT_MAX
+    if (inRange && await isPortListening('127.0.0.1', entry.localPort!, DEFAULT_TUNNEL_PROBE_MS)) {
       return { entry, healed: false }
     }
-    // Master up but the forward is dead: cleanly exit the stale master so the
+    // Master up but the forward is dead or outside tunnel port range: cleanly exit the stale master so the
     // reopen below binds a fresh one instead of colliding with the still-alive
     // process (which would otherwise refuse its socket / leak the old master).
     if (entry.tunnelCtl !== undefined && entry.host !== undefined) {
@@ -1116,13 +1118,18 @@ async function healTunnelOnce(
     }
   }
 
-  // Reuse the existing localPort when still free; otherwise allocate a fresh
-  // one and record it so every consumer sees the new endpoint. The "port
-  // occupied" trigger is gated on `!masterUp` (already true here) so a
-  // healthy-but-listening localPort is never mistaken for a collision and
-  // reallocated.
+  // Reuse the existing localPort when still free and inside the configured
+  // tunnel window; otherwise allocate a fresh one and record it so every
+  // consumer sees the new endpoint. The "port occupied" trigger is gated on
+  // `!masterUp` (already true here) so a healthy-but-listening localPort is
+  // never mistaken for a collision and reallocated.
   let localPort = entry.localPort
-  if (localPort === undefined || (!masterUp && await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS))) {
+  if (
+    localPort === undefined
+    || localPort < TUNNEL_PORT_MIN
+    || localPort > TUNNEL_PORT_MAX
+    || (!masterUp && await isPortListening('127.0.0.1', localPort, DEFAULT_TUNNEL_PROBE_MS))
+  ) {
     const fresh = await findFreePort(TUNNEL_PORT_MIN, TUNNEL_PORT_MAX, new Set([...inProgressLocalPorts, ...(localPort !== undefined ? [localPort] : [])]), deps.warn)
     if (fresh === undefined) {
       const msg = `tunnel down: no free local port in range ${TUNNEL_PORT_MIN}-${TUNNEL_PORT_MAX}`
