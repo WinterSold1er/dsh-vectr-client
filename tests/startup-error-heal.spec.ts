@@ -106,15 +106,14 @@ afterEach(async () => {
 })
 
 describe('startupHealEligible — (b) heal predicate', () => {
-  it('heals remote entries in up (legacy), down, and error states', () => {
+  // Type-independent on purpose: BOTH shapes are healable now. `remote` goes to
+  // `ensureTunnelUp`; `local` goes to `healLocalCodebase` (probe → `vectr start`,
+  // which reuses the port the dead registry entry still records). Before this,
+  // local daemons were excluded and a host restart left every workspace with a
+  // permanently offline daemon and no recovery path.
+  it('heals persisted entries in up (legacy), down, and error states, for local and remote alike', () => {
     for (const status of ['up', 'down', 'error'] as const) {
-      expect(startupHealEligible({ type: 'remote', status })).toBe(true)
-    }
-  })
-
-  it('never heals local entries (no tunnel to heal)', () => {
-    for (const status of ['up', 'down', 'error'] as const) {
-      expect(startupHealEligible({ type: 'local', status })).toBe(false)
+      expect(startupHealEligible({ status })).toBe(true)
     }
   })
 })

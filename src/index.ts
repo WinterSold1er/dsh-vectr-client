@@ -46,6 +46,7 @@ import {
   deleteCodebase,
   ensureTunnelUp,
   FileCredentialStore,
+  healLocalCodebase,
   loadCodebases,
   migrateCodebases,
   patchCodebase,
@@ -55,6 +56,7 @@ import {
   type CodebaseEntry,
   type CodebaseSpec,
   type CredentialStore,
+  type DaemonAliveProbe,
   type SpawnHandle,
   type SpawnRunner,
   type SshRunner,
@@ -63,6 +65,7 @@ import {
   DEFAULT_INSTANCES_FILE,
   DEFAULT_HOST,
   resolveInstance,
+  resolveInstanceExact,
   readInstancesFile,
   WORKSPACE_KEY_LENGTH,
   type InstancesFile,
@@ -85,13 +88,14 @@ export * from './bridge'
 // Re-export the registry/probe surface so existing importers (and tests) keep
 // resolving these symbols from the plugin root without the index↔workspaces cycle.
 export { isDaemonAlive, isPortListening } from './probe'
-export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry'
+export { readInstancesFile, resolveInstance, resolveInstanceExact, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry'
 export type { InstanceEntry, InstancesFile } from './registry'
 
-// Re-export the tunnel self-heal surface (问题1B) so callers/tests resolve it
-// from the plugin root, and so the built artifact provably contains it.
-export { ensureTunnelUp, probeTunnel, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
-export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codebases'
+// Re-export the tunnel self-heal surface (问题1B) and the local-daemon startup
+// heal so callers/tests resolve them from the plugin root, and so the built
+// artifact provably contains them.
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases'
 
 /** Return a shallow copy with the credential ref omitted (no secret leaks). */
 function stripSecret(entry: CodebaseEntry): CodebaseEntry {
@@ -198,18 +202,52 @@ export const STARTUP_HEAL_COOLDOWN_MS = 30_000
  * restart resets the map (one fresh attempt per slug per host lifetime). */
 const startupHealCooldown = new Map<string, number>()
 
-/** (b) Startup-heal scope: which persisted entries get an automatic
- * `ensureTunnelUp` attempt at host startup. `up` keeps its legacy behavior;
- * `down` and `error` are the previously-deadlocked states that were only
- * surfaced to the user and never automatically recovered. `local` entries
- * have no tunnel to heal. */
+/** (b) Startup-heal scope: which persisted entries get an automatic heal attempt
+ * at host startup. `up` keeps its legacy behavior — the daemon/tunnel can die
+ * while the host stays up and the meta keeps claiming `up`; `down` and `error`
+ * are the previously-deadlocked states that were only surfaced to the user and
+ * never automatically recovered. Both shapes are healable now:
+ *
+ *  - `remote` → {@link ensureTunnelUp} reopens the ssh tunnel.
+ *  - `local`  → {@link healLocalCodebase} restarts the vectr daemon when its
+ *    port is dead. A host restart SIGTERMs every daemon inside the service
+ *    cgroup, and previously nothing ever started them again.
+ */
 export function startupHealEligible(
-  entry: Pick<CodebaseEntry, 'type' | 'status'>,
+  entry: Pick<CodebaseEntry, 'status'>,
 ): boolean {
-  return (
-    entry.type === 'remote' &&
-    (entry.status === 'up' || entry.status === 'down' || entry.status === 'error')
-  )
+  return entry.status === 'up' || entry.status === 'down' || entry.status === 'error'
+}
+
+/**
+ * Liveness probe handed to {@link healLocalCodebase} at host startup. Reuses the
+ * same process+HTTP diagnosis as the console scan (`diagnoseDaemon`), so a daemon
+ * that holds its port but hangs on HTTP counts as dead and gets restarted
+ * instead of shadowing a broken endpoint. A probe that throws is reported and
+ * treated as dead — the restart path, not silence.
+ * @param ctx - plugin context (logger).
+ * @param config - resolved plugin configuration (probe budgets).
+ * @returns the injected {@link DaemonAliveProbe}.
+ */
+function daemonAliveProbe(ctx: Context, config: Required<Config>): DaemonAliveProbe {
+  return async ({ host, port }) => {
+    try {
+      // `workspace` is unused by the probe path (no pid → TCP + HTTP only), so
+      // the endpoint itself is passed rather than inventing a workspace.
+      const { alive } = await diagnoseDaemon(
+        { workspace: host, port, host },
+        {
+          httpProbe: fetchStatus,
+          httpTimeoutMs: config.daemonHttpTimeoutMs,
+          tcpTimeoutMs: config.daemonTcpTimeoutMs,
+        },
+      )
+      return alive
+    } catch (error) {
+      ctx.logger.warn(`vectr-client: local daemon probe failed for ${host}:${port}: ${String(error)}`)
+      return false
+    }
+  }
 }
 
 const Reconnect: z<ReconnectConfig> = z.object({
@@ -632,9 +670,32 @@ export function apply(ctx: Context, config: Config = {}): void {
   // include 'down' and 'error' entries (legacy 'up' behavior preserved),
   // gated by a per-slug cooldown so a persistently-unreachable host is not
   // hammered on every host restart.
+  //
+  // LOCAL daemons get the same treatment through `healLocalCodebase`: dsh runs
+  // inside `deepseek-harness.service`, so a host restart SIGTERMs every daemon
+  // in that cgroup (KillMode=control-group) while `~/.vectr/instances.json` and
+  // this metadata keep the dead pid/`up` status. Before this, nothing ever
+  // started them again and every workspace showed "daemon offline" forever.
+  // `vectr start` is called without `--port` so vectr reuses the port the dead
+  // registry entry still records — the already-published MCP URL survives.
   try {
     const deps = buildCodebaseDeps(ctx, resolved.secretsPath)
     const now = Date.now()
+    // Exact-match registry view for local port reconciliation, read once. It must
+    // be `resolveInstanceExact`, never `resolveInstance`: the latter's prefix
+    // match would hand every record-less codebase the enclosing `/home/csy`
+    // daemon's port and silently bind it to the wrong workspace's index.
+    let startupInstances: InstancesFile | undefined
+    try {
+      startupInstances = readInstancesFile(ctx, instancesPath)
+    } catch (error) {
+      ctx.logger.warn(`vectr-client: cannot read daemon registry at ${instancesPath} (${String(error)}); local codebase ports will not be reconciled`)
+    }
+    const recordedPortOf = (workspace: string): number | undefined => {
+      if (startupInstances === undefined) return undefined
+      const live = resolveInstanceExact(startupInstances, workspace)
+      return typeof live?.port === 'number' ? live.port : undefined
+    }
     for (const entry of loadCodebases(codebasesPath)) {
       if (!startupHealEligible(entry)) continue
       // Cooldown: skip if we already attempted this slug too recently. The
@@ -643,9 +704,28 @@ export function apply(ctx: Context, config: Config = {}): void {
       const lastAttempt = startupHealCooldown.get(entry.slug)
       if (lastAttempt !== undefined && now - lastAttempt < STARTUP_HEAL_COOLDOWN_MS) continue
       startupHealCooldown.set(entry.slug, now)
-      void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
-        ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
-      })
+      if (entry.type === 'remote') {
+        void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
+          ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
+        })
+      } else {
+        // Local daemon: a host restart SIGTERMs every daemon in this service's
+        // cgroup and nothing used to start them again. Heal reconciles the
+        // metadata port against the daemon registry first, then probes, so a
+        // live daemon (and the sessions using its port) is never disturbed.
+        void healLocalCodebase(deps, codebasesPath, entry, daemonAliveProbe(ctx, resolved), recordedPortOf)
+          .then((result) => {
+            if (result === 'reconciled') {
+              ctx.logger.info(`vectr-client: corrected stale port for local codebase ${entry.slug} from the daemon registry`)
+            }
+            if (result === 'started') {
+              ctx.logger.info(`vectr-client: restarted local vectr daemon for ${entry.slug}`)
+            }
+          })
+          .catch((err) => {
+            ctx.logger.warn(`vectr-client: could not restart local vectr daemon for ${entry.slug}: ${String(err)}`)
+          })
+      }
     }
   } catch (err) {
     ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
