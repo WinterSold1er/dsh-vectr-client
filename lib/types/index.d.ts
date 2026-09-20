@@ -28,10 +28,10 @@ export * from './domain';
 export * from './infra';
 export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
-export { readInstancesFile, resolveInstance, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
+export { readInstancesFile, resolveInstance, resolveInstanceExact, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
-export { ensureTunnelUp, probeTunnel, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
-export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts } from './codebases';
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases';
 /**
  * Local structural view of the host `webServer` service this plugin registers
  * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is
@@ -112,12 +112,18 @@ export declare const DEFAULT_UPGRADE_TIMEOUT_MS = 15000;
  * Prevents a persistently-unreachable host from being hammered on every host
  * restart while still leaving room for transient blips to recover. */
 export declare const STARTUP_HEAL_COOLDOWN_MS = 30000;
-/** (b) Startup-heal scope: which persisted entries get an automatic
- * `ensureTunnelUp` attempt at host startup. `up` keeps its legacy behavior;
- * `down` and `error` are the previously-deadlocked states that were only
- * surfaced to the user and never automatically recovered. `local` entries
- * have no tunnel to heal. */
-export declare function startupHealEligible(entry: Pick<CodebaseEntry, 'type' | 'status'>): boolean;
+/** (b) Startup-heal scope: which persisted entries get an automatic heal attempt
+ * at host startup. `up` keeps its legacy behavior — the daemon/tunnel can die
+ * while the host stays up and the meta keeps claiming `up`; `down` and `error`
+ * are the previously-deadlocked states that were only surfaced to the user and
+ * never automatically recovered. Both shapes are healable now:
+ *
+ *  - `remote` → {@link ensureTunnelUp} reopens the ssh tunnel.
+ *  - `local`  → {@link healLocalCodebase} restarts the vectr daemon when its
+ *    port is dead. A host restart SIGTERMs every daemon inside the service
+ *    cgroup, and previously nothing ever started them again.
+ */
+export declare function startupHealEligible(entry: Pick<CodebaseEntry, 'status'>): boolean;
 export declare const Config: z<Config>;
 /**
  * System-prompt section contributed to each agent when its vectr daemon is

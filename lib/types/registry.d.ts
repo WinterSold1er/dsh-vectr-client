@@ -35,6 +35,21 @@ export declare const DEFAULT_INSTANCES_FILE: string;
  */
 export declare function resolveInstance(instances: InstancesFile, cwd: string): InstanceEntry | undefined;
 /**
+ * EXACT-match instance lookup: the sha256(workspace)[:12] key first, then a
+ * trailing-slash-tolerant EQUALITY match on the stored workspace path.
+ *
+ * Deliberately not {@link resolveInstance}: that one also accepts a cwd nested
+ * inside a recorded workspace (prefix match), which is right for binding an
+ * agent but catastrophic for port reconciliation — a codebase with no record of
+ * its own would be silently rewritten to the enclosing `/home/csy` daemon's port
+ * and then bind to the wrong workspace's index.
+ *
+ * @param instances - parsed `instances.json` records.
+ * @param workspace - absolute workspace path to match exactly.
+ * @returns the exactly matching daemon record, or `undefined`.
+ */
+export declare function resolveInstanceExact(instances: InstancesFile, workspace: string): InstanceEntry | undefined;
+/**
  * Read and parse the vectr daemon registry file. A missing file means "no
  * vectr daemons"; a present-but-unparseable file is a misconfiguration and
  * fails loud (the caller decides whether to skip or throw).

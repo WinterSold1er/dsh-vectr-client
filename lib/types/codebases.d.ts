@@ -264,6 +264,97 @@ export interface EnsureTunnelResult {
     /** Diagnostic when the tunnel could not be brought up (and status was downgraded). */
     error?: string;
 }
+/** Result of a local daemon (re)start performed by {@link startLocalDaemon}. */
+export interface LocalDaemonStartOutcome {
+    /** Slug of the codebase whose daemon was started. */
+    slug: string;
+    /** Port the daemon actually bound. */
+    port: number;
+    /** `true` when the daemon came back on a DIFFERENT port than the recorded one. */
+    portChanged: boolean;
+    /** The recorded port before the restart; `undefined` when none was recorded. */
+    previousPort: number | undefined;
+}
+/**
+ * Probe seam for {@link healLocalCodebase}: `true` when a daemon already answers
+ * on this endpoint. Injected so the heal decision is unit-testable without a
+ * real socket (NFR3).
+ */
+export type DaemonAliveProbe = (endpoint: {
+    host: string;
+    port: number;
+}) => Promise<boolean>;
+/**
+ * Verdict of one local-daemon startup heal.
+ * - `alive`       — a daemon already answered; nothing was spawned.
+ * - `reconciled`  — the metadata port disagreed with the daemon registry and was
+ *                   corrected to the registry's port (no daemon restart).
+ * - `started`     — the endpoint was dead and `vectr start` brought it back.
+ */
+export type LocalHealResult = 'alive' | 'reconciled' | 'started';
+/**
+ * Registry lookup for {@link healLocalCodebase}: the port `~/.vectr/instances.json`
+ * records for this workspace, or `undefined` when the registry has no record.
+ * The caller supplies the exact-match lookup — a prefix match would hand back the
+ * enclosing `/home/csy` daemon's port for every record-less codebase.
+ */
+export type RecordedPortLookup = (workspace: string) => number | undefined;
+/**
+ * Host-startup self-heal for ONE local codebase: make its recorded endpoint both
+ * CORRECT and ALIVE. This is the fix for the defect where a host restart
+ * SIGTERMs every daemon in its cgroup and nothing ever started them again — the
+ * metadata kept claiming `status:'up'` while the port stayed closed forever.
+ *
+ * Two ordered steps:
+ *
+ *  1. RECONCILE (only when `recordedPort` is injected). `vectr-codebases.json`
+ *     can drift from `~/.vectr/instances.json` — a codebase created when the
+ *     daemon bound port A keeps saying A after vectr has since rebound that
+ *     workspace to port B, and port A may by then host a DIFFERENT workspace's
+ *     daemon (observed: `demo_twoplus` recorded 8765 while 8765 served
+ *     `/home/csy`). Binding that URL points the codebase MCP at the wrong
+ *     index, so the registry wins and the metadata is rewritten. No daemon is
+ *     restarted here.
+ *  2. LIVENESS. If the (now correct) endpoint answers, return without touching
+ *     it — restarting a live daemon would steal the port from the sessions using
+ *     it. Only a dead endpoint is started, through {@link startLocalDaemon},
+ *     which reuses the recorded port.
+ *
+ * @param deps - injected runners / warn sink.
+ * @param metaPath - metadata file to persist a corrected port or a restart into.
+ * @param entry - the persisted LOCAL entry to check.
+ * @param probe - injected liveness probe (see {@link DaemonAliveProbe}).
+ * @param recordedPort - injected exact-match registry lookup (see
+ *   {@link RecordedPortLookup}); omit to skip reconciliation entirely.
+ * @returns `'alive'`, `'reconciled'`, or `'started'`.
+ * @throws when the daemon was dead and could not be started; metadata is
+ *   untouched by the failed start (a completed reconciliation still persists).
+ */
+export declare function healLocalCodebase(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry, probe: DaemonAliveProbe, recordedPort?: RecordedPortLookup): Promise<LocalHealResult>;
+/**
+ * (Re)start one LOCAL vectr daemon and record the port it bound.
+ *
+ * PORT STABILITY IS THE WHOLE POINT (the reason an existing session keeps
+ * working across a host restart): `vectr start` runs WITHOUT `--port` and
+ * WITHOUT `--strict-port`, so vectr's own `find_free_port(ws_hash, …)` can
+ * reuse the port the dead registry entry still records for this workspace
+ * (UPG-RESTART-PORT-WALK-BREAKS-MCP). The already-published MCP URL
+ * (`http://127.0.0.1:<localPort>/mcp`) therefore survives; only a port that is
+ * genuinely held by some OTHER process makes the daemon walk to a new one — and
+ * that case is reported through `deps.warn` because sessions bound to the old
+ * port cannot follow it.
+ *
+ * `status` is moved back to `'up'` and `error` cleared only AFTER `vectr start`
+ * reports a bound port; a failure throws with the child's stderr and leaves the
+ * metadata file untouched (no lying status).
+ *
+ * @param deps - injected runners (a `spawnRunner` that executes `vectr`).
+ * @param metaPath - metadata file to persist the new port/status into.
+ * @param entry - the persisted LOCAL entry to (re)start.
+ * @returns the bound port plus whether it drifted from the recorded one.
+ * @throws when the entry is not local, has no path, or `vectr start` fails.
+ */
+export declare function startLocalDaemon(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<LocalDaemonStartOutcome>;
 /**
  * Ensure a remote codebase's SSH tunnel is up, reopening it when dead. This is
  * the self-healing fix for the "tunnel died, `status:'up'` lied" production
