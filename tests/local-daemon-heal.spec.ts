@@ -348,11 +348,12 @@ describe('resolveInstanceExact — exact matching only', () => {
   })
 
   it('never returns the enclosing workspace record (the prefix-match trap)', () => {
-    // `resolveInstance` WOULD return this for a nested path; that would rewrite
-    // every record-less codebase to /home/csy's port.
+    // `resolveInstanceExact` and `resolveInstance` must NEVER return the homedir
+    // daemon for a nested path under home; that was the prefix-match trap that
+    // hijacked separate codebases to /home/csy's port.
     const instances = { 476237743879: { workspace: '/home/csy', port: 8765 } }
     expect(resolveInstanceExact(instances, '/home/csy/Work/twoplus')).toBeUndefined()
-    expect(resolveInstance(instances, '/home/csy/Work/twoplus')?.port).toBe(8765)
+    expect(resolveInstance(instances, '/home/csy/Work/twoplus')).toBeUndefined()
   })
 
   it('returns undefined when nothing matches', () => {

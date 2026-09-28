@@ -2,7 +2,7 @@
   "servers": {
     "vectr": {
       "type": "http",
-      "url": "http://localhost:8766/mcp"
+      "url": "http://localhost:8770/mcp"
     }
   }
 }

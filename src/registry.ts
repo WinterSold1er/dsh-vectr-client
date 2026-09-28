@@ -51,16 +51,33 @@ export function resolveInstance(instances: InstancesFile, cwd: string): Instance
   if (exact !== undefined) return exact
   const normalizedCwd = cwd.endsWith('/') ? cwd.slice(0, -1) : cwd
   const candidates = Object.values(instances)
-  const prefix = candidates.find(entry => {
-    const stored = entry.workspace.endsWith('/') ? entry.workspace.slice(0, -1) : entry.workspace
-    return stored.length > 0 && (normalizedCwd === stored || normalizedCwd.startsWith(`${stored}/`))
-  })
-  if (prefix !== undefined) return prefix
+
+  // Exact string match on stored workspace path has priority over prefix matches
   const exactWorkspace = candidates.find(entry => {
     const stored = entry.workspace.endsWith('/') ? entry.workspace.slice(0, -1) : entry.workspace
     return stored === normalizedCwd
   })
-  return exactWorkspace
+  if (exactWorkspace !== undefined) return exactWorkspace
+
+  // Longest-prefix match for nested subdirectories inside a registered project.
+  // Exclude user homedir from prefix matching: a daemon for ~/ (typically memory-only)
+  // must never hijack separate projects under ~/Code, ~/Work, etc.
+  const home = homedir()
+  const normalizedHome = home.endsWith('/') ? home.slice(0, -1) : home
+  const sortedPrefixCandidates = candidates
+    .map(entry => ({
+      entry,
+      stored: entry.workspace.endsWith('/') ? entry.workspace.slice(0, -1) : entry.workspace,
+    }))
+    .filter(({ stored }) => stored.length > 0 && stored !== normalizedHome)
+    .sort((a, b) => b.stored.length - a.stored.length)
+
+  const prefixMatch = sortedPrefixCandidates.find(({ stored }) =>
+    normalizedCwd.startsWith(`${stored}/`),
+  )
+  if (prefixMatch !== undefined) return prefixMatch.entry
+
+  return undefined
 }
 
 /**

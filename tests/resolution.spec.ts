@@ -5,7 +5,7 @@
  */
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, afterEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -63,6 +63,29 @@ describe('resolveInstance', () => {
   it('returns undefined when no entry matches (the skip path)', () => {
     expect(resolveInstance(instances, '/home/u/work/elsewhere')).toBeUndefined()
     expect(resolveInstance({}, workspaces.alpha)).toBeUndefined()
+  })
+
+  it('does not allow homedir to prefix-match subdirectories under home', () => {
+    const home = homedir()
+    const homeInstances: InstancesFile = {
+      [keyOf(home)]: entry(home, 8765),
+    }
+    // Exact match on homedir itself matches
+    expect(resolveInstance(homeInstances, home)?.port).toBe(8765)
+    // A subdirectory under homedir should NOT be hijacked by the homedir daemon
+    expect(resolveInstance(homeInstances, join(home, 'projects', 'foo'))).toBeUndefined()
+  })
+
+  it('prioritizes longest prefix match over shorter prefix match', () => {
+    const parent = '/home/u/work'
+    const child = '/home/u/work/alpha'
+    const nested = '/home/u/work/alpha/src/components'
+    const multiInstances: InstancesFile = {
+      // Put parent first in map to test ordering resilience
+      [keyOf(parent)]: entry(parent, 8760),
+      [keyOf(child)]: entry(child, 8765),
+    }
+    expect(resolveInstance(multiInstances, nested)?.port).toBe(8765)
   })
 })
 
