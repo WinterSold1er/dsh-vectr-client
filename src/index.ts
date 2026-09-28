@@ -51,6 +51,7 @@ import {
   migrateCodebases,
   patchCodebase,
   CodebaseError,
+  startCodebaseDaemon,
   testCodebase,
   UNASSIGNED_WORKSPACE,
   type CodebaseEntry,
@@ -94,8 +95,8 @@ export type { InstanceEntry, InstancesFile } from './registry'
 // Re-export the tunnel self-heal surface (问题1B) and the local-daemon startup
 // heal so callers/tests resolve them from the plugin root, and so the built
 // artifact provably contains them.
-export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
-export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases'
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, RemoteDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases'
 
 /** Return a shallow copy with the credential ref omitted (no secret leaks). */
 function stripSecret(entry: CodebaseEntry): CodebaseEntry {
@@ -255,7 +256,7 @@ const Reconnect: z<ReconnectConfig> = z.object({
   initialDelayMs: z.number().min(1).default(500),
   maxDelayMs: z.number().min(1).default(30_000),
   maxAttempts: z.number().step(1).min(1).default(10),
-})
+}) as unknown as z<ReconnectConfig>
 
 export const Config: z<Config> = z.object({
   instancesPath: z.string().default(DEFAULT_INSTANCES_FILE),
@@ -270,7 +271,7 @@ export const Config: z<Config> = z.object({
   cliTimeoutMs: z.number().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
   recallTimeoutMs: z.number().min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
   upgradeTimeoutMs: z.number().min(1).default(DEFAULT_UPGRADE_TIMEOUT_MS),
-})
+}) as unknown as z<Config>
 
 /**
  * System-prompt section contributed to each agent when its vectr daemon is
@@ -1377,6 +1378,20 @@ export function registerCodebaseRoutes(
         // error) rather than silently reporting the persisted-but-false 'up'.
         const result = await testCodebase(entry, { deps, metaPath: codebasesPath, heal: true })
         sendJson(res, result.ok ? 200 : 503, result)
+        return
+      }
+      if (req.method === 'POST' && (url.pathname.endsWith('/start') || url.pathname.endsWith('/start-daemon'))) {
+        if (isSystemPrimarySlug(normSlug)) {
+          sendJson(res, 400, { ok: false, error: 'Cannot start primary codebase via this endpoint' })
+          return
+        }
+        const entry = find()
+        if (entry === undefined) {
+          sendJson(res, 404, { ok: false, error: 'no such codebase' })
+          return
+        }
+        const result = await startCodebaseDaemon(deps, codebasesPath, entry)
+        sendJson(res, result.ok ? 200 : 500, result)
         return
       }
       if (req.method === 'PATCH') {

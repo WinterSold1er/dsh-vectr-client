@@ -1398,6 +1398,153 @@ function downgrade(metaPath: string, entry: CodebaseEntry, msg: string): void {
   }
 }
 
+export interface RemoteDaemonStartOutcome {
+  slug: string
+  localPort: number
+  remotePort: number
+  portChanged: boolean
+  previousPort: number | undefined
+}
+
+/**
+ * Start or restart the remote vectr daemon and ensure the local SSH tunnel forwards to it.
+ *
+ * 1. Invokes `vectr start <path> --host 127.0.0.1` on the remote host over SSH.
+ * 2. Resolves the remote daemon port (via instances.json or stdout scrape).
+ * 3. Tears down stale tunnel if remotePort changed.
+ * 4. Ensures SSH tunnel is alive (via ensureTunnelUp).
+ * 5. Probes HTTP /v1/status through the forwarded port.
+ * 6. Persists status: 'up' and clears any error.
+ */
+export async function startRemoteDaemon(
+  deps: CodebaseDeps,
+  metaPath: string,
+  entry: CodebaseEntry,
+): Promise<RemoteDaemonStartOutcome> {
+  if (entry.type !== 'remote') {
+    throw new Error(`startRemoteDaemon: ${entry.slug} is not a remote codebase`)
+  }
+  if (typeof entry.host !== 'string' || entry.host.length === 0) {
+    throw new Error(`startRemoteDaemon: ${entry.slug} has no host configured`)
+  }
+  if (typeof entry.path !== 'string' || entry.path.length === 0) {
+    throw new Error(`startRemoteDaemon: ${entry.slug} has no path configured`)
+  }
+
+  let auth: SshAuthContext | undefined
+  if (entry.credentialRef !== undefined) {
+    const pw = await deps.credStore.get(entry.credentialRef)
+    if (typeof pw === 'string' && pw.length > 0) auth = { password: pw }
+  }
+  const ssh = (args: string[]): SpawnHandle => deps.sshRunner(args, auth)
+
+  // 1) Start remote daemon bound to loopback
+  const start = ssh(remoteShellCmd(entry.host, `vectr start ${entry.path} --host 127.0.0.1`))
+  const startResult = await start.promise
+  if (startResult.signal !== null) {
+    const msg = `vectr start on ${entry.host} was killed (${startResult.signal})`
+    downgrade(metaPath, entry, msg)
+    throw new Error(msg)
+  }
+  if (startResult.code !== 0) {
+    const msg = `failed to start vectr on ${entry.host}: ${startResult.stderr || startResult.stdout}`
+    downgrade(metaPath, entry, msg)
+    throw new Error(msg)
+  }
+
+  // 2) Resolve remote port
+  const previousRemotePort = entry.remotePort
+  const resolvedRemotePort =
+    (await resolveRemotePort(ssh, entry.host, entry.path)) ??
+    parseRemotePort(startResult.stdout) ??
+    previousRemotePort
+
+  if (resolvedRemotePort === undefined) {
+    const msg = `could not resolve remote vectr daemon port on ${entry.host} for ${entry.path}`
+    downgrade(metaPath, entry, msg)
+    throw new Error(msg)
+  }
+
+  // 3) If existing tunnel points to a different remotePort, tear down existing master
+  const remotePortChanged = previousRemotePort !== undefined && previousRemotePort !== resolvedRemotePort
+  if (remotePortChanged && entry.tunnelCtl !== undefined && entry.host !== undefined) {
+    try {
+      await deps.sshRunner(['-o', 'ConnectTimeout=5', '-O', 'exit', '-S', entry.tunnelCtl, entry.host], auth).promise
+    } catch {
+      // best-effort
+    }
+  }
+
+  entry = { ...entry, remotePort: resolvedRemotePort }
+
+  // 4) Ensure tunnel is up
+  const tunnelRes = await ensureTunnelUp(deps, metaPath, entry)
+  if (!tunnelRes.healed && tunnelRes.error !== undefined) {
+    throw new Error(tunnelRes.error)
+  }
+  entry = tunnelRes.entry
+
+  if (entry.localPort === undefined) {
+    const msg = 'tunnel down: no local port configured after tunnel setup'
+    downgrade(metaPath, entry, msg)
+    throw new Error(msg)
+  }
+
+  // 5) Probe /v1/status through the tunnel
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 4000)
+  try {
+    const res = await fetch(`http://127.0.0.1:${entry.localPort}/v1/status`, { signal: controller.signal })
+    if (!res.ok) {
+      const msg = `remote daemon status check returned status ${res.status}`
+      downgrade(metaPath, entry, msg)
+      throw new Error(msg)
+    }
+  } catch (err) {
+    const msg = `remote daemon status check failed: ${String(err)}`
+    downgrade(metaPath, entry, msg)
+    throw new Error(msg)
+  } finally {
+    clearTimeout(timer)
+  }
+
+  // 6) Persist status 'up'
+  const next: CodebaseEntry = { ...entry, status: 'up' }
+  delete next.error
+  persist(metaPath, next)
+
+  return {
+    slug: entry.slug,
+    localPort: entry.localPort,
+    remotePort: resolvedRemotePort,
+    portChanged: remotePortChanged,
+    previousPort: previousRemotePort,
+  }
+}
+
+/**
+ * Start/heal daemon for any codebase (local or remote).
+ */
+export async function startCodebaseDaemon(
+  deps: CodebaseDeps,
+  metaPath: string,
+  entry: CodebaseEntry,
+): Promise<{ ok: boolean; slug: string; localPort: number; error?: string }> {
+  try {
+    if (entry.type === 'remote') {
+      const result = await startRemoteDaemon(deps, metaPath, entry)
+      return { ok: true, slug: result.slug, localPort: result.localPort }
+    } else if (entry.type === 'local') {
+      const result = await startLocalDaemon(deps, metaPath, entry)
+      return { ok: true, slug: result.slug, localPort: result.port }
+    } else {
+      throw new Error(`unsupported codebase type: ${(entry as CodebaseEntry).type}`)
+    }
+  } catch (error) {
+    return { ok: false, slug: entry.slug, localPort: entry.localPort ?? 0, error: String(error) }
+  }
+}
+
 /** Result of {@link migrateCodebases}. */
 export interface MigrateResult {
   /** `true` when at least one entry was rewritten (persisted). */
@@ -1518,6 +1665,9 @@ export async function testCodebase(
   opts?: TestCodebaseOpts,
 ): Promise<{ ok: boolean; status?: unknown; error?: string }> {
   if (entry.localPort === undefined) {
+    if (opts?.metaPath !== undefined) {
+      downgrade(opts.metaPath, entry, 'no local port configured')
+    }
     return { ok: false, error: 'no local port configured' }
   }
   // Self-heal the tunnel before probing (问题1B). A dead tunnel must not surface
@@ -1528,17 +1678,37 @@ export async function testCodebase(
       return { ok: false, error: res.error }
     }
     entry = res.entry
-    if (entry.localPort === undefined) return { ok: false, error: 'no local port configured' }
+    if (entry.localPort === undefined) {
+      if (opts.metaPath !== undefined) {
+        downgrade(opts.metaPath, entry, 'no local port configured')
+      }
+      return { ok: false, error: 'no local port configured' }
+    }
   }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 3000)
   try {
     const res = await fetch(`http://127.0.0.1:${entry.localPort}/v1/status`, { signal: controller.signal })
-    if (!res.ok) return { ok: false, error: `status ${res.status}` }
+    if (!res.ok) {
+      const msg = `status ${res.status}`
+      if (opts?.metaPath !== undefined) {
+        downgrade(opts.metaPath, entry, msg)
+      }
+      return { ok: false, error: msg }
+    }
     const status = await res.json()
+    if (opts?.metaPath !== undefined) {
+      const next: CodebaseEntry = { ...entry, status: 'up' }
+      delete next.error
+      persist(opts.metaPath, next)
+    }
     return { ok: true, status }
   } catch (error) {
-    return { ok: false, error: String(error) }
+    const msg = String(error)
+    if (opts?.metaPath !== undefined) {
+      downgrade(opts.metaPath, entry, msg)
+    }
+    return { ok: false, error: msg }
   } finally {
     clearTimeout(timer)
   }

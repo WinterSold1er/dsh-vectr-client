@@ -167,6 +167,7 @@ function TargetCell(props: { view: CodebaseView }): ReactNode {
 function CodebaseSubRow(props: {
   view: CodebaseView
   onTest: (slug: string, workspace?: string) => void
+  onStart?: ((slug: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busy: boolean
@@ -175,7 +176,7 @@ function CodebaseSubRow(props: {
   /** Workspaces available as assign targets. */
   knownWorkspaces: string[]
 }): ReactNode {
-  const { view, onTest, onDelete, onAssign, busy, showAssign, knownWorkspaces } = props
+  const { view, onTest, onStart, onDelete, onAssign, busy, showAssign, knownWorkspaces } = props
   const [assigning, setAssigning] = useState(false)
   const [target, setTarget] = useState(knownWorkspaces[0] ?? '')
   return (
@@ -204,10 +205,12 @@ function CodebaseSubRow(props: {
       <TargetCell view={view} />
       <td style={tdStyle}><StatusPill status={view.status} error={view.error} /></td>
       <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-        {/* flex + nowrap keeps test/delete/(assign) on one line; gap replaces
-            marginLeft so they never wrap when the column is squeezed (问题2). */}
+        {/* flex + nowrap keeps test/start/delete/(assign) on one line */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
           <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug, view.workspace)}>test</button>
+          {onStart && !view.isPrimary && (view.type === 'remote' || view.status !== 'up') && (
+            <button type="button" className={BTN.secondary} disabled={busy} title="自动拉起守护进程" onClick={() => onStart(view.slug)}>start</button>
+          )}
           <button
             type="button"
             className={BTN.danger}
@@ -246,13 +249,14 @@ function CodebaseSubRow(props: {
 function CodebaseSubTable(props: {
   entries: CodebaseView[]
   onTest: (slug: string, workspace?: string) => void
+  onStart?: ((slug: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busySlug: string | null
   showAssign: boolean
   knownWorkspaces: string[]
 }): ReactNode {
-  const { entries, onTest, onDelete, onAssign, busySlug, showAssign, knownWorkspaces } = props
+  const { entries, onTest, onStart, onDelete, onAssign, busySlug, showAssign, knownWorkspaces } = props
   return (
     <div style={{ margin: '4px 0 8px 18px' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 460 }}>
@@ -279,6 +283,7 @@ function CodebaseSubTable(props: {
                 key={view.slug}
                 view={view}
                 onTest={onTest}
+                onStart={onStart}
                 onDelete={onDelete}
                 onAssign={onAssign}
                 busy={busySlug === view.slug}
@@ -425,13 +430,14 @@ function WorkspaceRow(props: {
   onReindex: (port: number) => void
   busyPort: boolean
   onTest: (slug: string, workspace?: string) => void
+  onStart?: ((slug: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, ws: string) => void
   busySlug: string | null
   knownWorkspaces: string[]
   onCreated: () => void
 }): ReactNode {
-  const { view, entries, expanded, onToggle, onReindex, busyPort, onTest, onDelete, onAssign, busySlug, knownWorkspaces, onCreated } = props
+  const { view, entries, expanded, onToggle, onReindex, busyPort, onTest, onStart, onDelete, onAssign, busySlug, knownWorkspaces, onCreated } = props
   const disabledReason = reindexDisabledReason(view)
   const disabled = disabledReason !== undefined || busyPort
   const s = view.status
@@ -475,6 +481,7 @@ function WorkspaceRow(props: {
               <CodebaseSubTable
                 entries={entries}
                 onTest={onTest}
+                onStart={onStart}
                 onDelete={onDelete}
                 onAssign={onAssign}
                 busySlug={busySlug}
@@ -560,6 +567,7 @@ export function WorkspaceConsole(): ReactNode {
     const wsParam = ws ? `?workspace=${encodeURIComponent(ws)}` : ''
     run(slug, 'POST', `/test${wsParam}`, `tested ${slug}`)
   }
+  const start = (slug: string): void => run(slug, 'POST', '/start', `started ${slug}`)
   const del = (slug: string): void => run(slug, 'DELETE', '', `deleted ${slug}`)
   // Assign calls the real backend PATCH route (src/index.ts) to move a
   // codebase into a workspace; a 4xx from the host surfaces as a clear flash
@@ -667,6 +675,7 @@ export function WorkspaceConsole(): ReactNode {
                 onReindex={reindex}
                 busyPort={busyPort === view.port}
                 onTest={test}
+                onStart={start}
                 onDelete={del}
                 onAssign={assign}
                 busySlug={busySlug}
@@ -691,6 +700,7 @@ export function WorkspaceConsole(): ReactNode {
                 onReindex={() => { /* no daemon to re-index */ }}
                 busyPort={false}
                 onTest={test}
+                onStart={start}
                 onDelete={del}
                 onAssign={assign}
                 busySlug={busySlug}
@@ -713,6 +723,7 @@ export function WorkspaceConsole(): ReactNode {
             <CodebaseSubTable
               entries={unassigned}
               onTest={test}
+              onStart={start}
               onDelete={del}
               onAssign={assign}
               busySlug={busySlug}

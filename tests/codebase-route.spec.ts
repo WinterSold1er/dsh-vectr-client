@@ -137,6 +137,12 @@ describe('codebases routes with empty meta (404 branch)', () => {
     expect(JSON.parse(res.body)).toMatchObject({ ok: false, error: 'no such codebase' })
   })
 
+  it('POST /:slug/start returns 404 (find()===undefined branch)', async () => {
+    const res = await call('POST', '/api/vectr/codebases/ghost/start')
+    expect(res.code).toBe(404)
+    expect(JSON.parse(res.body)).toMatchObject({ ok: false, error: 'no such codebase' })
+  })
+
   it('DELETE /:slug returns 404 (find()===undefined branch)', async () => {
     const res = await call('DELETE', '/api/vectr/codebases/ghost')
     expect(res.code).toBe(404)

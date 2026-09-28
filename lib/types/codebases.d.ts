@@ -387,6 +387,33 @@ export declare function startLocalDaemon(deps: CodebaseDeps, metaPath: string, e
  * @param entry - the (persisted) remote entry to bring up.
  */
 export declare function ensureTunnelUp(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<EnsureTunnelResult>;
+export interface RemoteDaemonStartOutcome {
+    slug: string;
+    localPort: number;
+    remotePort: number;
+    portChanged: boolean;
+    previousPort: number | undefined;
+}
+/**
+ * Start or restart the remote vectr daemon and ensure the local SSH tunnel forwards to it.
+ *
+ * 1. Invokes `vectr start <path> --host 127.0.0.1` on the remote host over SSH.
+ * 2. Resolves the remote daemon port (via instances.json or stdout scrape).
+ * 3. Tears down stale tunnel if remotePort changed.
+ * 4. Ensures SSH tunnel is alive (via ensureTunnelUp).
+ * 5. Probes HTTP /v1/status through the forwarded port.
+ * 6. Persists status: 'up' and clears any error.
+ */
+export declare function startRemoteDaemon(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<RemoteDaemonStartOutcome>;
+/**
+ * Start/heal daemon for any codebase (local or remote).
+ */
+export declare function startCodebaseDaemon(deps: CodebaseDeps, metaPath: string, entry: CodebaseEntry): Promise<{
+    ok: boolean;
+    slug: string;
+    localPort: number;
+    error?: string;
+}>;
 /** Result of {@link migrateCodebases}. */
 export interface MigrateResult {
     /** `true` when at least one entry was rewritten (persisted). */

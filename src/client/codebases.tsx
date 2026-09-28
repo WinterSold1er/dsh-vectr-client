@@ -36,10 +36,11 @@ interface CodebaseView {
 export function CodebaseRow(props: {
   view: CodebaseView
   onTest: (slug: string) => void
+  onStart?: ((slug: string) => void) | undefined
   onDelete: (slug: string) => void
   busy: boolean
 }): ReactNode {
-  const { view, onTest, onDelete, busy } = props
+  const { view, onTest, onStart, onDelete, busy } = props
   const address = view.type === 'remote'
     ? `${view.host ?? '?'} → 127.0.0.1:${view.localPort ?? '?'}`
     : `127.0.0.1:${view.localPort ?? '?'}`
@@ -55,11 +56,12 @@ export function CodebaseRow(props: {
         : <span style={{ color: 'var(--dsw-alias-state-error-primary)' }}>{view.status}{view.error ? ` (${view.error})` : ''}</span>}</td>
       <td style={tdStyle}>{view.tunnelPid !== undefined ? String(view.tunnelPid) : '—'}</td>
       <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-        {/* Flex + nowrap keeps the two inline buttons on one line; `gap` replaces
-            the old marginLeft so they never wrap to a second row when the column
-            is squeezed (问题2). */}
+        {/* Flex + nowrap keeps the inline buttons on one line */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
           <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug)}>test</button>
+          {onStart && (view.type === 'remote' || view.status !== 'up') && (
+            <button type="button" className={BTN.secondary} disabled={busy} title="自动拉起守护进程" onClick={() => onStart(view.slug)}>start</button>
+          )}
           <button type="button" className={BTN.danger} disabled={busy} onClick={() => onDelete(view.slug)}>delete</button>
         </div>
       </td>
@@ -150,6 +152,7 @@ export function CodebaseManager(): ReactNode {
   }
 
   const test = (slug: string): void => run(slug, 'POST', '/test', `tested ${slug}`)
+  const start = (slug: string): void => run(slug, 'POST', '/start', `started ${slug}`)
   const del = (slug: string): void => run(slug, 'DELETE', '', `deleted ${slug}`)
 
   return (
@@ -229,7 +232,7 @@ export function CodebaseManager(): ReactNode {
         </thead>
         <tbody>
           {views?.map((view) => (
-            <CodebaseRow key={view.slug} view={view} onTest={test} onDelete={del} busy={busySlug === view.slug} />
+            <CodebaseRow key={view.slug} view={view} onTest={test} onStart={start} onDelete={del} busy={busySlug === view.slug} />
           ))}
         </tbody>
       </table>

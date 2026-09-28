@@ -30,8 +30,8 @@ export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, resolveInstanceExact, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
-export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
-export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases';
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
+export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, RemoteDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases';
 /**
  * Local structural view of the host `webServer` service this plugin registers
  * routes on. Declared as a Cordis `Context` augmentation so `ctx.webServer` is

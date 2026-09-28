@@ -19,6 +19,8 @@ import {
   loadCodebases,
   probeTunnel,
   saveCodebases,
+  startRemoteDaemon,
+  startCodebaseDaemon,
   testCodebase,
   TUNNEL_PORT_MIN,
   TUNNEL_PORT_MAX,
@@ -361,6 +363,78 @@ describe('testCodebase heal (问题1B route path)', () => {
     const entry = remoteEntry({ localPort: undefined })
     const result = await testCodebase(entry)
     expect(result).toEqual({ ok: false, error: 'no local port configured' })
+  })
+
+  it('downgrades status to error when tunnel is up but fetch probe fails', async () => {
+    const ssh = makeSsh({ checkSequence: [0], pid: 1 })
+    const entry = remoteEntry({ status: 'up' })
+    saveCodebases(metaPath, [entry])
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('fetch failed ECONNRESET'))
+    try {
+      const result = await testCodebase(entry, { deps: deps(ssh), metaPath, heal: true })
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('ECONNRESET')
+      const saved = loadCodebases(metaPath)[0]
+      expect(saved?.status).toBe('error')
+      expect(saved?.error).toContain('ECONNRESET')
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('updates status to up and clears error when testCodebase fetch succeeds', async () => {
+    const ssh = makeSsh({ checkSequence: [0], pid: 1 })
+    const entry = remoteEntry({ status: 'error', error: 'previous error' })
+    saveCodebases(metaPath, [entry])
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ ready: true }),
+    } as unknown as Response)
+    try {
+      const result = await testCodebase(entry, { deps: deps(ssh), metaPath, heal: true })
+      expect(result.ok).toBe(true)
+      const saved = loadCodebases(metaPath)[0]
+      expect(saved?.status).toBe('up')
+      expect(saved?.error).toBeUndefined()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+})
+
+describe('startRemoteDaemon and startCodebaseDaemon', () => {
+  it('spawns vectr start on remote host, ensures tunnel, and sets status to up', async () => {
+    const ssh = makeSsh({
+      checkSequence: [0],
+      pid: 100,
+    })
+    const entry = remoteEntry({
+      status: 'error',
+      error: 'dead',
+      path: '/home/user/work/my-project',
+      host: 'remote-host',
+      remotePort: 8767,
+      localPort: testPort,
+    })
+    saveCodebases(metaPath, [entry])
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'ready' }),
+    } as unknown as Response)
+    try {
+      const outcome = await startRemoteDaemon(deps(ssh), metaPath, entry)
+      expect(outcome.slug).toBe(entry.slug)
+      expect(outcome.remotePort).toBe(8767)
+      const saved = loadCodebases(metaPath)[0]
+      expect(saved?.status).toBe('up')
+      expect(saved?.error).toBeUndefined()
+
+      const codebaseRes = await startCodebaseDaemon(deps(ssh), metaPath, saved!)
+      expect(codebaseRes.ok).toBe(true)
+      expect(codebaseRes.slug).toBe(entry.slug)
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 })
 

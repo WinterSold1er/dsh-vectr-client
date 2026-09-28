@@ -162,8 +162,31 @@ export function SessionDrawerModal({
       } else {
         setCodebaseMsg({ ok: false, text: `Codebase "${slug}" 连通失败: ${data.error ?? res.status}` })
       }
+      onRefresh()
     } catch (err) {
       setCodebaseMsg({ ok: false, text: `测试请求失败: ${String(err)}` })
+    } finally {
+      setBusySlug(null)
+    }
+  }
+
+  const handleStartDaemon = async (slug: string): Promise<void> => {
+    setBusySlug(`${slug}:start`)
+    setCodebaseMsg(null)
+    try {
+      const wsParam = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+      const res = await fetch(`/api/vectr/codebases/${encodeURIComponent(slug)}/start${wsParam}`, {
+        method: 'POST',
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string }
+      if (res.ok && data.ok) {
+        setCodebaseMsg({ ok: true, text: `Codebase "${slug}" 守护进程已自动拉起并恢复连通！` })
+      } else {
+        setCodebaseMsg({ ok: false, text: `拉起守护进程失败: ${data.error ?? res.status}` })
+      }
+      onRefresh()
+    } catch (err) {
+      setCodebaseMsg({ ok: false, text: `拉起守护进程请求异常: ${String(err)}` })
     } finally {
       setBusySlug(null)
     }
@@ -179,6 +202,7 @@ export function SessionDrawerModal({
       })
       if (res.ok) {
         setCodebaseMsg({ ok: true, text: `Codebase "${slug}" 已解绑删除` })
+        onRefresh()
       } else {
         const data = (await res.json()) as { error?: string }
         setCodebaseMsg({ ok: false, text: `删除失败: ${data.error ?? res.status}` })
@@ -546,15 +570,26 @@ export function SessionDrawerModal({
                                   type="button"
                                   className={BTN.action}
                                   onClick={() => void handleTestCodebase(cb.slug)}
-                                  disabled={busySlug === cb.slug}
+                                  disabled={busySlug === cb.slug || busySlug === `${cb.slug}:start`}
                                 >
                                   测试连通性
                                 </button>
+                                {(!cb.isPrimary && (cb.type === 'remote' || cb.status !== 'up')) && (
+                                  <button
+                                    type="button"
+                                    className={BTN.secondary}
+                                    onClick={() => void handleStartDaemon(cb.slug)}
+                                    disabled={busySlug === cb.slug || busySlug === `${cb.slug}:start`}
+                                    title="在远端或本地拉起 Vectr 守护进程并重建隧道"
+                                  >
+                                    {busySlug === `${cb.slug}:start` ? '拉起中…' : '自动拉起'}
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className={BTN.danger}
                                   onClick={() => setConfirmDeleteSlug(cb.slug)}
-                                  disabled={busySlug === cb.slug}
+                                  disabled={busySlug === cb.slug || busySlug === `${cb.slug}:start`}
                                 >
                                   解绑/删除
                                 </button>
@@ -749,7 +784,10 @@ export function SessionDrawerModal({
         workspace={workspace}
         isOpen={showAddModal}
         onClose={() => setShowAddModal(false)}
-        onSuccess={() => setCodebaseMsg({ ok: true, text: 'Codebase 添加成功' })}
+        onSuccess={() => {
+          setCodebaseMsg({ ok: true, text: 'Codebase 添加成功' })
+          onRefresh()
+        }}
       />
     </div>
   )
