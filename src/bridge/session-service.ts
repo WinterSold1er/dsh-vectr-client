@@ -27,9 +27,11 @@ import {
   type RecallOptions,
   type ResumeResponse,
   type SessionVectrState,
+  type StartResult,
   type TriggerResult,
   type UpgradeResult,
   type VectrInitOptions,
+  type VectrStartOptions,
   type VectrMode,
   type VectrStatus,
 } from '../domain'
@@ -211,6 +213,74 @@ export class SessionVectrService implements ISessionStatusService {
 
   async initWorkspace(options: VectrInitOptions): Promise<InitResult> {
     return this.cliRunner.init(options)
+  }
+
+  async startWorkspace(options: VectrStartOptions): Promise<StartResult> {
+    const wsCheck = validateWorkspace(options.workspace)
+    if (!wsCheck.valid) {
+      return { ok: false, error: wsCheck.error }
+    }
+
+    const normWs = resolve(options.workspace)
+    const startRes = await this.cliRunner.start({
+      workspace: normWs,
+      memoryOnly: options.memoryOnly,
+      extraRoots: options.extraRoots,
+    })
+    if (!startRes.ok) {
+      return {
+        ok: false,
+        error: startRes.error ?? 'Failed to start Vectr daemon',
+        stdout: startRes.stdout,
+        stderr: startRes.stderr,
+      }
+    }
+
+    const probeDeadline = Date.now() + 10_000
+    let readyInstance: InstanceEntry | undefined
+    let readyStatus: VectrStatus | undefined
+
+    while (Date.now() < probeDeadline) {
+      const inst = await this.instanceResolver.resolveForWorkspace(normWs)
+      if (inst && inst.port) {
+        const host = inst.host ?? this.defaultHost
+        const st = await this.apiClient.getStatus(host, inst.port, 1_000)
+        if (st !== undefined) {
+          readyInstance = inst
+          readyStatus = st
+          break
+        }
+      }
+      await sleep(200)
+    }
+
+    if (!readyInstance) {
+      const fallbackInst = await this.instanceResolver.resolveForWorkspace(normWs)
+      return {
+        ok: fallbackInst !== undefined,
+        port: fallbackInst?.port,
+        pid: fallbackInst?.pid,
+        stdout: startRes.stdout,
+        stderr: startRes.stderr,
+        ...(fallbackInst ? {} : { error: 'Daemon process started but endpoint did not become ready in time' }),
+      }
+    }
+
+    const rawMode = typeof readyInstance.mode === 'string'
+      ? readyInstance.mode
+      : typeof readyStatus?.mode === 'string'
+        ? readyStatus.mode
+        : 'full'
+    const finalMode = formatMode(rawMode, true)
+
+    return {
+      ok: true,
+      port: readyInstance.port,
+      pid: readyInstance.pid,
+      mode: finalMode,
+      stdout: startRes.stdout,
+      stderr: startRes.stderr,
+    }
   }
 
   async upgradeWorkspace(workspace: string): Promise<UpgradeResult> {

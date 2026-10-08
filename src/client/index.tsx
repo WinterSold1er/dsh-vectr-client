@@ -167,7 +167,7 @@ function TargetCell(props: { view: CodebaseView }): ReactNode {
 function CodebaseSubRow(props: {
   view: CodebaseView
   onTest: (slug: string, workspace?: string) => void
-  onStart?: ((slug: string) => void) | undefined
+  onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busy: boolean
@@ -208,8 +208,8 @@ function CodebaseSubRow(props: {
         {/* flex + nowrap keeps test/start/delete/(assign) on one line */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
           <button type="button" className={BTN.action} disabled={busy} onClick={() => onTest(view.slug, view.workspace)}>test</button>
-          {onStart && !view.isPrimary && (view.type === 'remote' || view.status !== 'up') && (
-            <button type="button" className={BTN.secondary} disabled={busy} title="自动拉起守护进程" onClick={() => onStart(view.slug)}>start</button>
+          {onStart && (view.type === 'remote' || view.status !== 'up') && (
+            <button type="button" className={BTN.secondary} disabled={busy} title="自动拉起守护进程" onClick={() => onStart(view.slug, view.workspace)}>start</button>
           )}
           <button
             type="button"
@@ -249,7 +249,7 @@ function CodebaseSubRow(props: {
 function CodebaseSubTable(props: {
   entries: CodebaseView[]
   onTest: (slug: string, workspace?: string) => void
-  onStart?: ((slug: string) => void) | undefined
+  onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, workspace: string) => void
   busySlug: string | null
@@ -430,7 +430,7 @@ function WorkspaceRow(props: {
   onReindex: (port: number) => void
   busyPort: boolean
   onTest: (slug: string, workspace?: string) => void
-  onStart?: ((slug: string) => void) | undefined
+  onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
   onAssign: (slug: string, ws: string) => void
   busySlug: string | null
@@ -567,7 +567,10 @@ export function WorkspaceConsole(): ReactNode {
     const wsParam = ws ? `?workspace=${encodeURIComponent(ws)}` : ''
     run(slug, 'POST', `/test${wsParam}`, `tested ${slug}`)
   }
-  const start = (slug: string): void => run(slug, 'POST', '/start', `started ${slug}`)
+  const start = (slug: string, ws?: string): void => {
+    const wsParam = ws ? `?workspace=${encodeURIComponent(ws)}` : ''
+    run(slug, 'POST', `/start${wsParam}`, `started ${slug}`)
+  }
   const del = (slug: string): void => run(slug, 'DELETE', '', `deleted ${slug}`)
   // Assign calls the real backend PATCH route (src/index.ts) to move a
   // codebase into a workspace; a 4xx from the host surfaces as a clear flash

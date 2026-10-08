@@ -7,7 +7,7 @@
  *
  * @module dsh-vectr-client/bridge/session-service
  */
-import { type ICodebaseService, type IInstanceResolver, type InitResult, type ISessionStatusService, type IVectrApiClient, type IVectrCliRunner, type RecallOptions, type ResumeResponse, type SessionVectrState, type TriggerResult, type UpgradeResult, type VectrInitOptions } from '../domain';
+import { type ICodebaseService, type IInstanceResolver, type InitResult, type ISessionStatusService, type IVectrApiClient, type IVectrCliRunner, type RecallOptions, type ResumeResponse, type SessionVectrState, type StartResult, type TriggerResult, type UpgradeResult, type VectrInitOptions, type VectrStartOptions } from '../domain';
 export interface SessionServiceOptions {
     instanceResolver: IInstanceResolver;
     apiClient: IVectrApiClient;
@@ -33,6 +33,7 @@ export declare class SessionVectrService implements ISessionStatusService {
     getSessionStatus(workspace: string): Promise<SessionVectrState>;
     triggerIndex(workspace: string): Promise<TriggerResult>;
     initWorkspace(options: VectrInitOptions): Promise<InitResult>;
+    startWorkspace(options: VectrStartOptions): Promise<StartResult>;
     upgradeWorkspace(workspace: string): Promise<UpgradeResult>;
     private doUpgradeWorkspace;
     recallNotes(target: {

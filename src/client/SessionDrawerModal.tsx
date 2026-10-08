@@ -39,8 +39,13 @@ export function SessionDrawerModal({
   // Init state
   const [initHooks, setInitHooks] = useState(true)
   const [initMemoryOnly, setInitMemoryOnly] = useState(false)
+  const [initAutoStart, setInitAutoStart] = useState(true)
   const [initBusy, setInitBusy] = useState(false)
   const [initResult, setInitResult] = useState<{ ok: boolean; text: string } | null>(null)
+
+  // Start session daemon state
+  const [startingDaemon, setStartingDaemon] = useState(false)
+  const [startDaemonMsg, setStartDaemonMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // Upgrade state
   const [upgrading, setUpgrading] = useState(false)
@@ -110,6 +115,32 @@ export function SessionDrawerModal({
     }
   }
 
+  const handleStartSessionDaemon = async (): Promise<boolean> => {
+    setStartingDaemon(true)
+    setStartDaemonMsg(null)
+    try {
+      const res = await fetch('/api/vectr/session-start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace, memoryOnly: isMemoryOnly || initMemoryOnly }),
+      })
+      const data = (await res.json()) as { ok: boolean; port?: number; error?: string }
+      if (res.ok && data.ok) {
+        setStartDaemonMsg({ ok: true, text: `Vectr 守护进程启动成功${data.port ? ` (端口: ${data.port})` : ''}！` })
+        onRefresh()
+        return true
+      } else {
+        setStartDaemonMsg({ ok: false, text: data.error ?? `启动失败 (${res.status})` })
+        return false
+      }
+    } catch (err) {
+      setStartDaemonMsg({ ok: false, text: `启动异常: ${String(err)}` })
+      return false
+    } finally {
+      setStartingDaemon(false)
+    }
+  }
+
   const handleInit = async (): Promise<void> => {
     setInitBusy(true)
     setInitResult(null)
@@ -130,11 +161,30 @@ export function SessionDrawerModal({
         error?: string
       }
       if (data.ok) {
-        setInitResult({
-          ok: true,
-          text: `Vectr 工作区初始化完成！\n后续指引：如需启动语义检索与工作记忆守护进程，请在终端执行 vectr start（或配置后台守护进程拉起）。${data.stdout ? `\n\n${data.stdout}` : ''}`,
-        })
-        onRefresh()
+        if (initAutoStart) {
+          setInitResult({
+            ok: true,
+            text: `Vectr 工作区配置已初始化！正在自动拉起守护进程…`,
+          })
+          const started = await handleStartSessionDaemon()
+          if (started) {
+            setInitResult({
+              ok: true,
+              text: `✅ Vectr 工作区初始化完成，且守护进程已成功拉起就绪！\n语义检索与工作记忆已正常启用。${data.stdout ? `\n\n${data.stdout}` : ''}`,
+            })
+          } else {
+            setInitResult({
+              ok: false,
+              text: `⚠️ 工作区配置文件已生成，但自动拉起守护进程失败。你可以点击“启动守护进程”重试。`,
+            })
+          }
+        } else {
+          setInitResult({
+            ok: true,
+            text: `Vectr 工作区初始化完成！\n提示：守护进程尚未运行，请点击“启动守护进程”按钮以启用服务。${data.stdout ? `\n\n${data.stdout}` : ''}`,
+          })
+          onRefresh()
+        }
       } else {
         setInitResult({
           ok: false,
@@ -298,6 +348,17 @@ export function SessionDrawerModal({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {!live && (
+              <button
+                type="button"
+                className={BTN.primary}
+                onClick={() => void handleStartSessionDaemon()}
+                disabled={startingDaemon}
+                title="一键启动当前工作区的 Vectr 守护进程"
+              >
+                {startingDaemon ? '启动中…' : '⚡ 启动守护进程'}
+              </button>
+            )}
             <button
               type="button"
               className={BTN.secondary}
@@ -574,13 +635,13 @@ export function SessionDrawerModal({
                                 >
                                   测试连通性
                                 </button>
-                                {(!cb.isPrimary && (cb.type === 'remote' || cb.status !== 'up')) && (
+                                {((cb.isPrimary && cb.status !== 'up') || (!cb.isPrimary && (cb.type === 'remote' || cb.status !== 'up'))) && (
                                   <button
                                     type="button"
                                     className={BTN.secondary}
                                     onClick={() => void handleStartDaemon(cb.slug)}
                                     disabled={busySlug === cb.slug || busySlug === `${cb.slug}:start`}
-                                    title="在远端或本地拉起 Vectr 守护进程并重建隧道"
+                                    title={cb.isPrimary ? '拉起当前主工作区 Vectr 守护进程' : '在远端或本地拉起 Vectr 守护进程并重建隧道'}
                                   >
                                     {busySlug === `${cb.slug}:start` ? '拉起中…' : '自动拉起'}
                                   </button>
@@ -688,6 +749,40 @@ export function SessionDrawerModal({
                         ({state.reindexDisabledReason})
                       </span>
                     )}
+                    {!live && (
+                      <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <button
+                          type="button"
+                          className={BTN.primary}
+                          disabled={startingDaemon}
+                          onClick={() => void handleStartSessionDaemon()}
+                        >
+                          {startingDaemon ? '启动中…' : '⚡ 启动 Vectr 守护进程 (vectr start)'}
+                        </button>
+                        <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>
+                          当前未检测到活跃进程，请先启动服务。
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {startDaemonMsg && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '8px 12px',
+                      borderRadius: 6,
+                      background: startDaemonMsg.ok
+                        ? 'var(--dsw-alias-state-success-tertiary)'
+                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
+                      color: startDaemonMsg.ok
+                        ? 'var(--dsw-alias-state-success-primary)'
+                        : 'var(--dsw-alias-state-error-primary)',
+                      fontSize: 12,
+                    }}
+                  >
+                    {startDaemonMsg.text}
                   </div>
                 )}
 
@@ -743,6 +838,14 @@ export function SessionDrawerModal({
                     />
                     仅工作记忆模式 (<code>--memory-only</code> / <code>--style memory-only</code>，无代码目录正常工作)
                   </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={initAutoStart}
+                      onChange={(e) => setInitAutoStart(e.target.checked)}
+                    />
+                    初始化完成后自动启动守护进程 (推荐，一键就绪)
+                  </label>
                 </div>
 
                 <button
@@ -755,23 +858,36 @@ export function SessionDrawerModal({
                 </button>
 
                 {initResult && (
-                  <div
-                    style={{
-                      marginTop: 10,
-                      padding: '10px 12px',
-                      borderRadius: 6,
-                      background: initResult.ok
-                        ? 'var(--dsw-alias-state-success-tertiary)'
-                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                      color: initResult.ok
-                        ? 'var(--dsw-alias-state-success-primary)'
-                        : 'var(--dsw-alias-state-error-primary)',
-                      fontSize: 12,
-                      fontFamily: 'monospace',
-                      whiteSpace: 'pre-wrap',
-                    }}
-                  >
-                    {initResult.text}
+                  <div style={{ marginTop: 10 }}>
+                    <div
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 6,
+                        background: initResult.ok
+                          ? 'var(--dsw-alias-state-success-tertiary)'
+                          : 'var(--dsw-alias-interactive-bg-hover-danger)',
+                        color: initResult.ok
+                          ? 'var(--dsw-alias-state-success-primary)'
+                          : 'var(--dsw-alias-state-error-primary)',
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        whiteSpace: 'pre-wrap',
+                      }}
+                    >
+                      {initResult.text}
+                    </div>
+                    {!live && (
+                      <div style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className={BTN.primary}
+                          disabled={startingDaemon}
+                          onClick={() => void handleStartSessionDaemon()}
+                        >
+                          {startingDaemon ? '启动中…' : '▶️ 立即启动守护进程'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

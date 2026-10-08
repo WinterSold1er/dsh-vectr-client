@@ -8,7 +8,7 @@
  * @module dsh-vectr-client/infra/cli-runner
  */
 import { type ChildProcess } from 'node:child_process';
-import type { InitResult, IVectrCliRunner, VectrInitOptions } from '../domain';
+import type { InitResult, IVectrCliRunner, VectrInitOptions, VectrStartOptions } from '../domain';
 export type SpawnFunction = (command: string, args: string[], options?: {
     timeout?: number;
 }) => ChildProcess;
@@ -42,6 +42,7 @@ export declare class VectrCliRunner implements IVectrCliRunner {
     private readonly defaultTimeoutMs;
     constructor(options?: CliRunnerOptions);
     init(options: VectrInitOptions): Promise<InitResult>;
+    start(options: VectrStartOptions): Promise<InitResult>;
     restart(workspace: string, options?: {
         full?: boolean;
     }): Promise<InitResult>;

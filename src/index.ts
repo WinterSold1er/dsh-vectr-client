@@ -1382,7 +1382,29 @@ export function registerCodebaseRoutes(
       }
       if (req.method === 'POST' && (url.pathname.endsWith('/start') || url.pathname.endsWith('/start-daemon'))) {
         if (isSystemPrimarySlug(normSlug)) {
-          sendJson(res, 400, { ok: false, error: 'Cannot start primary codebase via this endpoint' })
+          const targetWs = url.searchParams.get('workspace')
+          if (!targetWs) {
+            sendJson(res, 400, { ok: false, error: 'Query parameter "workspace" required to start primary codebase daemon' })
+            return
+          }
+          const handle = deps.spawnRunner('vectr', ['start', '--path', targetWs, '--json'])
+          const startRes = await handle.promise
+          if (startRes.signal !== null) {
+            sendJson(res, 500, { ok: false, error: `vectr start for primary codebase was killed (${startRes.signal})` })
+            return
+          }
+          if (startRes.code !== 0) {
+            sendJson(res, 500, { ok: false, error: `vectr start failed for primary codebase: ${startRes.stderr}` })
+            return
+          }
+          let parsed: { port?: number; [key: string]: unknown } = {}
+          try {
+            parsed = JSON.parse(startRes.stdout) as { port?: number }
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: `vectr start returned non-JSON: ${String(e)}` })
+            return
+          }
+          sendJson(res, 200, { ok: true, slug: 'primary', localPort: parsed.port ?? 0 })
           return
         }
         const entry = find()

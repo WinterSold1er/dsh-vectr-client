@@ -6,9 +6,9 @@
  *
  * @module dsh-vectr-client/domain/interfaces
  */
-import type { CodebaseEntry, InitResult, InstanceEntry, RecallOptions, ResumeResponse, SessionVectrState, TriggerResult, UpgradeResult, VectrInitOptions, VectrStatus } from './types';
+import type { CodebaseEntry, InitResult, InstanceEntry, RecallOptions, ResumeResponse, SessionVectrState, StartResult, TriggerResult, UpgradeResult, VectrInitOptions, VectrStartOptions, VectrStatus } from './types';
 /**
- * Runner interface for Vectr CLI commands (e.g. vectr init, vectr restart).
+ * Runner interface for Vectr CLI commands (e.g. vectr init, vectr restart, vectr start).
  */
 export interface IVectrCliRunner {
     /**
@@ -24,6 +24,11 @@ export interface IVectrCliRunner {
     restart(workspace: string, options?: {
         full?: boolean;
     }): Promise<InitResult>;
+    /**
+     * Run `vectr start` on a workspace directory.
+     * @param options - start options (workspace, memoryOnly, extraRoots).
+     */
+    start(options: VectrStartOptions): Promise<InitResult>;
 }
 /**
  * Client interface for communicating with a running Vectr HTTP daemon.
@@ -93,6 +98,10 @@ export interface ISessionStatusService {
      * Run vectr init for a workspace.
      */
     initWorkspace(options: VectrInitOptions): Promise<InitResult>;
+    /**
+     * Start a Vectr daemon for a workspace directory.
+     */
+    startWorkspace(options: VectrStartOptions): Promise<StartResult>;
     /**
      * Upgrade a memory-only workspace to full mode (indexing + memory).
      */

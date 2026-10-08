@@ -155,6 +155,17 @@ export interface VectrInitOptions {
     style?: string | undefined;
 }
 /**
+ * Parameters for executing `vectr start`.
+ */
+export interface VectrStartOptions {
+    /** Absolute workspace directory to start. */
+    workspace: string;
+    /** Whether to start in memory-only mode (--memory-only). */
+    memoryOnly?: boolean | undefined;
+    /** Additional roots to index. */
+    extraRoots?: string[] | undefined;
+}
+/**
  * Parameters for querying working memory notes via daemon /v1/recall.
  */
 export interface RecallOptions {
@@ -209,6 +220,18 @@ export interface UpgradeResult {
     ok: boolean;
     mode?: VectrMode | undefined;
     port?: number | undefined;
+    error?: string | undefined;
+    stdout?: string | undefined;
+    stderr?: string | undefined;
+}
+/**
+ * Outcome of starting a Vectr daemon for a workspace.
+ */
+export interface StartResult {
+    ok: boolean;
+    port?: number | undefined;
+    pid?: number | undefined;
+    mode?: VectrMode | undefined;
     error?: string | undefined;
     stdout?: string | undefined;
     stderr?: string | undefined;

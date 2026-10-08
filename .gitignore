@@ -7,6 +7,7 @@ node_modules/
 # logs and OS noise
 *.log
 .DS_Store
+tests/e2e/artifacts/
 
 # dev-only: pnpm-lock.yaml / pnpm-workspace.yaml carry absolute `link:`
 # paths into a local dsh monorepo checkout, so they only install on the

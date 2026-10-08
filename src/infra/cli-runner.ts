@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import type { InitResult, IVectrCliRunner, VectrInitOptions } from '../domain'
+import type { InitResult, IVectrCliRunner, VectrInitOptions, VectrStartOptions } from '../domain'
 import { validateWorkspace } from '../domain/rules'
 
 export type SpawnFunction = (
@@ -89,6 +89,27 @@ export class VectrCliRunner implements IVectrCliRunner {
       args.push('--style', 'memory-only')
     } else if (options.style && options.style.trim().length > 0) {
       args.push('--style', options.style.trim())
+    }
+
+    return this.executeCommand(args)
+  }
+
+  async start(options: VectrStartOptions): Promise<InitResult> {
+    const wsCheck = validateWorkspace(options.workspace)
+    if (!wsCheck.valid) {
+      return { ok: false, error: wsCheck.error }
+    }
+
+    const args: string[] = ['start', '--path', options.workspace]
+
+    if (options.memoryOnly === true) {
+      args.push('--memory-only')
+    }
+
+    if (options.extraRoots && options.extraRoots.length > 0) {
+      for (const root of options.extraRoots) {
+        args.push('--extra-root', root)
+      }
     }
 
     return this.executeCommand(args)
