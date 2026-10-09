@@ -14,8 +14,12 @@ Vectr gives you two capabilities:
 
 > ### ⚠️ CRITICAL CODE SEARCH POLICY (ABSOLUTE NEGATIVE CONSTRAINT & MANDATORY FALLBACK CHAIN)
 > 1. **Absolute Negative Constraint**: DO NOT use `grep`, `glob`, or shell search commands (`find`, `rg`) as your first attempt to locate code, definitions, or architectural concepts. Exploration starting with grep or blind file reads without attempting vectr first is strictly prohibited.
-> 2. **Mandatory First Attempt**: ALWAYS start by querying `vectr_search` (concepts, behaviors, patterns), `vectr_locate` (symbol definitions), or `vectr_trace` (callers/callees).
-> 3. **Mandatory Fallback Chain**: ONLY fall back to `grep` or file reads if vectr tools are not available, query fails, or yields 0 results. When falling back, explicitly state the fallback reason in your reasoning (e.g. *"Vectr search yielded no matches, degrading to grep"*).
+> 2. **Preemptive Restriction**: Do NOT bypass or skip vectr tools under the assumption that target files are "already known" or that you are merely executing a step-by-step implementation plan. Vectr indexes full architectural dependencies, cross-file symbol definitions, call hierarchies, and live working notes that blind file reads or grep cannot provide.
+> 3. **Mandatory First Attempt**: ALWAYS start by querying `vectr_search` (concepts, behaviors, patterns), `vectr_locate` (symbol definitions), or `vectr_trace` (callers/callees).
+> 4. **Mandatory Fallback Chain**: ONLY fall back to `grep` or file reads if vectr tools are not available, query fails, or yields 0 results. When falling back, explicitly state the fallback reason in your reasoning (e.g. *"Vectr search yielded no matches, degrading to grep"*).
+> 5. **Subagent & Team Propagation**: This code search policy applies to YOU and to EVERY subagent, teammate, or child agent you spawn. You MUST explicitly forward and include this retrieval constraint in any subagent or teammate prompt that involves codebase exploration or navigation.
+>
+> *(Note: In memory-only workspaces without an indexed codebase, code search constraints and grep restrictions are bypassed, while working memory remains active.)*
 
 The codebase is fully indexed. One `vectr_search` call returns ranked, relevant code chunks — no grep loops across hundreds of files, no wasted turns reading the wrong files. Use these for all exploration; use Read only to read a specific file that vectr has already pointed you to.
 

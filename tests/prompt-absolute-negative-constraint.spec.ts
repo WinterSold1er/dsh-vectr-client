@@ -28,6 +28,19 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
       expect(text).toContain('strictly prohibited')
     })
 
+    it('enforces preemptive exception closing forbidding skipping because files are known or executing a plan', () => {
+      const text = getVectrGuidanceText('vectr')
+      expect(text).toContain('PREEMPTIVE RESTRICTION')
+      expect(text).toContain('already known')
+      expect(text).toContain('executing a')
+    })
+
+    it('enforces subagent and team propagation rules', () => {
+      const text = getVectrGuidanceText('vectr')
+      expect(text).toContain('SUBAGENT & TEAM PROPAGATION')
+      expect(text).toContain('subagent, teammate, or child agent')
+    })
+
     it('defines mandatory first attempt with specific tool routing', () => {
       const serverName = 'my_vectr'
       const text = getVectrGuidanceText(serverName)
@@ -92,6 +105,7 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
           id: 'test-agent-constraint',
           session: { header: { cwd: ws } },
           ctx: {
+            logger: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} },
             inject: (_deps: string[], cb: (scope: any) => void) => {
               cb({
                 systemPrompt: {
@@ -136,6 +150,135 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
         expect(grep!.order).toBe(1500)
         expect(grep!.text).toBe(getVectrGrepText('custom_srv'))
         expect(grep!.text).toContain('CRITICAL RESTRICTION ON GREP')
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('does NOT inject code retrieval guidance or grep shadow when workspace is memory_only with no mounted codebases', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'test-prompt-memory-only-'))
+      try {
+        const instancesPath = join(dir, 'instances.json')
+        const ws = join(dir, 'test-mem-ws')
+        await writeFile(instancesPath, JSON.stringify({
+          'entry-mem': { workspace: ws, port: 9999, pid: process.pid, mode: 'memory_only' },
+        }))
+
+        const ctx = new Context()
+        const handles = new Map<Agent, ConnectionHandle>()
+        const promptFibers = new Map<Agent, Fiber>()
+
+        const sections: Array<{ name: string; order: number; text: string }> = []
+        const mockAgent = {
+          id: 'test-agent-mem',
+          session: { header: { cwd: ws } },
+          ctx: {
+            logger: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} },
+            inject: (_deps: string[], cb: (scope: any) => void) => {
+              cb({
+                systemPrompt: {
+                  section: (s: any) => sections.push(s),
+                  getSectionOrder: () => 1500,
+                },
+              })
+              return { dispose: async () => {} }
+            },
+          },
+        } as unknown as Agent
+
+        install(
+          ctx,
+          handles,
+          promptFibers,
+          instancesPath,
+          {
+            instancesPath,
+            serverName: 'vectr',
+            autoStart: false,
+            daemonTcpTimeoutMs: 500,
+            cliPath: '',
+            cliTimeoutMs: 500,
+            recallTimeoutMs: 500,
+            upgradeTimeoutMs: 500,
+            reconnect: { enabled: false },
+          },
+          mockAgent,
+        )
+
+        // For memory-only workspace with no codebase, no code retrieval guidance should be injected!
+        expect(sections.length).toBe(0)
+        expect(sections.find((s) => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBeUndefined()
+        expect(sections.find((s) => s.name === VECTR_GREP_SECTION_NAME)).toBeUndefined()
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('DOES inject code retrieval guidance and grep shadow when memory_only workspace has an external mounted codebase', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'test-prompt-mem-with-codebase-'))
+      try {
+        const instancesPath = join(dir, 'instances.json')
+        const codebasesPath = join(dir, 'vectr-codebases.json')
+        const ws = join(dir, 'test-mem-ws')
+        await writeFile(instancesPath, JSON.stringify({
+          'entry-mem': { workspace: ws, port: 9999, pid: process.pid, mode: 'memory_only' },
+        }))
+        await writeFile(codebasesPath, JSON.stringify([
+          {
+            slug: 'external-repo',
+            type: 'local',
+            workspace: ws,
+            path: '/path/to/external-repo',
+            serverName: 'external_vectr',
+            localPort: 8888,
+          },
+        ]))
+
+        const ctx = new Context()
+        const handles = new Map<Agent, ConnectionHandle>()
+        const promptFibers = new Map<Agent, Fiber>()
+
+        const sections: Array<{ name: string; order: number; text: string }> = []
+        const mockAgent = {
+          id: 'test-agent-mem-cb',
+          session: { header: { cwd: ws } },
+          ctx: {
+            logger: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} },
+            inject: (_deps: string[], cb: (scope: any) => void) => {
+              cb({
+                systemPrompt: {
+                  section: (s: any) => sections.push(s),
+                  getSectionOrder: () => 1500,
+                },
+              })
+              return { dispose: async () => {} }
+            },
+          },
+        } as unknown as Agent
+
+        install(
+          ctx,
+          handles,
+          promptFibers,
+          instancesPath,
+          {
+            instancesPath,
+            serverName: 'vectr',
+            autoStart: false,
+            daemonTcpTimeoutMs: 500,
+            cliPath: '',
+            cliTimeoutMs: 500,
+            recallTimeoutMs: 500,
+            upgradeTimeoutMs: 500,
+            reconnect: { enabled: false },
+          },
+          mockAgent,
+          codebasesPath,
+        )
+
+        expect(sections.length).toBe(2)
+        expect(sections.find((s) => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBeDefined()
+        expect(sections.find((s) => s.name === VECTR_GREP_SECTION_NAME)).toBeDefined()
       } finally {
         await rm(dir, { recursive: true, force: true })
       }

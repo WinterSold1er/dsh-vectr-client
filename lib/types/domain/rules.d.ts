@@ -64,6 +64,14 @@ export declare function isValidInstanceEntry(entry: unknown): entry is InstanceE
  */
 export declare function hasCodebase(input: HasCodebaseInput): boolean;
 /**
+ * Test whether a workspace has an active, indexed codebase (non-memory-only primary
+ * or at least one mounted external codebase).
+ *
+ * Used to gate codebase-specific prompt guidance (code retrieval policies, grep shadowing)
+ * so that memory-only projects do not receive misleading code search restrictions.
+ */
+export declare function hasIndexedCodebase(input: HasCodebaseInput): boolean;
+/**
  * Test whether a slug represents a system-generated Primary codebase.
  * Matches the reserved 'primary' name, legacy 8-char hex keys, current
  * WORKSPACE_KEY_LENGTH (12-char hex) keys, and standard 8-16 hex key ranges.

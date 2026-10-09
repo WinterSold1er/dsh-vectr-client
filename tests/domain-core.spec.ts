@@ -9,6 +9,7 @@ import {
   canReindex,
   formatMode,
   hasCodebase,
+  hasIndexedCodebase,
   isMemoryOnly,
   isSearchOnly,
   SLUG_PATTERN,
@@ -235,6 +236,56 @@ describe('Domain Core: rules & validation', () => {
         workspace: '/ws/repo',
         entry: null,
         codebases: null,
+      })).toBe(false)
+    })
+  })
+
+  describe('hasIndexedCodebase domain rule', () => {
+    it('returns false for empty workspace', () => {
+      expect(hasIndexedCodebase({})).toBe(false)
+      expect(hasIndexedCodebase({ workspace: '' })).toBe(false)
+      expect(hasIndexedCodebase({ workspace: '   ' })).toBe(false)
+    })
+
+    it('returns false when primary workspace daemon is memory_only and no codebases mounted', () => {
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234, mode: 'memory_only' },
+      })).toBe(false)
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234, mode: 'memory-only' },
+      })).toBe(false)
+    })
+
+    it('returns true when primary workspace daemon is full or default mode', () => {
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234, mode: 'full' },
+      })).toBe(true)
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234 },
+      })).toBe(true)
+    })
+
+    it('returns true when memory_only workspace has external mounted codebase', () => {
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234, mode: 'memory_only' },
+        codebases: [
+          { slug: 'ext-repo', type: 'local', workspace: '/ws/my-project', path: '/code/ext-repo', serverName: 'ext' } as any,
+        ],
+      })).toBe(true)
+    })
+
+    it('returns false when memory_only workspace only has primary codebase mirror', () => {
+      expect(hasIndexedCodebase({
+        workspace: '/ws/my-project',
+        entry: { workspace: '/ws/my-project', port: 1234, mode: 'memory_only' },
+        codebases: [
+          { slug: 'primary', isPrimary: true, type: 'local', workspace: '/ws/my-project', path: '/ws/my-project', serverName: 'primary' } as any,
+        ],
       })).toBe(false)
     })
   })

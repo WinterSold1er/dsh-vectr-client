@@ -123,6 +123,41 @@ export function hasCodebase(input: HasCodebaseInput): boolean {
 }
 
 /**
+ * Test whether a workspace has an active, indexed codebase (non-memory-only primary
+ * or at least one mounted external codebase).
+ *
+ * Used to gate codebase-specific prompt guidance (code retrieval policies, grep shadowing)
+ * so that memory-only projects do not receive misleading code search restrictions.
+ */
+export function hasIndexedCodebase(input: HasCodebaseInput): boolean {
+  const ws = normalizePath(input.workspace)
+  if (ws.length === 0) {
+    return false
+  }
+
+  // 1. Primary workspace daemon: if it exists, is valid, and is NOT in memory_only mode
+  if (isValidInstanceEntry(input.entry) && isWorkspaceMatch(ws, input.entry.workspace)) {
+    if (!isMemoryOnly(input.entry.mode)) {
+      return true
+    }
+  }
+
+  // 2. External / mounted codebases: if any external codebase is attached to this workspace
+  if (Array.isArray(input.codebases)) {
+    return input.codebases.some((item) => {
+      if (!item || typeof item !== 'object') return false
+      // Primary entry in codebases mirrors the instance entry, so skip if the workspace daemon is memory_only
+      if (item.isPrimary && input.entry && isMemoryOnly(input.entry.mode)) {
+        return false
+      }
+      return isWorkspaceMatch(ws, item.workspace) || isWorkspaceMatch(ws, item.path)
+    })
+  }
+
+  return false
+}
+
+/**
  * Test whether a slug represents a system-generated Primary codebase.
  * Matches the reserved 'primary' name, legacy 8-char hex keys, current
  * WORKSPACE_KEY_LENGTH (12-char hex) keys, and standard 8-16 hex key ranges.

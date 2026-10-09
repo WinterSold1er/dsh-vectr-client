@@ -79,7 +79,7 @@ import {
 } from './probe'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
-import { hasCodebase, isSystemPrimarySlug, isValidInstanceEntry } from './domain'
+import { hasCodebase, hasIndexedCodebase, isSystemPrimarySlug, isValidInstanceEntry } from './domain'
 
 // Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
 export * from './domain'
@@ -290,11 +290,13 @@ export const VECTR_GUIDANCE_SECTION_ORDER = 95
 export function getVectrGuidanceText(serverName: string = DEFAULT_SERVER_NAME): string {
   return `CRITICAL CODE RETRIEVAL POLICY (ABSOLUTE NEGATIVE CONSTRAINT & MANDATORY FALLBACK CHAIN):
 1. ABSOLUTE NEGATIVE CONSTRAINT: DO NOT invoke grep, glob, or bash search commands (such as find or rg) as your first attempt to locate code, definitions, or architectural concepts. Initial exploration starting with grep or blind file reads without attempting vectr is strictly prohibited.
-2. MANDATORY FIRST ATTEMPT: You MUST ALWAYS prioritize the vectr MCP tools (mcp__${serverName}*) when available over grep and blind file reads. Query, locate, and reason over the indexed workspace using vectr first:
+2. PREEMPTIVE RESTRICTION: Do NOT bypass or skip vectr tools under the assumption that target files are "already known" or that you are merely "executing a step-by-step implementation plan". Vectr indexes full architectural dependencies, cross-file symbol definitions, call hierarchies, and live working notes that blind file reads or grep cannot provide.
+3. MANDATORY FIRST ATTEMPT: You MUST ALWAYS prioritize the vectr MCP tools (mcp__${serverName}*) when available over grep and blind file reads. Query, locate, and reason over the indexed workspace using vectr first:
    - Concepts, features, patterns, or behaviors: call mcp__${serverName}__vectr_search(query="...")
    - Symbol definitions (function, class, struct, type): call mcp__${serverName}__vectr_locate(name="...")
    - Call hierarchy & callers/callees: call mcp__${serverName}__vectr_trace(name="...")
-3. MANDATORY FALLBACK CHAIN: ONLY fall back to grep if vectr tools are not available, query fails, or yields no results. When falling back to grep, you MUST explicitly state the reason in your reasoning (e.g. "Vectr search yielded no results, degrading to grep").`
+4. MANDATORY FALLBACK CHAIN: ONLY fall back to grep if vectr tools are not available, query fails, or yields no results. When falling back to grep, you MUST explicitly state the reason in your reasoning (e.g. "Vectr search yielded no results, degrading to grep").
+5. SUBAGENT & TEAM PROPAGATION: This code retrieval policy applies to YOU and to EVERY subagent, teammate, or child agent you spawn. You MUST explicitly forward and include this retrieval constraint in any subagent or teammate prompt that involves codebase exploration or navigation.`
 }
 
 export const VECTR_GUIDANCE_SECTION_TEXT = getVectrGuidanceText(DEFAULT_SERVER_NAME)
@@ -313,7 +315,9 @@ export const VECTR_GREP_SECTION_ORDER = 1500
  */
 export function getVectrGrepText(serverName: string = DEFAULT_SERVER_NAME): string {
   return `CRITICAL RESTRICTION ON GREP: Prioritize querying code via vectr tools (mcp__${serverName}*) when available. DO NOT invoke grep as your initial tool for code exploration or symbol lookup.
-MANDATORY FALLBACK RULE: If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.`
+PREEMPTIVE RESTRICTION: Do NOT bypass vectr tools because files are "already known" or when executing an implementation plan.
+MANDATORY FALLBACK RULE: If vectr tools are not available, query fails, or yields no results, use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.
+SUBAGENT & TEAM PROPAGATION: Forward this grep restriction to all spawned subagents or teammates.`
 }
 
 export const VECTR_GREP_SECTION_TEXT = getVectrGrepText(DEFAULT_SERVER_NAME)
@@ -401,10 +405,12 @@ export function install(
     return
   }
 
-  // Immediately inject system prompt guidance sections unconditionally without awaiting daemon probe.
-  // As long as a codebase exists, the prompt guidance is active immediately.
+  // Inject system prompt guidance sections ONLY when an indexed codebase is bound.
+  // Memory-only workspaces without codebases must NOT receive code retrieval negative constraints
+  // or grep shadowing, preserving standard agent search behavior while retaining working memory.
+  const hasCode = hasIndexedCodebase({ workspace: cwd, entry: validEntry, codebases })
   const serverName = config.serverName || DEFAULT_SERVER_NAME
-  if (!promptFibers.has(agent)) {
+  if (hasCode && !promptFibers.has(agent)) {
     const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
       scope.systemPrompt.section({
         name: VECTR_GUIDANCE_SECTION_NAME,
