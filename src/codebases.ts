@@ -369,7 +369,10 @@ async function createCodebaseCore(
   // Dual validation & tolerance: resolve path alias if remotePath was passed
   const rawPath = spec.path || (spec as unknown as { remotePath?: string }).remotePath
   if (rawPath && typeof rawPath === 'string') {
-    spec.path = rawPath.trim()
+    spec.path = normalizeWorkspacePath(rawPath)
+  }
+  if (spec.workspace && typeof spec.workspace === 'string') {
+    spec.workspace = normalizeWorkspacePath(spec.workspace)
   }
   // Dual validation & tolerance: infer 'password' auth if password is provided but auth omitted
   if (!spec.auth && spec.password) {
@@ -493,7 +496,7 @@ async function createCodebaseCore(
   // 3) start remote daemon bound to loopback (PATH-injected so non-interactive
   // ssh, whose PATH lacks ~/.local/bin, can still resolve the uv-installed binary)
   const start = ssh(remoteShellCmd(spec.host, `vectr start ${spec.path} --host 127.0.0.1`))
-  const startResult = await start.promise
+  let startResult = await start.promise
   if (startResult.code !== 0) {
     takenServerNames.delete(serverName)
     if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
@@ -501,7 +504,7 @@ async function createCodebaseCore(
   }
   // 4) resolve the remote daemon port. Preferred: read the remote
   // `~/.vectr/instances.json` over ssh and match by workspace (the daemon writes
-  // its real port there). Fallback: scrape `vectr start` stdout. There is NO
+  // its real port there). Fallback: scrape `vectr start` stdout/stderr. There is NO
   // silent magic default: if both resolvers fail the daemon's real port is
   // genuinely unknown, so we clean up what was already allocated and fail loud
   // (改动3) instead of binding the tunnel to a dead port.
@@ -513,10 +516,38 @@ async function createCodebaseCore(
   // and reuses the already-assigned port (the `vectr start` in step 3 is a
   // no-op/idempotent when the daemon is already up). Querying the registry before
   // falling back to stdout is what makes a retry safe rather than a duplicate.
-  const remotePort =
-    (typeof spec.remotePort === 'number' && spec.remotePort > 0 ? spec.remotePort : undefined) ??
-    (await resolveRemotePort(ssh, spec.host, spec.path)) ??
-    parseRemotePort(startResult.stdout)
+  let remotePort: number | undefined =
+    typeof spec.remotePort === 'number' && spec.remotePort > 0 ? spec.remotePort : undefined
+
+  if (remotePort === undefined) {
+    const resolvedPort = await resolveRemotePort(ssh, spec.host, spec.path)
+    if (resolvedPort !== undefined) {
+      const isAlive = await checkRemoteDaemonAlive(ssh, spec.host, resolvedPort)
+      if (isAlive) {
+        remotePort = resolvedPort
+      } else {
+        // Stale instance: clean up with vectr stop --port <port> on remote host
+        const stop = ssh(remoteShellCmd(spec.host, `vectr stop --port ${resolvedPort}`))
+        await stop.promise.catch(() => {})
+        // Re-run vectr start
+        const restart = ssh(remoteShellCmd(spec.host, `vectr start ${spec.path} --host 127.0.0.1`))
+        startResult = await restart.promise
+        if (startResult.code !== 0) {
+          takenServerNames.delete(serverName)
+          if (credentialRef !== undefined) await deps.credStore.unset(credentialRef)
+          throw new Error(`failed to start vectr on ${spec.host}: ${startResult.stderr}`)
+        }
+        const combinedOutput = `${startResult.stdout}\n${startResult.stderr}`
+        remotePort = (await resolveRemotePort(ssh, spec.host, spec.path)) ?? parseRemotePort(combinedOutput)
+      }
+    }
+  }
+
+  if (remotePort === undefined) {
+    const combinedOutput = `${startResult.stdout}\n${startResult.stderr}`
+    remotePort = parseRemotePort(combinedOutput)
+  }
+
   if (remotePort === undefined) {
     // The tunnel/port steps below must not run with an undefined port. Roll back
     // the already-reserved server name and any stored credential, then throw with
@@ -561,19 +592,19 @@ async function createCodebaseCore(
   // of the tunnel-open stdout, then proceed: teardown keys off `tunnelCtl`
   // (see deleteCodebase), so a failed read never orphans the tunnel.
   let tunnelPid: number | undefined
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     const check = ssh(['-o', 'ConnectTimeout=5', '-O', 'check', '-S', ctl, spec.host])
     const checkResult = await check.promise
-    const pid = tunnelPidFrom(checkResult.stdout)
+    const pid = tunnelPidFrom(`${checkResult.stdout}\n${checkResult.stderr}`)
     if (pid !== undefined) {
       tunnelPid = pid
       break
     }
-    if (checkResult.code !== 0 && attempt < 2) {
-      await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 50 * (attempt + 1)))
+    if (checkResult.code !== 0 && attempt < 4) {
+      await new Promise((resolveBackoff) => setTimeout(resolveBackoff, 100 * (attempt + 1)))
       continue
     }
-    tunnelPid = tunnelPidFrom(tunnelResult.stdout)
+    tunnelPid = tunnelPidFrom(`${tunnelResult.stdout}\n${tunnelResult.stderr}`)
     break
   }
   const entry: CodebaseEntry = {
@@ -621,7 +652,36 @@ function tunnelPidFrom(stdout: string): number | undefined {
  * @param host - `user@host` remote target.
  * @param workspace - absolute workspace path the remote daemon serves.
  */
-async function resolveRemotePort(
+/** Normalize a workspace path by trimming whitespace and trailing slashes (preserves '/' for root). */
+export function normalizeWorkspacePath(p: string): string {
+  if (typeof p !== 'string') return ''
+  const trimmed = p.trim().replace(/\/+$/, '')
+  return trimmed === '' ? '/' : trimmed
+}
+
+/**
+ * Probe whether a remote vectr daemon is alive on loopback port `port`.
+ * Returns true if the daemon responds on /v1/status, false if dead/stale or unreachable.
+ */
+export async function checkRemoteDaemonAlive(
+  ssh: (args: string[]) => SpawnHandle,
+  host: string,
+  port: number,
+): Promise<boolean> {
+  const probe = ssh(remoteShellCmd(host, `curl -s -f http://127.0.0.1:${port}/v1/status || true`))
+  const result = await probe.promise
+  if (result.code !== 0) return false
+  return result.stdout.trim().length > 0
+}
+
+/**
+ * Read the remote host's `~/.vectr/instances.json` and resolve the port mapped to
+ * `workspace`.
+ * @param ssh - injected ssh runner (already carrying auth context).
+ * @param host - `user@host` remote target.
+ * @param workspace - absolute workspace path the remote daemon serves.
+ */
+export async function resolveRemotePort(
   ssh: (args: string[]) => SpawnHandle,
   host: string,
   workspace: string,
@@ -631,13 +691,14 @@ async function resolveRemotePort(
   // `$HOME` (e.g. conan's `/home/edogawaconan/.vectr/instances.json`); using
   // the local `homedir()` would point `cat` at a path that does not exist on
   // the remote, making the read fail silently and fall back to stdout/8760.
+  const normWorkspace = normalizeWorkspacePath(workspace)
   const cat = ssh([host, 'cat', '~/.vectr/instances.json'])
   const result = await cat.promise
   if (result.code !== 0) return undefined
   try {
     const registry = JSON.parse(result.stdout) as Record<string, { workspace?: string; port?: number }>
     const match = Object.values(registry).find(
-      e => e !== null && typeof e === 'object' && e.workspace === workspace,
+      e => e !== null && typeof e === 'object' && typeof e.workspace === 'string' && normalizeWorkspacePath(e.workspace) === normWorkspace,
     )
     if (match?.port !== undefined) return match.port
   } catch {
@@ -646,12 +707,26 @@ async function resolveRemotePort(
   return undefined
 }
 
-/** Best-effort parse of a remote `vectr start` port line. */
-function parseRemotePort(stdout: string): number | undefined {
-  const match = /"port"\s*:\s*(\d+)/.exec(stdout)
-  if (match !== null && match[1] !== undefined) return Number(match[1])
-  const m2 = /port[=:]\s*(\d+)/i.exec(stdout)
-  if (m2 !== null && m2[1] !== undefined) return Number(m2[1])
+/** Best-effort parse of a remote `vectr start` port line from stdout or combined output. */
+export function parseRemotePort(output: string): number | undefined {
+  if (typeof output !== 'string' || !output) return undefined
+
+  // a) "port"\s*:\s*(\d+)
+  const matchA = /"port"\s*:\s*(\d+)/i.exec(output)
+  if (matchA !== null && matchA[1] !== undefined) return Number(matchA[1])
+
+  // b) port\s*[=:]\s*(\d+)
+  const matchB = /\bport\s*[=:]\s*(\d+)/i.exec(output)
+  if (matchB !== null && matchB[1] !== undefined) return Number(matchB[1])
+
+  // c) (?:started|running).*?on port\s+(\d+)
+  const matchC = /(?:started|running).*?on port\s+(\d+)/i.exec(output)
+  if (matchC !== null && matchC[1] !== undefined) return Number(matchC[1])
+
+  // d) Port\s*:\s*(\d+)
+  const matchD = /\bPort\s*:\s*(\d+)/i.exec(output)
+  if (matchD !== null && matchD[1] !== undefined) return Number(matchD[1])
+
   return undefined
 }
 
@@ -1454,9 +1529,10 @@ export async function startRemoteDaemon(
 
   // 2) Resolve remote port
   const previousRemotePort = entry.remotePort
+  const combinedStartOutput = `${startResult.stdout}\n${startResult.stderr}`
   const resolvedRemotePort =
     (await resolveRemotePort(ssh, entry.host, entry.path)) ??
-    parseRemotePort(startResult.stdout) ??
+    parseRemotePort(combinedStartOutput) ??
     previousRemotePort
 
   if (resolvedRemotePort === undefined) {

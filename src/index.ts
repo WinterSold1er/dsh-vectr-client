@@ -1058,7 +1058,7 @@ export function buildCodebaseDeps(
       const passFile = join(tmpdir(), `vectr-sshpass-${process.pid}-${randomBytes(6).toString('hex')}`)
       writeFileSync(passFile, auth.password, { mode: 0o600 })
       try {
-        const handle = spawnRunner('sshpass', ['-f', passFile,
+        const handle = spawnRunner('sshpass', ['-f', passFile, 'ssh',
           '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...args])
         void handle.promise.finally(() => {
           try { rmSync(passFile) } catch {
@@ -1101,7 +1101,7 @@ export function buildCodebaseDeps(
     // (c) warn sink: findFreePort's preferred-port-migration warning surfaces
     // in the host log instead of being silently swallowed inside the module.
     warn: (message: string) => {
-      ctx.logger.warn(message)
+      ctx.logger?.warn?.(message)
     },
   }
 }

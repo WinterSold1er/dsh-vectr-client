@@ -7,7 +7,7 @@
  */
 
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { isReservedPrimarySlug, SLUG_PATTERN } from '../domain'
+import { isReservedPrimarySlug, normalizePath, SLUG_PATTERN } from '../domain'
 import { BTN } from './buttons'
 
 export interface CodebaseModalProps {
@@ -19,6 +19,29 @@ export interface CodebaseModalProps {
 
 const SLUG_REGEX = SLUG_PATTERN
 
+/**
+ * Auto-derive a valid slug from a local or remote directory path.
+ * Extracts the basename (last path segment), sanitizes it to match SLUG_PATTERN
+ * (1-32 chars of [A-Za-z0-9_-]), and avoids reserved primary slug collisions.
+ */
+export function deriveSlugFromPath(inputPath: string): string {
+  if (!inputPath || typeof inputPath !== 'string') return ''
+  const trimmed = inputPath.trim().replace(/[/\\]+$/, '')
+  if (!trimmed) return ''
+  const segments = trimmed.split(/[/\\]/)
+  const last = segments[segments.length - 1] ?? ''
+  let sanitized = last
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32)
+    .replace(/-+$/, '')
+  if (!sanitized) return ''
+  if (isReservedPrimarySlug(sanitized)) {
+    sanitized = `cb-${sanitized}`.slice(0, 32).replace(/-+$/, '')
+  }
+  return sanitized
+}
+
 export function CodebaseModal({
   workspace,
   isOpen,
@@ -27,6 +50,7 @@ export function CodebaseModal({
 }: CodebaseModalProps): ReactNode {
   const [type, setType] = useState<'local' | 'remote'>('local')
   const [slug, setSlug] = useState('')
+  const [slugAutoDerived, setSlugAutoDerived] = useState(true)
   const [path, setPath] = useState('')
   const [host, setHost] = useState('')
   const [remotePath, setRemotePath] = useState('')
@@ -40,6 +64,37 @@ export function CodebaseModal({
 
   const isSlugValid = SLUG_REGEX.test(slug)
   const slugError = slug.length > 0 && !isSlugValid ? 'Slug 仅支持 1-32 位字母、数字、下划线及短横线' : null
+
+  const handleSlugChange = (val: string): void => {
+    setSlug(val)
+    setSlugAutoDerived(val.length === 0)
+  }
+
+  const handlePathChange = (val: string): void => {
+    setPath(val)
+    if (slugAutoDerived || slug === '') {
+      const derived = deriveSlugFromPath(val)
+      setSlug(derived)
+      setSlugAutoDerived(true)
+    }
+  }
+
+  const handleRemotePathChange = (val: string): void => {
+    setRemotePath(val)
+    if (slugAutoDerived || slug === '') {
+      const derived = deriveSlugFromPath(val)
+      setSlug(derived)
+      setSlugAutoDerived(true)
+    }
+  }
+
+  const handleTypeChange = (nextType: 'local' | 'remote'): void => {
+    setType(nextType)
+    if (slugAutoDerived) {
+      const targetPath = nextType === 'local' ? path : remotePath
+      setSlug(deriveSlugFromPath(targetPath))
+    }
+  }
 
   const handleSubmit = async (e: FormEvent): Promise<void> => {
     e.preventDefault()
@@ -62,21 +117,24 @@ export function CodebaseModal({
     }
 
     if (type === 'local') {
-      if (!path.trim()) {
+      const normalizedPath = normalizePath(path)
+      if (!normalizedPath) {
         setError('本地路径不可为空')
         setBusy(false)
         return
       }
-      payload.path = path.trim()
+      payload.path = normalizedPath
     } else {
-      if (!host.trim() || !remotePath.trim()) {
+      const normalizedHost = host.trim()
+      const normalizedRemotePath = normalizePath(remotePath)
+      if (!normalizedHost || !normalizedRemotePath) {
         setError('远程主机与路径不可为空')
         setBusy(false)
         return
       }
-      payload.host = host.trim()
-      payload.path = remotePath.trim()
-      payload.remotePath = remotePath.trim()
+      payload.host = normalizedHost
+      payload.path = normalizedRemotePath
+      payload.remotePath = normalizedRemotePath
       const portNum = remotePort.trim() ? parseInt(remotePort.trim(), 10) : undefined
       if (portNum !== undefined && !isNaN(portNum) && portNum > 0) {
         payload.remotePort = portNum
@@ -164,7 +222,7 @@ export function CodebaseModal({
               className="vectr-input"
               style={{ width: '100%' }}
               value={slug}
-              onChange={(e) => setSlug(e.target.value.trim())}
+              onChange={(e) => handleSlugChange(e.target.value.trim())}
               placeholder="e.g. backend-service, auth-api"
               required
             />
@@ -183,7 +241,7 @@ export function CodebaseModal({
                   type="radio"
                   name="cb-type"
                   checked={type === 'local'}
-                  onChange={() => setType('local')}
+                  onChange={() => handleTypeChange('local')}
                 />
                 📁 本地代码库 (Local)
               </label>
@@ -192,7 +250,7 @@ export function CodebaseModal({
                   type="radio"
                   name="cb-type"
                   checked={type === 'remote'}
-                  onChange={() => setType('remote')}
+                  onChange={() => handleTypeChange('remote')}
                 />
                 🌐 远程代码库 (Remote via SSH)
               </label>
@@ -209,7 +267,7 @@ export function CodebaseModal({
                 className="vectr-input"
                 style={{ width: '100%' }}
                 value={path}
-                onChange={(e) => setPath(e.target.value)}
+                onChange={(e) => handlePathChange(e.target.value)}
                 placeholder="/path/to/local/project"
                 required
               />
@@ -241,7 +299,7 @@ export function CodebaseModal({
                     className="vectr-input"
                     style={{ width: '100%' }}
                     value={remotePort}
-                    placeholder="留空自动解析"
+                    placeholder="自动检测 (留空即可)"
                     onChange={(e) => setRemotePort(e.target.value)}
                   />
                 </div>
@@ -256,7 +314,7 @@ export function CodebaseModal({
                   className="vectr-input"
                   style={{ width: '100%' }}
                   value={remotePath}
-                  onChange={(e) => setRemotePath(e.target.value.trim())}
+                  onChange={(e) => handleRemotePathChange(e.target.value)}
                   placeholder="/home/user/project"
                   required
                 />
@@ -325,7 +383,7 @@ export function CodebaseModal({
             <button
               type="submit"
               className={BTN.primary}
-              disabled={busy || !isSlugValid || (type === 'local' ? !path.trim() : !host.trim() || !remotePath.trim())}
+              disabled={busy || !isSlugValid || (type === 'local' ? !normalizePath(path) : !host.trim() || !normalizePath(remotePath))}
             >
               {busy ? '创建中…' : '创建 Codebase'}
             </button>

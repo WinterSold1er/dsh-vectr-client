@@ -27,7 +27,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { isReservedPrimarySlug } from '../domain'
+import { isReservedPrimarySlug, normalizePath } from '../domain'
 import { VectrSettings } from './vectr-settings'
 import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
@@ -329,9 +329,16 @@ function CodebaseCreateForm(props: {
     // user's pick. The backend REQUIRES `workspace` for remote, and reporting it
     // for local is what enables per-workspace binding isolation.
     const reportedWorkspace = presetWorkspace ?? workspace
-    const body: Record<string, unknown> = { type, slug, path, workspace: reportedWorkspace }
+    const normalizedPath = normalizePath(path)
+    const body: Record<string, unknown> = {
+      type,
+      slug: slug.trim(),
+      path: normalizedPath,
+      workspace: reportedWorkspace,
+    }
     if (type === 'remote') {
-      body.host = host
+      body.host = host.trim()
+      body.remotePath = normalizedPath
       body.auth = auth
       if (auth === 'password') body.password = password
     }
@@ -361,7 +368,20 @@ function CodebaseCreateForm(props: {
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <div>
           <label className="vectr-label" htmlFor="cb-type">type</label>
-          <select id="cb-type" className="vectr-select" value={type} onChange={(e) => setType(e.target.value as 'local' | 'remote')}>
+          <select
+            id="cb-type"
+            className="vectr-select"
+            value={type}
+            onChange={(e) => {
+              const nextType = e.target.value as 'local' | 'remote'
+              setType(nextType)
+              if (nextType === 'remote') {
+                setPath('')
+              } else if (nextType === 'local' && !path && presetWorkspace) {
+                setPath(presetWorkspace)
+              }
+            }}
+          >
             <option value="local">local</option>
             <option value="remote">remote</option>
           </select>
@@ -372,7 +392,14 @@ function CodebaseCreateForm(props: {
         </div>
         <div>
           <label className="vectr-label" htmlFor="cb-path">path</label>
-          <input id="cb-path" className="vectr-input" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/abs/path" required />
+          <input
+            id="cb-path"
+            className="vectr-input"
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            placeholder={type === 'remote' ? '/remote/path/to/codebase' : '/abs/path'}
+            required
+          />
         </div>
       </div>
       {type === 'remote'
@@ -614,7 +641,7 @@ export function WorkspaceConsole(): ReactNode {
   // Both key sides are normalized (trailing slash trimmed) so a backend that
   // tolerates trailing slashes does not split one logical workspace into a
   // phantom orphan section (B1).
-  const normWs = (w: string): string => w.replace(/\/+$/, '')
+  const normWs = (w: string): string => normalizePath(w)
   const knownWorkspaces = (wsViews ?? []).map((w) => normWs(w.workspace))
   const byWs = new Map<string, CodebaseView[]>()
   const unassigned: CodebaseView[] = []

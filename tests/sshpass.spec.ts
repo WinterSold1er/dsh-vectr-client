@@ -65,6 +65,7 @@ describe('sshpass -f construction (no plaintext argv)', () => {
     const passFile = args[1]
     expect(passFile).toBeTypeOf('string')
     expect(passFile).not.toBe('s3cret')
+    expect(args[2]).toBe('ssh')
     // plaintext password must never appear in argv
     expect(args).not.toContain('-p')
     expect(args.join(' ')).not.toContain('s3cret')

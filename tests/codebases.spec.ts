@@ -78,6 +78,28 @@ function makeSshRunner(
   const runner = ((args: string[], auth?: SshAuthContext): SpawnHandle => {
     calls.push(args)
     auths.push(auth)
+    // If a script explicitly matches curl / status check, use it
+    const explicitCurl = scripts.find((s) => args.includes('curl') && s.match(args) && !s.match(['h', 'true']))
+    if (explicitCurl !== undefined) {
+      return {
+        promise: Promise.resolve({ code: explicitCurl.proc.code, stdout: explicitCurl.proc.stdout, stderr: explicitCurl.proc.stderr, signal: null }),
+        kill() {},
+      }
+    }
+    // If command is curl probe and not explicitly mocked to fail, return healthy daemon status
+    if (args.includes('curl')) {
+      const explicitFail = scripts.find((s) => s.match(args))
+      if (explicitFail !== undefined && explicitFail.proc.code !== 0) {
+        return {
+          promise: Promise.resolve({ code: explicitFail.proc.code, stdout: explicitFail.proc.stdout, stderr: explicitFail.proc.stderr, signal: null }),
+          kill() {},
+        }
+      }
+      return {
+        promise: Promise.resolve({ code: 0, stdout: '{"status":"ok"}', stderr: '', signal: null }),
+        kill() {},
+      }
+    }
     const hit = scripts.find((s) => s.match(args))
     if (hit === undefined) {
       throw new Error(`unexpected ssh: ${args.join(' ')}`)

@@ -156,6 +156,32 @@ export declare function findFreePort(min?: number, max?: number, exclude?: Set<n
  */
 export declare function createCodebase(deps: CodebaseDeps, metaPath: string, spec: CodebaseSpec): Promise<CodebaseEntry>;
 /**
+ * Resolve a remote vectr daemon's port by reading its `~/.vectr/instances.json`
+ * over ssh and matching the entry by workspace path. Returns `undefined` when
+ * the file is unreadable or has no matching entry, so the caller can fall back
+ * to scraping `vectr start` stdout.
+ * @param ssh - injected ssh runner (already carrying auth context).
+ * @param host - `user@host` remote target.
+ * @param workspace - absolute workspace path the remote daemon serves.
+ */
+/** Normalize a workspace path by trimming whitespace and trailing slashes (preserves '/' for root). */
+export declare function normalizeWorkspacePath(p: string): string;
+/**
+ * Probe whether a remote vectr daemon is alive on loopback port `port`.
+ * Returns true if the daemon responds on /v1/status, false if dead/stale or unreachable.
+ */
+export declare function checkRemoteDaemonAlive(ssh: (args: string[]) => SpawnHandle, host: string, port: number): Promise<boolean>;
+/**
+ * Read the remote host's `~/.vectr/instances.json` and resolve the port mapped to
+ * `workspace`.
+ * @param ssh - injected ssh runner (already carrying auth context).
+ * @param host - `user@host` remote target.
+ * @param workspace - absolute workspace path the remote daemon serves.
+ */
+export declare function resolveRemotePort(ssh: (args: string[]) => SpawnHandle, host: string, workspace: string): Promise<number | undefined>;
+/** Best-effort parse of a remote `vectr start` port line from stdout or combined output. */
+export declare function parseRemotePort(output: string): number | undefined;
+/**
  * Delete a codebase: stop the daemon (local or remote), kill the tunnel, and
  * remove the entry from metadata.
  * @param deps - injected runners.
