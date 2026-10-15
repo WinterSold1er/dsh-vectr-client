@@ -228,7 +228,7 @@ describe('healLocalCodebase — probe first, start only when dead', () => {
     const result = await healLocalCodebase(deps, metaPath, localEntry(), probe)
 
     expect(result).toBe('alive')
-    expect(probe).toHaveBeenCalledWith({ host: '127.0.0.1', port: 8766 })
+    expect(probe).toHaveBeenCalledWith({ host: '127.0.0.1', port: 8766, workspace: '/home/csy/Work/demo' })
     expect(calls).toHaveLength(0)
     expect(existsSync(metaPath)).toBe(false)
   })
@@ -282,7 +282,7 @@ describe('healLocalCodebase — port reconciliation against the daemon registry'
 
     expect(result).toBe('reconciled')
     expect(loadCodebases(metaPath)[0]?.localPort).toBe(8766)
-    expect(probe).toHaveBeenCalledWith({ host: '127.0.0.1', port: 8766 })
+    expect(probe).toHaveBeenCalledWith({ host: '127.0.0.1', port: 8766, workspace: '/home/csy/Work/demo' })
     expect(calls).toHaveLength(0)
     expect(warn).toHaveBeenCalledTimes(1)
     expect(String(warn.mock.calls[0]?.[0])).toContain('8765')

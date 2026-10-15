@@ -22,7 +22,7 @@ import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
-import { type CodebaseEntry, type CredentialStore, type SpawnRunner, type SshRunner } from './codebases';
+import { type CodebaseDeps, type CodebaseEntry, type CredentialStore, type DaemonAliveProbe, type SpawnRunner, type SshRunner } from './codebases';
 import { type InstancesFile } from './registry';
 export * from './domain';
 export * from './infra';
@@ -30,7 +30,7 @@ export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, resolveInstanceExact, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
-export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases';
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS, withLocalDaemonLock, _resetLocalDaemonLockForTests } from './codebases';
 export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, RemoteDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases';
 /**
  * Local structural view of the host `webServer` service this plugin registers
@@ -112,6 +112,8 @@ export declare const DEFAULT_UPGRADE_TIMEOUT_MS = 15000;
  * Prevents a persistently-unreachable host from being hammered on every host
  * restart while still leaving room for transient blips to recover. */
 export declare const STARTUP_HEAL_COOLDOWN_MS = 30000;
+/** Test seam to reset the startup-heal cooldown map. */
+export declare function _resetStartupHealCooldownForTests(): void;
 /** (b) Startup-heal scope: which persisted entries get an automatic heal attempt
  * at host startup. `up` keeps its legacy behavior — the daemon/tunnel can die
  * while the host stays up and the meta keeps claiming `up`; `down` and `error`
@@ -124,6 +126,17 @@ export declare const STARTUP_HEAL_COOLDOWN_MS = 30000;
  *    cgroup, and previously nothing ever started them again.
  */
 export declare function startupHealEligible(entry: Pick<CodebaseEntry, 'status'>): boolean;
+/**
+ * Liveness probe handed to {@link healLocalCodebase} at host startup. Reuses the
+ * same process+HTTP diagnosis as the console scan (`diagnoseDaemon`), so a daemon
+ * that holds its port but hangs on HTTP counts as dead and gets restarted
+ * instead of shadowing a broken endpoint. A probe that throws is reported and
+ * treated as dead — the restart path, not silence.
+ * @param ctx - plugin context (logger).
+ * @param config - resolved plugin configuration (probe budgets).
+ * @returns the injected {@link DaemonAliveProbe}.
+ */
+export declare function daemonAliveProbe(ctx: Context, config: Required<Config>): DaemonAliveProbe;
 export declare const Config: z<Config>;
 /**
  * System-prompt section contributed to each agent when its vectr daemon is
@@ -188,6 +201,13 @@ disposed?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>, codebaseHandles
  * @param codebasesPath - absolute path of the codebase metadata file.
  */
 export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string, disposed?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>): Promise<void>;
+/**
+ * Run the startup heal across all eligible codebases in the metadata registry.
+ * Local codebases are processed strictly sequentially (`for ... of` with `await`),
+ * so that projects don't all storm the local port allocator concurrently at boot.
+ * Remote codebase tunnels continue to be kicked off in the background.
+ */
+export declare function startupHeal(deps: CodebaseDeps, codebasesPath: string, instancesPath: string, ctx: Context, config: Required<Config>): Promise<void>;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.

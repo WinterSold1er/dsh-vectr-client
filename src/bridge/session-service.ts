@@ -10,6 +10,7 @@
 
 import { resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { normalizeWorkspacePath } from '../probe'
 import {
   canReindex,
   formatMode,
@@ -151,7 +152,22 @@ export class SessionVectrService implements ISessionStatusService {
 
     // 3. Probe daemon status
     const status = await this.apiClient.getStatus(host, instance.port, this.statusTimeoutMs)
-    const live = status !== undefined
+    let live = status !== undefined
+    let reason: string | undefined
+
+    if (!live) {
+      reason = 'daemon_unresponsive_or_offline'
+    } else if (
+      typeof status?.workspace_root === 'string' &&
+      status.workspace_root.trim().length > 0
+    ) {
+      const requestedWs = normalizeWorkspacePath(workspace)
+      const statusWs = normalizeWorkspacePath(status.workspace_root)
+      if (requestedWs !== statusWs) {
+        live = false
+        reason = 'workspace_mismatch'
+      }
+    }
 
     // 4. Resolve effective mode (from instance record or status payload)
     const rawMode = typeof instance.mode === 'string'
@@ -178,7 +194,7 @@ export class SessionVectrService implements ISessionStatusService {
       codebases,
       canReindex: reindexRule.canReindex,
       ...(reindexRule.reason ? { reindexDisabledReason: reindexRule.reason } : {}),
-      ...(!live ? { reason: 'daemon_unresponsive_or_offline' } : {}),
+      ...(reason ? { reason } : {}),
     }
   }
 

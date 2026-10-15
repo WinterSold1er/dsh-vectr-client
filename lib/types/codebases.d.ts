@@ -86,6 +86,14 @@ export declare const SLUG_PATTERN: RegExp;
 export declare const DEFAULT_CODEBASES_FILE: string;
 /** Clear the in-process server-name registry (test helper). */
 export declare function _resetServerNameRegistry(): void;
+/**
+ * Execute a local daemon operation under the process-wide startup mutex.
+ * Reentrant: if already holding the lock in the current async context, runs immediately.
+ * Fault-tolerant: failure of one queued operation does not reject or stall the queue.
+ */
+export declare function withLocalDaemonLock<T>(fn: () => Promise<T>): Promise<T>;
+/** Test seam to reset the local daemon lock queue. */
+export declare function _resetLocalDaemonLockForTests(): void;
 /** Sentinel `workspace` for old entries that cannot be inferred during migration. */
 export declare const UNASSIGNED_WORKSPACE = "__unassigned__";
 /**
@@ -306,9 +314,10 @@ export interface LocalDaemonStartOutcome {
  * on this endpoint. Injected so the heal decision is unit-testable without a
  * real socket (NFR3).
  */
-export type DaemonAliveProbe = (endpoint: {
+export type DaemonAliveProbe = (target: {
     host: string;
     port: number;
+    workspace?: string;
 }) => Promise<boolean>;
 /**
  * Verdict of one local-daemon startup heal.

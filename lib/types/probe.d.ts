@@ -21,7 +21,12 @@ export declare const DEFAULT_TCP_TIMEOUT_MS = 300;
  */
 export type HttpProbe = (entry: InstanceEntry, timeoutMs: number) => Promise<VectrStatus | undefined>;
 /** Reason a daemon record was judged not alive (for skip diagnostics, R4). */
-export type SkipReason = 'PROCESS_DEAD_ESRCH' | 'PORT_CLOSED' | 'HTTP_PROBE_TIMEOUT' | 'HTTP_PROBE_UNREACHABLE';
+export type SkipReason = 'PROCESS_DEAD_ESRCH' | 'PORT_CLOSED' | 'HTTP_PROBE_TIMEOUT' | 'HTTP_PROBE_UNREACHABLE' | 'WORKSPACE_MISMATCH';
+/**
+ * Normalize workspace path by trimming whitespace, normalizing slashes,
+ * deduplicating slashes, and removing trailing slashes (preserves '/' for root).
+ */
+export declare function normalizeWorkspacePath(p?: string | null): string;
 /** Result of the combined liveness diagnosis. */
 export interface AliveDiagnosis {
     /** `true` only when the process layer AND the HTTP layer both pass. */

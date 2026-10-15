@@ -16,9 +16,11 @@ import {
   deriveServerName,
   FileCredentialStore,
   findFreePort,
+  healLocalCodebase,
   loadCodebases,
   migrateCodebases,
   saveCodebases,
+  startLocalDaemon,
   testCodebase,
   cleanupStaleTunnelSockets,
   safeRemove,
@@ -790,6 +792,68 @@ describe('concurrency + port guards (P4)', () => {
     for (let p = 8760; p <= 8799; p++) all.add(p)
     expect(await findFreePort(8760, 8799, all)).toBeUndefined()
     expect(await findFreePort(8760, 8799, new Set([8760]))).not.toBe(8760)
+  })
+
+  it('serializes concurrent healLocalCodebase calls so local daemon startup is strictly queue-ordered', async () => {
+    let concurrency = 0
+    let maxConcurrency = 0
+    const deps: CodebaseDeps = {
+      spawnRunner: (_cmd, _args) => {
+        const promise = (async () => {
+          concurrency++
+          if (concurrency > maxConcurrency) maxConcurrency = concurrency
+          await new Promise((r) => setTimeout(r, 20))
+          concurrency--
+          return {
+            code: 0,
+            stdout: JSON.stringify({ status: 'ready', port: 8766 }),
+            stderr: '',
+            signal: null,
+          }
+        })()
+        return { promise, kill: () => {} }
+      },
+      sshRunner: makeSshRunner([]),
+      credStore: makeCredStore(),
+    }
+    const e1: CodebaseEntry = {
+      id: 'l1',
+      slug: 'l1',
+      type: 'local',
+      path: '/w1',
+      workspace: '/w1',
+      serverName: 'vectr_l1',
+      localPort: 8766,
+      status: 'down',
+    }
+    const e2: CodebaseEntry = {
+      id: 'l2',
+      slug: 'l2',
+      type: 'local',
+      path: '/w2',
+      workspace: '/w2',
+      serverName: 'vectr_l2',
+      localPort: 8767,
+      status: 'down',
+    }
+    saveCodebases(metaPath, [e1, e2])
+
+    const probe = vi.fn(async () => {
+      concurrency++
+      if (concurrency > maxConcurrency) maxConcurrency = concurrency
+      await new Promise((r) => setTimeout(r, 10))
+      concurrency--
+      return false
+    })
+
+    const [r1, r2] = await Promise.all([
+      healLocalCodebase(deps, metaPath, e1, probe),
+      healLocalCodebase(deps, metaPath, e2, probe),
+    ])
+
+    expect(r1).toBe('started')
+    expect(r2).toBe('started')
+    expect(maxConcurrency).toBe(1)
   })
 })
 

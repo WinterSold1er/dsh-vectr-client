@@ -116,6 +116,43 @@ describe('isDaemonAlive / diagnoseDaemon (R3 gate)', () => {
     // covered by injected-probe unit tests above.
     expect(d.reason).toBe('PORT_CLOSED')
   })
+
+  it('workspace identity matches: alive when status.workspace_root matches entry.workspace', async () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const statusWithRoot: VectrStatus = { fully_ready: true, workspace_root: '/w' }
+    const d = await diagnoseDaemon(entry({ workspace: '/w' }), deps(fakeProbe(statusWithRoot)))
+    expect(d.alive).toBe(true)
+    expect(d.reason).toBeUndefined()
+    spy.mockRestore()
+  })
+
+  it('workspace identity matches with trailing slash normalization', async () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const statusWithRoot: VectrStatus = { fully_ready: true, workspace_root: '/w/' }
+    const d = await diagnoseDaemon(entry({ workspace: '/w' }), deps(fakeProbe(statusWithRoot)))
+    expect(d.alive).toBe(true)
+    expect(d.reason).toBeUndefined()
+    spy.mockRestore()
+  })
+
+  it('workspace mismatch: not alive and reason WORKSPACE_MISMATCH', async () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const statusWithRoot: VectrStatus = { fully_ready: true, workspace_root: '/other-workspace' }
+    const d = await diagnoseDaemon(entry({ workspace: '/w' }), deps(fakeProbe(statusWithRoot)))
+    expect(d.alive).toBe(false)
+    expect(d.reason).toBe('WORKSPACE_MISMATCH')
+    spy.mockRestore()
+  })
+
+  it('workspace is host or placeholder: skips mismatch check', async () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const statusWithRoot: VectrStatus = { fully_ready: true, workspace_root: '/other-workspace' }
+    const dHost = await diagnoseDaemon(entry({ workspace: '127.0.0.1', host: '127.0.0.1' }), deps(fakeProbe(statusWithRoot)))
+    expect(dHost.alive).toBe(true)
+    const dUnassigned = await diagnoseDaemon(entry({ workspace: '__unassigned__' }), deps(fakeProbe(statusWithRoot)))
+    expect(dUnassigned.alive).toBe(true)
+    spy.mockRestore()
+  })
 })
 
 describe('readInstancesFile (registry read, R3 feeder)', () => {

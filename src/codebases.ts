@@ -12,6 +12,7 @@
  */
 
 import { homedir, tmpdir } from 'node:os'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -150,6 +151,42 @@ const inProgressLocalPorts = new Set<number>()
  * (EADDRINUSE / ctl-exists -> spurious `'error'`). See {@link ensureTunnelUp}.
  */
 const healLocks = new Map<string, Promise<EnsureTunnelResult>>()
+
+/**
+ * AsyncLocalStorage context tracking whether the current async execution context
+ * already holds the local daemon startup lock. Provides re-entrancy so
+ * `healLocalCodebase` can safely invoke `startLocalDaemon` without self-deadlocking.
+ */
+const localDaemonLockStorage = new AsyncLocalStorage<boolean>()
+
+/**
+ * Promise-chain queue ensuring all local daemon startup and heal operations
+ * within the process run strictly serialized, one after another.
+ * Prevents multiple daemons from concurrently probing and starting at the exact
+ * same instant, which would otherwise race on free port discovery and fail
+ * with EADDRINUSE.
+ */
+let localDaemonQueue: Promise<unknown> = Promise.resolve()
+
+/**
+ * Execute a local daemon operation under the process-wide startup mutex.
+ * Reentrant: if already holding the lock in the current async context, runs immediately.
+ * Fault-tolerant: failure of one queued operation does not reject or stall the queue.
+ */
+export function withLocalDaemonLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (localDaemonLockStorage.getStore()) {
+    return fn()
+  }
+  const run = () => localDaemonLockStorage.run(true, fn)
+  const next = localDaemonQueue.then(run, run)
+  localDaemonQueue = next.catch(() => {})
+  return next
+}
+
+/** Test seam to reset the local daemon lock queue. */
+export function _resetLocalDaemonLockForTests(): void {
+  localDaemonQueue = Promise.resolve()
+}
 
 /** Sentinel `workspace` for old entries that cannot be inferred during migration. */
 export const UNASSIGNED_WORKSPACE = '__unassigned__'
@@ -1066,7 +1103,7 @@ export interface LocalDaemonStartOutcome {
  * on this endpoint. Injected so the heal decision is unit-testable without a
  * real socket (NFR3).
  */
-export type DaemonAliveProbe = (endpoint: { host: string; port: number }) => Promise<boolean>
+export type DaemonAliveProbe = (target: { host: string; port: number; workspace?: string }) => Promise<boolean>
 
 /**
  * Verdict of one local-daemon startup heal.
@@ -1126,26 +1163,29 @@ export async function healLocalCodebase(
   if (entry.type !== 'local') {
     throw new Error(`healLocalCodebase: ${entry.slug} is not a local codebase`)
   }
-  const host = DEFAULT_HOST
+  return withLocalDaemonLock(async () => {
+    const host = DEFAULT_HOST
 
-  const truth = recordedPort?.(entry.workspace ?? entry.path)
-  let target = entry
-  let reconciled = false
-  if (typeof truth === 'number' && truth !== entry.localPort) {
-    deps.warn?.(
-      `vectr-client: codebase ${entry.slug} metadata port ${entry.localPort ?? 'unset'} disagrees with the ` +
-      `daemon registry (${truth}); using ${truth}`,
-    )
-    target = { ...entry, localPort: truth }
-    persist(metaPath, target)
-    reconciled = true
-  }
+    const truth = recordedPort?.(entry.workspace ?? entry.path)
+    let target = entry
+    let reconciled = false
+    if (typeof truth === 'number' && truth !== entry.localPort) {
+      deps.warn?.(
+        `vectr-client: codebase ${entry.slug} metadata port ${entry.localPort ?? 'unset'} disagrees with the ` +
+        `daemon registry (${truth}); using ${truth}`,
+      )
+      target = { ...entry, localPort: truth }
+      persist(metaPath, target)
+      reconciled = true
+    }
 
-  if (typeof target.localPort === 'number' && (await probe({ host, port: target.localPort }))) {
-    return reconciled ? 'reconciled' : 'alive'
-  }
-  await startLocalDaemon(deps, metaPath, target)
-  return 'started'
+    const workspace = entry.workspace ?? entry.path
+    if (typeof target.localPort === 'number' && (await probe({ host, port: target.localPort, workspace }))) {
+      return reconciled ? 'reconciled' : 'alive'
+    }
+    await startLocalDaemon(deps, metaPath, target)
+    return 'started'
+  })
 }
 
 /**
@@ -1183,44 +1223,46 @@ export async function startLocalDaemon(
     throw new Error(`startLocalDaemon: ${entry.slug} has no path to start`)
   }
 
-  const handle = deps.spawnRunner('vectr', ['start', '--path', entry.path, '--json'])
-  const result = await handle.promise
+  return withLocalDaemonLock(async () => {
+    const handle = deps.spawnRunner('vectr', ['start', '--path', entry.path, '--json'])
+    const result = await handle.promise
 
-  // A signaled exit is never a success even when the code reads clean.
-  if (result.signal !== null) {
-    throw new Error(`vectr start for ${entry.slug} was killed (${result.signal})`)
-  }
-  if (result.code !== 0) {
-    throw new Error(`vectr start failed for ${entry.slug} (exit ${result.code}): ${result.stderr}`)
-  }
+    // A signaled exit is never a success even when the code reads clean.
+    if (result.signal !== null) {
+      throw new Error(`vectr start for ${entry.slug} was killed (${result.signal})`)
+    }
+    if (result.code !== 0) {
+      throw new Error(`vectr start failed for ${entry.slug} (exit ${result.code}): ${result.stderr}`)
+    }
 
-  let parsed: VectrStartResult
-  try {
-    parsed = JSON.parse(result.stdout) as VectrStartResult
-  } catch (error) {
-    throw new Error(`vectr start returned non-JSON stdout for ${entry.slug}: ${String(error)}`)
-  }
-  if (parsed.status === 'failed') {
-    throw new Error(`vectr start reported failed status for ${entry.slug}: ${result.stderr}`)
-  }
-  if (typeof parsed.port !== 'number') {
-    throw new Error(`vectr start did not report a port for ${entry.slug}`)
-  }
+    let parsed: VectrStartResult
+    try {
+      parsed = JSON.parse(result.stdout) as VectrStartResult
+    } catch (error) {
+      throw new Error(`vectr start returned non-JSON stdout for ${entry.slug}: ${String(error)}`)
+    }
+    if (parsed.status === 'failed') {
+      throw new Error(`vectr start reported failed status for ${entry.slug}: ${result.stderr}`)
+    }
+    if (typeof parsed.port !== 'number') {
+      throw new Error(`vectr start did not report a port for ${entry.slug}`)
+    }
 
-  const previousPort = entry.localPort
-  const portChanged = previousPort !== undefined && previousPort !== parsed.port
-  if (portChanged) {
-    deps.warn?.(
-      `vectr-client: codebase ${entry.slug} rebound to port ${parsed.port} (was ${previousPort}); ` +
-      'sessions bound to the old port must open a new session to pick the new endpoint up',
-    )
-  }
+    const previousPort = entry.localPort
+    const portChanged = previousPort !== undefined && previousPort !== parsed.port
+    if (portChanged) {
+      deps.warn?.(
+        `vectr-client: codebase ${entry.slug} rebound to port ${parsed.port} (was ${previousPort}); ` +
+        'sessions bound to the old port must open a new session to pick the new endpoint up',
+      )
+    }
 
-  const next: CodebaseEntry = { ...entry, localPort: parsed.port, status: 'up' }
-  delete next.error
-  persist(metaPath, next)
+    const next: CodebaseEntry = { ...entry, localPort: parsed.port, status: 'up' }
+    delete next.error
+    persist(metaPath, next)
 
-  return { slug: entry.slug, port: parsed.port, portChanged, previousPort }
+    return { slug: entry.slug, port: parsed.port, portChanged, previousPort }
+  })
 }
 
 /**

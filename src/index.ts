@@ -54,6 +54,7 @@ import {
   startCodebaseDaemon,
   testCodebase,
   UNASSIGNED_WORKSPACE,
+  type CodebaseDeps,
   type CodebaseEntry,
   type CodebaseSpec,
   type CredentialStore,
@@ -95,7 +96,7 @@ export type { InstanceEntry, InstancesFile } from './registry'
 // Re-export the tunnel self-heal surface (问题1B) and the local-daemon startup
 // heal so callers/tests resolve them from the plugin root, and so the built
 // artifact provably contains them.
-export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS } from './codebases'
+export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS, withLocalDaemonLock, _resetLocalDaemonLockForTests } from './codebases'
 export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, RemoteDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases'
 
 /** Return a shallow copy with the credential ref omitted (no secret leaks). */
@@ -203,6 +204,11 @@ export const STARTUP_HEAL_COOLDOWN_MS = 30_000
  * restart resets the map (one fresh attempt per slug per host lifetime). */
 const startupHealCooldown = new Map<string, number>()
 
+/** Test seam to reset the startup-heal cooldown map. */
+export function _resetStartupHealCooldownForTests(): void {
+  startupHealCooldown.clear()
+}
+
 /** (b) Startup-heal scope: which persisted entries get an automatic heal attempt
  * at host startup. `up` keeps its legacy behavior — the daemon/tunnel can die
  * while the host stays up and the meta keeps claiming `up`; `down` and `error`
@@ -230,13 +236,11 @@ export function startupHealEligible(
  * @param config - resolved plugin configuration (probe budgets).
  * @returns the injected {@link DaemonAliveProbe}.
  */
-function daemonAliveProbe(ctx: Context, config: Required<Config>): DaemonAliveProbe {
-  return async ({ host, port }) => {
+export function daemonAliveProbe(ctx: Context, config: Required<Config>): DaemonAliveProbe {
+  return async ({ host, port, workspace }) => {
     try {
-      // `workspace` is unused by the probe path (no pid → TCP + HTTP only), so
-      // the endpoint itself is passed rather than inventing a workspace.
       const { alive } = await diagnoseDaemon(
-        { workspace: host, port, host },
+        { workspace: workspace ?? host, port, host },
         {
           httpProbe: fetchStatus,
           httpTimeoutMs: config.daemonHttpTimeoutMs,
@@ -601,6 +605,69 @@ export async function installCodebaseConnections(
 }
 
 /**
+ * Run the startup heal across all eligible codebases in the metadata registry.
+ * Local codebases are processed strictly sequentially (`for ... of` with `await`),
+ * so that projects don't all storm the local port allocator concurrently at boot.
+ * Remote codebase tunnels continue to be kicked off in the background.
+ */
+export async function startupHeal(
+  deps: CodebaseDeps,
+  codebasesPath: string,
+  instancesPath: string,
+  ctx: Context,
+  config: Required<Config>,
+): Promise<void> {
+  const now = Date.now()
+  // Exact-match registry view for local port reconciliation, read once. It must
+  // be `resolveInstanceExact`, never `resolveInstance`: the latter's prefix
+  // match would hand every record-less codebase the enclosing `/home/csy`
+  // daemon's port and silently bind it to the wrong workspace's index.
+  let startupInstances: InstancesFile | undefined
+  try {
+    startupInstances = readInstancesFile(ctx, instancesPath)
+  } catch (error) {
+    ctx.logger.warn(`vectr-client: cannot read daemon registry at ${instancesPath} (${String(error)}); local codebase ports will not be reconciled`)
+  }
+  const recordedPortOf = (workspace: string): number | undefined => {
+    if (startupInstances === undefined) return undefined
+    const live = resolveInstanceExact(startupInstances, workspace)
+    return typeof live?.port === 'number' ? live.port : undefined
+  }
+  const probe = daemonAliveProbe(ctx, config)
+  for (const entry of loadCodebases(codebasesPath)) {
+    if (!startupHealEligible(entry)) continue
+    // Cooldown: skip if we already attempted this slug too recently. The
+    // timestamp is kept in-process; it does not survive a restart, which is
+    // fine — a fresh process starts with a clean slate and one attempt.
+    const lastAttempt = startupHealCooldown.get(entry.slug)
+    if (lastAttempt !== undefined && now - lastAttempt < STARTUP_HEAL_COOLDOWN_MS) continue
+    startupHealCooldown.set(entry.slug, now)
+    if (entry.type === 'remote') {
+      void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
+        ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
+      })
+    } else {
+      // Local daemon: a host restart SIGTERMs every daemon in this service's
+      // cgroup and nothing used to start them again. Heal reconciles the
+      // metadata port against the daemon registry first, then probes, so a
+      // live daemon (and the sessions using its port) is never disturbed.
+      // Sequential await prevents port allocation collisions on startup.
+      try {
+        const result = await healLocalCodebase(deps, codebasesPath, entry, probe, recordedPortOf)
+        if (result === 'reconciled') {
+          ctx.logger.info(`vectr-client: corrected stale port for local codebase ${entry.slug} from the daemon registry`)
+        }
+        if (result === 'started') {
+          ctx.logger.info(`vectr-client: restarted local vectr daemon for ${entry.slug}`)
+        }
+      } catch (err) {
+        ctx.logger.warn(`vectr-client: could not restart local vectr daemon for ${entry.slug}: ${String(err)}`)
+      }
+    }
+  }
+}
+
+/**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.
  * @param ctx - plugin context whose fiber owns the listeners and handles.
@@ -687,55 +754,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   // registry entry still records — the already-published MCP URL survives.
   try {
     const deps = buildCodebaseDeps(ctx, resolved.secretsPath)
-    const now = Date.now()
-    // Exact-match registry view for local port reconciliation, read once. It must
-    // be `resolveInstanceExact`, never `resolveInstance`: the latter's prefix
-    // match would hand every record-less codebase the enclosing `/home/csy`
-    // daemon's port and silently bind it to the wrong workspace's index.
-    let startupInstances: InstancesFile | undefined
-    try {
-      startupInstances = readInstancesFile(ctx, instancesPath)
-    } catch (error) {
-      ctx.logger.warn(`vectr-client: cannot read daemon registry at ${instancesPath} (${String(error)}); local codebase ports will not be reconciled`)
-    }
-    const recordedPortOf = (workspace: string): number | undefined => {
-      if (startupInstances === undefined) return undefined
-      const live = resolveInstanceExact(startupInstances, workspace)
-      return typeof live?.port === 'number' ? live.port : undefined
-    }
-    for (const entry of loadCodebases(codebasesPath)) {
-      if (!startupHealEligible(entry)) continue
-      // Cooldown: skip if we already attempted this slug too recently. The
-      // timestamp is kept in-process; it does not survive a restart, which is
-      // fine — a fresh process starts with a clean slate and one attempt.
-      const lastAttempt = startupHealCooldown.get(entry.slug)
-      if (lastAttempt !== undefined && now - lastAttempt < STARTUP_HEAL_COOLDOWN_MS) continue
-      startupHealCooldown.set(entry.slug, now)
-      if (entry.type === 'remote') {
-        void ensureTunnelUp(deps, codebasesPath, entry).catch((err) => {
-          ctx.logger.warn(`vectr-client: could not re-establish tunnel for ${entry.slug}: ${String(err)}`)
-        })
-      } else {
-        // Local daemon: a host restart SIGTERMs every daemon in this service's
-        // cgroup and nothing used to start them again. Heal reconciles the
-        // metadata port against the daemon registry first, then probes, so a
-        // live daemon (and the sessions using its port) is never disturbed.
-        void healLocalCodebase(deps, codebasesPath, entry, daemonAliveProbe(ctx, resolved), recordedPortOf)
-          .then((result) => {
-            if (result === 'reconciled') {
-              ctx.logger.info(`vectr-client: corrected stale port for local codebase ${entry.slug} from the daemon registry`)
-            }
-            if (result === 'started') {
-              ctx.logger.info(`vectr-client: restarted local vectr daemon for ${entry.slug}`)
-            }
-          })
-          .catch((err) => {
-            ctx.logger.warn(`vectr-client: could not restart local vectr daemon for ${entry.slug}: ${String(err)}`)
-          })
-      }
-    }
+    void startupHeal(deps, codebasesPath, instancesPath, ctx, resolved).catch((err) => {
+      ctx.logger.warn(`vectr-client: startup heal failed: ${String(err)}`)
+    })
   } catch (err) {
-    ctx.logger.warn(`vectr-client: startup tunnel heal skipped: ${String(err)}`)
+    ctx.logger.warn(`vectr-client: startup codebase heal skipped: ${String(err)}`)
   }
   const handles = new Map<Agent, ConnectionHandle>()
   const codebaseHandles = new Map<Agent, ConnectionHandle[]>()

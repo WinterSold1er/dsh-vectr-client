@@ -34,6 +34,32 @@ export type SkipReason =
   | 'PORT_CLOSED'
   | 'HTTP_PROBE_TIMEOUT'
   | 'HTTP_PROBE_UNREACHABLE'
+  | 'WORKSPACE_MISMATCH'
+
+/**
+ * Normalize workspace path by trimming whitespace, normalizing slashes,
+ * deduplicating slashes, and removing trailing slashes (preserves '/' for root).
+ */
+export function normalizeWorkspacePath(p?: string | null): string {
+  if (!p || typeof p !== 'string') return ''
+  const trimmed = p.trim().replace(/\\/g, '/').replace(/\/+/g, '/')
+  const stripped = trimmed.replace(/\/+$/, '')
+  return stripped === '' ? '/' : stripped
+}
+
+/**
+ * Determine if entry.workspace represents a real workspace directory path
+ * rather than a host placeholder or unassigned sentinel.
+ */
+function isEffectiveWorkspacePath(workspace?: string | null, host?: string): boolean {
+  if (!workspace || typeof workspace !== 'string') return false
+  const trimmed = workspace.trim()
+  if (trimmed.length === 0) return false
+  if (trimmed === '__unassigned__' || trimmed.startsWith('__')) return false
+  if (host && trimmed === host.trim()) return false
+  if (trimmed === DEFAULT_HOST || trimmed === 'localhost') return false
+  return true
+}
 
 /** Result of the combined liveness diagnosis. */
 export interface AliveDiagnosis {
@@ -152,6 +178,19 @@ export async function diagnoseDaemon(entry: InstanceEntry, deps: ProbeDeps): Pro
   try {
     const status = await deps.httpProbe(entry, deps.httpTimeoutMs)
     if (status === undefined) return { alive: false, reason: 'HTTP_PROBE_UNREACHABLE' }
+
+    if (
+      isEffectiveWorkspacePath(entry.workspace, host) &&
+      typeof status.workspace_root === 'string' &&
+      status.workspace_root.trim().length > 0
+    ) {
+      const entryWs = normalizeWorkspacePath(entry.workspace)
+      const statusWs = normalizeWorkspacePath(status.workspace_root)
+      if (entryWs !== statusWs) {
+        return { alive: false, reason: 'WORKSPACE_MISMATCH' }
+      }
+    }
+
     return { alive: true }
   } catch {
     return { alive: false, reason: 'HTTP_PROBE_TIMEOUT' }
