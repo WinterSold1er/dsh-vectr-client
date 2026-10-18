@@ -15,6 +15,11 @@ import type { CSSProperties } from 'react'
 /** Outer wrapper that enables horizontal scrolling when the table overflows. */
 export const scrollWrap: CSSProperties = { overflowX: 'auto' }
 
+/** Same as {@link scrollWrap} but with a bounded height, which makes the wrapper
+ * its own scrollport so `.vectr-table thead th { position: sticky }` has
+ * something to stick to while the page itself scrolls. */
+export const scrollWrapSticky: CSSProperties = { ...scrollWrap, maxHeight: '60vh' }
+
 /** Collapsed-border + full-width base shared by every vectr table. */
 export const tableBase: CSSProperties = {
   borderCollapse: 'collapse',

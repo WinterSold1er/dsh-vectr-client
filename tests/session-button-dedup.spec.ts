@@ -23,7 +23,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import type { ReactNode } from 'react'
+import { createElement, type ReactNode } from 'react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import * as domainRules from '../src/domain/rules'
 import * as domainIndex from '../src/domain/index'
@@ -40,6 +40,8 @@ import {
   SessionBoundInputRightAction,
 } from '../src/client/ConversationInputRightAction'
 import { dialogCoordinator } from '../src/client/dialogCoordinator'
+import type { SessionVectrState } from '../src/domain'
+import { renderToHtml } from './react-render'
 
 const inputActionSrc = readFileSync(
   new URL('../src/client/ConversationInputRightAction.tsx', import.meta.url),
@@ -564,8 +566,71 @@ describe('QA Quality Detector: Tricky Boundaries, Failure Paths & Configuration 
       expect(headerActionSrc).toMatch(/controller\.abort\(\)/)
     })
 
-    it('SessionHeaderAction source resets state to null on non-200 HTTP responses', () => {
-      expect(headerActionSrc).toMatch(/if\s*\(res\.ok\)[\s\S]*?else\s*\{\s*setState\(null\)\s*\}/)
+    it('SessionHeaderAction surfaces the real failure reason instead of a nameless offline state', async () => {
+      // Honest contract: a broken status endpoint must not be indistinguishable
+      // from a genuinely offline daemon. The real reason has to survive all the
+      // way into the rendered capsule tooltip.
+      const originalFetch = globalThis.fetch
+      const applied: SessionVectrState[] = []
+      const apply = (state: SessionVectrState): void => {
+        applied.push(state)
+      }
+
+      try {
+        // 1. non-200 response: the status code AND the error body must survive.
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 503,
+          text: async () => 'upstream exploded',
+        } as unknown as Response)
+        await headerActionModule.fetchSessionStatus('/tmp/t7-ws', undefined, apply)
+
+        expect(applied).toHaveLength(1)
+        expect(applied[0]?.error).toBeTruthy()
+        expect(applied[0]?.error).toContain('HTTP 503')
+        expect(applied[0]?.error).toContain('upstream exploded')
+
+        // 2. transport failure: the thrown reason must survive.
+        applied.length = 0
+        globalThis.fetch = vi.fn().mockRejectedValue(new Error('socket hang up'))
+        await headerActionModule.fetchSessionStatus('/tmp/t7-ws', undefined, apply)
+
+        expect(applied).toHaveLength(1)
+        expect(applied[0]?.error).toContain('socket hang up')
+
+        // 3. ...and it must reach the DOM: resolver -> capsule title + badge.
+        const failedState = applied[0]
+        expect(failedState).toBeDefined()
+        const unifiedStatus = domainRules.resolveUnifiedStatus({
+          live: failedState?.live,
+          mode: failedState?.mode,
+          status: failedState?.status,
+          reason: failedState?.reason,
+          error: failedState?.error,
+        })
+        expect(unifiedStatus.label).toBe('Error')
+
+        const html = renderToHtml(
+          createElement(headerActionModule.HeaderCapsule, {
+            unifiedStatus,
+            port: undefined,
+            sessionCwd: '/tmp/t7-ws',
+            onOpen: () => undefined,
+          }),
+        )
+        expect(html).toContain('Vectr [err]')
+        expect(html).toContain('socket hang up')
+
+        // 4. an aborted request is not a failure: it must stay silent.
+        applied.length = 0
+        const abortErr = new Error('aborted')
+        abortErr.name = 'AbortError'
+        globalThis.fetch = vi.fn().mockRejectedValue(abortErr)
+        await headerActionModule.fetchSessionStatus('/tmp/t7-ws', undefined, apply)
+        expect(applied).toHaveLength(0)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
     })
   })
 })

@@ -16,9 +16,27 @@ import {
   resolveSessionSlotVisibility,
   resolveUnifiedStatus,
   type SessionVectrState,
+  type UnifiedStatus,
 } from '../domain'
 import { VectrStyles } from './buttons'
 import { dialogCoordinator } from './dialogCoordinator'
+
+/**
+ * Busy indicator for a *ready* daemon that still has background work running.
+ * `VectrStyles` (buttons.tsx) is owned by another task, so this single class
+ * lives here until it can be folded into that shared stylesheet. Host tokens
+ * only — no hardcoded colour.
+ */
+const BUSY_DOT_CSS = `
+.vectr-dot-busy {
+  background: var(--dsw-alias-state-warn-primary);
+  animation: vectr-dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes vectr-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+`
 
 export interface SessionHeaderActionProps {
   sessionId?: string | undefined
@@ -34,30 +52,64 @@ export interface ActiveSessionHeaderActionProps {
   [key: string]: unknown
 }
 
+/**
+ * Fetch one workspace's status and report the outcome through `apply`.
+ *
+ * A failure must never collapse into a nameless offline state: both a non-ok
+ * response and a transport/parse failure produce a state whose `error` carries
+ * the real reason. `resolveUnifiedStatus` then yields label `'Error'` with that
+ * text as its description, so the capsule renders `Vectr [err]` and the tooltip
+ * carries the actual cause instead of hiding it.
+ *
+ * Exported and taking `apply` so this failure contract is testable without a
+ * DOM: the repo has no jsdom, and `useEffect` never runs under static rendering.
+ */
+export async function fetchSessionStatus(
+  cwd: string,
+  signal: AbortSignal | undefined,
+  apply: (state: SessionVectrState) => void,
+): Promise<void> {
+  if (!cwd) return
+
+  const failed = (error: string): SessionVectrState => ({
+    workspace: cwd,
+    live: false,
+    mode: 'offline',
+    codebases: [],
+    canReindex: false,
+    error,
+  })
+
+  try {
+    const res = await fetch(
+      `/api/vectr/session-status?workspace=${encodeURIComponent(cwd)}`,
+      signal ? { signal } : undefined,
+    )
+    if (res.ok) {
+      const data = (await res.json()) as SessionVectrState
+      apply(data)
+      return
+    }
+    // Keep the status code AND whatever the endpoint said about the failure.
+    let detail = ''
+    try {
+      const body = (await res.text()).trim()
+      if (body) detail = ` ${body.slice(0, 200)}`
+    } catch (bodyErr: unknown) {
+      detail = ` (响应体读取失败: ${String(bodyErr)})`
+    }
+    apply(failed(`状态查询失败: HTTP ${res.status}${detail}`))
+  } catch (err: unknown) {
+    if ((err as { name?: string })?.name === 'AbortError' || signal?.aborted) {
+      return
+    }
+    apply(failed(`状态查询失败: ${String(err)}`))
+  }
+}
+
 export function ActiveSessionHeaderAction(props: ActiveSessionHeaderActionProps): ReactNode {
   const { sessionCwd } = props
   const [state, setState] = useState<SessionVectrState | null>(null)
-
-  const fetchStatus = async (cwd: string, signal?: AbortSignal): Promise<void> => {
-    if (!cwd) return
-    try {
-      const res = await fetch(
-        `/api/vectr/session-status?workspace=${encodeURIComponent(cwd)}`,
-        signal ? { signal } : undefined,
-      )
-      if (res.ok) {
-        const data = (await res.json()) as SessionVectrState
-        setState(data)
-      } else {
-        setState(null)
-      }
-    } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError' || signal?.aborted) {
-        return
-      }
-      setState(null)
-    }
-  }
 
   useEffect(() => {
     if (!sessionCwd || typeof sessionCwd !== 'string' || sessionCwd.trim().length === 0) {
@@ -65,7 +117,7 @@ export function ActiveSessionHeaderAction(props: ActiveSessionHeaderActionProps)
       return
     }
     const controller = new AbortController()
-    void fetchStatus(sessionCwd.trim(), controller.signal)
+    void fetchSessionStatus(sessionCwd.trim(), controller.signal, setState)
     return () => {
       controller.abort()
     }
@@ -79,32 +131,6 @@ export function ActiveSessionHeaderAction(props: ActiveSessionHeaderActionProps)
     error: state?.error,
   })
 
-  let badgeText = 'Vectr'
-  if (unifiedStatus.kind === 'ready') {
-    badgeText = state?.port ? `Vectr [${state.port}]` : 'Vectr'
-  } else if (unifiedStatus.kind === 'memory_only') {
-    badgeText = state?.port ? `Vectr [mem:${state.port}]` : 'Vectr [mem]'
-  } else if (unifiedStatus.kind === 'indexing') {
-    badgeText = state?.port ? `Vectr [idx:${state.port}]` : 'Vectr [indexing]'
-  } else if (unifiedStatus.kind === 'initializing') {
-    badgeText = state?.port ? `Vectr [init:${state.port}]` : 'Vectr [init]'
-  } else if (unifiedStatus.kind === 'search_only') {
-    badgeText = state?.port ? `Vectr [search:${state.port}]` : 'Vectr [search]'
-  } else if (unifiedStatus.label === 'Error') {
-    badgeText = 'Vectr [err]'
-  } else {
-    badgeText = 'Vectr [off]'
-  }
-
-  const dotClass =
-    unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only' || unifiedStatus.kind === 'search_only'
-      ? 'vectr-dot-live'
-      : unifiedStatus.isBusy
-        ? 'vectr-dot-live'
-        : unifiedStatus.label === 'Error'
-          ? 'vectr-dot-error'
-          : 'vectr-dot-offline'
-
   const handleOpen = (): void => {
     if (typeof sessionCwd === 'string' && sessionCwd.trim().length > 0) {
       dialogCoordinator.open(sessionCwd.trim())
@@ -112,13 +138,73 @@ export function ActiveSessionHeaderAction(props: ActiveSessionHeaderActionProps)
   }
 
   return (
+    <HeaderCapsule
+      unifiedStatus={unifiedStatus}
+      port={state?.port}
+      sessionCwd={sessionCwd}
+      onOpen={handleOpen}
+    />
+  )
+}
+
+export interface HeaderCapsuleProps {
+  unifiedStatus: UnifiedStatus
+  port?: number | undefined
+  sessionCwd?: string | undefined
+  onOpen: () => void
+}
+
+/**
+ * Hook-free capsule presentation. Everything the user sees in the header badge
+ * (text, dot state, tooltip) is decided here from the resolved status alone, so
+ * the status-surface specs can render it headlessly with a payload. The
+ * hook-bound `ActiveSessionHeaderAction` keeps the fetch, the state and the
+ * dialog-coordinator hand-off.
+ */
+export function HeaderCapsule({ unifiedStatus, port, sessionCwd, onOpen }: HeaderCapsuleProps): ReactNode {
+  let badgeText = 'Vectr'
+  if (unifiedStatus.kind === 'ready') {
+    badgeText = port ? `Vectr [${port}]` : 'Vectr'
+  } else if (unifiedStatus.kind === 'memory_only') {
+    badgeText = port ? `Vectr [mem:${port}]` : 'Vectr [mem]'
+  } else if (unifiedStatus.kind === 'indexing') {
+    badgeText = port ? `Vectr [idx:${port}]` : 'Vectr [indexing]'
+  } else if (unifiedStatus.kind === 'initializing') {
+    badgeText = port ? `Vectr [init:${port}]` : 'Vectr [init]'
+  } else if (unifiedStatus.kind === 'search_only') {
+    badgeText = port ? `Vectr [search:${port}]` : 'Vectr [search]'
+  } else if (unifiedStatus.label === 'Error') {
+    badgeText = 'Vectr [err]'
+  } else {
+    badgeText = 'Vectr [off]'
+  }
+
+  // A ready daemon with background work keeps the ready badge, but its dot
+  // pulses: the capsule must not read as idle while a re-index is running.
+  const hasBackgroundWork = unifiedStatus.kind === 'ready' && Boolean(unifiedStatus.background)
+
+  const dotClass =
+    unifiedStatus.kind === 'ready'
+      ? hasBackgroundWork
+        ? 'vectr-dot-busy'
+        : 'vectr-dot-live'
+      : unifiedStatus.kind === 'memory_only' || unifiedStatus.kind === 'search_only'
+        ? 'vectr-dot-live'
+        : unifiedStatus.isBusy
+          ? 'vectr-dot-live'
+          : unifiedStatus.label === 'Error'
+            ? 'vectr-dot-error'
+            : 'vectr-dot-offline'
+
+  return (
     <>
       <VectrStyles />
+      <style>{BUSY_DOT_CSS}</style>
       <button
         type="button"
         className="vectr-header-capsule"
-        onClick={handleOpen}
-        title={`Vectr Status: ${unifiedStatus.label}${unifiedStatus.description ? ` (${unifiedStatus.description})` : ''}${sessionCwd ? `\nWorkspace: ${sessionCwd}` : ''}`}
+        onClick={onOpen}
+        title={`Vectr Status: ${unifiedStatus.label}${unifiedStatus.background ? ` — ${unifiedStatus.background}` : ''}${unifiedStatus.description ? ` (${unifiedStatus.description})` : ''}${sessionCwd ? `\nWorkspace: ${sessionCwd}` : ''}`}
         aria-label="Vectr status and management"
       >
         <span className={`vectr-indicator-dot ${dotClass}`} />

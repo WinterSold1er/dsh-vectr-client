@@ -95,6 +95,33 @@ export const VECTR_CSS = `
   font-size: 13px; line-height: 1.5;
 }
 
+/* --- Settings → Vectr page (T3): header, stat strip, pills, table polish --- */
+.vectr-page { display: flex; flex-direction: column; gap: 14px; }
+.vectr-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.vectr-page-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.vectr-page-subtitle { margin: 4px 0 0; max-width: 52ch; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
+.vectr-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vectr-flash { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.vectr-stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 8px; }
+.vectr-stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); }
+.vectr-stat-value { font-size: 20px; font-weight: 600; line-height: 1.2; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
+.vectr-stat-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.vectr-pill { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 11px; background: transparent; color: var(--dsw-alias-label-primary); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.vectr-pill-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+.vectr-pill-live { color: var(--dsw-alias-state-success-primary); }
+.vectr-pill-offline { color: var(--dsw-alias-label-secondary); }
+.vectr-pill-ready { color: var(--dsw-alias-state-success-primary); }
+.vectr-pill-pending { color: var(--dsw-alias-label-tertiary); }
+.vectr-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.vectr-table { border-collapse: collapse; width: 100%; }
+.vectr-table thead th { position: sticky; top: 0; z-index: 1; background: var(--dsw-alias-bg-base); }
+.vectr-table tbody tr:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.vectr-state { padding: 18px 16px; border: 1px dashed var(--dsw-alias-border-l2); border-radius: 10px; text-align: center; }
+.vectr-state-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.vectr-state-hint { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
+.vectr-error { margin: 0; padding: 10px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 1.5; }
+.vectr-section-title { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+
 @keyframes vectr-fade-in {
   from { opacity: 0; } to { opacity: 1; }
 }

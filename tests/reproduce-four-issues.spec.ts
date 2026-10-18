@@ -36,15 +36,22 @@ describe('Issue 1: Vectr Status Mismatch Dialog vs Settings', () => {
     expect(initStatus.label).toBe('Initializing')
     expect(initStatus.isBusy).toBe(true)
 
-    // 2. Indexing (reindex_in_progress is true)
+    // 2. Ready with a background re-index (reindex_in_progress is true)
+    // The old expectation here was kind:'indexing' / label:'Indexing'. That
+    // encoded the defect: resolveUnifiedStatus tested reindex_in_progress
+    // BEFORE fully_ready, so the live /home/csy daemon (mode=full,
+    // fully_ready=true, reindex_in_progress=true) rendered "Indexing" forever.
+    // Readiness now outranks background work; the re-index stays visible via
+    // `background` instead of hijacking `kind`.
     const indexingStatus = anyDomain.resolveUnifiedStatus({
       live: true,
       mode: 'full',
       status: { fully_ready: true, reindex_in_progress: true },
     })
-    expect(indexingStatus.kind).toBe('indexing')
-    expect(indexingStatus.label).toBe('Indexing')
-    expect(indexingStatus.isBusy).toBe(true)
+    expect(indexingStatus.kind).toBe('ready')
+    expect(indexingStatus.label).toBe('Ready')
+    expect(indexingStatus.isBusy).toBe(false)
+    expect(indexingStatus.background).toBe('Background re-index in progress')
 
     // 3. Memory Only
     const memStatus = anyDomain.resolveUnifiedStatus({

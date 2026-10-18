@@ -27,10 +27,11 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { isReservedPrimarySlug, normalizePath } from '../domain'
+import { formatMode, isMemoryOnly, isReservedPrimarySlug, normalizeMode, normalizePath } from '../domain'
 import { VectrSettings } from './vectr-settings'
-import { scrollWrap, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
+import { scrollWrapSticky, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
+import { DaemonLauncher } from './DaemonLauncher'
 import { SessionHeaderAction } from './SessionHeaderAction'
 import { VectrNavIcon } from './VectrNavIcon'
 import { ConversationInputRightAction } from './ConversationInputRightAction'
@@ -118,7 +119,7 @@ interface ClientContext {
 /** Reason a row's re-index button is disabled, or undefined when enabled. */
 function reindexDisabledReason(view: WorkspaceView): string | undefined {
   if (!view.live) return view.error ?? 'daemon offline'
-  const mode = view.mode
+  const mode = normalizeMode(view.mode)
   if (mode === 'memory_only' || mode === 'search_only') return `daemon in '${mode}' mode cannot be re-indexed`
   if (view.status?.reindex_in_progress) return 're-index already in progress'
   if (view.status?.fully_ready === false) return 'daemon not fully_ready yet'
@@ -448,8 +449,64 @@ function CodebaseCreateForm(props: {
   )
 }
 
+/** Compact stat tile for the summary strip: a number plus a short label. */
+function StatTile(props: { value: number; label: string }): ReactNode {
+  return (
+    <div className="vectr-stat">
+      <span className="vectr-stat-value">{props.value}</span>
+      <span className="vectr-stat-label">{props.label}</span>
+    </div>
+  )
+}
+
+/** Summary-strip counts, derived from the already-fetched workspace list. Every
+ * row lands in exactly one bucket, so live + memoryOnly + offline === total. */
+export function summarizeWorkspaces(views: WorkspaceView[] | null): {
+  total: number
+  live: number
+  memoryOnly: number
+  offline: number
+} {
+  let live = 0
+  let memoryOnly = 0
+  let offline = 0
+  for (const view of views ?? []) {
+    if (isMemoryOnly(view.mode)) memoryOnly += 1
+    else if (view.live) live += 1
+    else offline += 1
+  }
+  return { total: (views ?? []).length, live, memoryOnly, offline }
+}
+
+/** Fetch both management endpoints together. A failure keeps the real message
+ * (`String(err)`, e.g. "Error: workspaces endpoint returned 500") so the panel
+ * renders the actual error instead of silently showing nothing. */
+export async function loadConsoleData(): Promise<{
+  wsViews: WorkspaceView[] | null
+  cbViews: CodebaseView[] | null
+  wsError: string | null
+  cbError: string | null
+}> {
+  const [wsResult, cbResult] = await Promise.allSettled([
+    fetch('/api/vectr/workspaces').then((res) => {
+      if (!res.ok) throw new Error(`workspaces endpoint returned ${res.status}`)
+      return res.json() as Promise<WorkspaceView[]>
+    }),
+    fetch('/api/vectr/codebases').then((res) => {
+      if (!res.ok) throw new Error(`codebases endpoint returned ${res.status}`)
+      return res.json() as Promise<CodebaseView[]>
+    }),
+  ])
+  return {
+    wsViews: wsResult.status === 'fulfilled' ? wsResult.value : null,
+    cbViews: cbResult.status === 'fulfilled' ? cbResult.value : null,
+    wsError: wsResult.status === 'rejected' ? String(wsResult.reason) : null,
+    cbError: cbResult.status === 'rejected' ? String(cbResult.reason) : null,
+  }
+}
+
 /** One workspace row + its expandable codebase sub-section. */
-function WorkspaceRow(props: {
+export function WorkspaceRow(props: {
   view: WorkspaceView
   entries: CodebaseView[]
   expanded: boolean
@@ -475,19 +532,27 @@ function WorkspaceRow(props: {
           <span style={{ display: 'inline-block', width: 12 }}>{expanded ? '▾' : '▸'}</span>
         </td>
         <td style={tdStyle} title={view.workspace}><span style={ellipsisStyle}>{view.workspace.split('/').slice(-2).join('/')}</span></td>
-        <td style={tdStyle}>{view.live
-          ? <span style={{ color: 'var(--dsw-alias-state-success-primary)' }}>online</span>
-          : <span style={{ color: 'var(--dsw-alias-state-error-primary)' }}>offline</span>}</td>
+        <td style={tdStyle}>
+          <span className={`vectr-pill ${view.live ? 'vectr-pill-live' : 'vectr-pill-offline'}`} title={view.reason ?? view.error ?? (view.live ? 'daemon alive' : 'daemon offline')}>
+            <span className="vectr-pill-dot" />
+            {view.live ? 'online' : 'offline'}
+          </span>
+        </td>
         <td style={tdStyle} title={view.error ?? ''}><span style={ellipsisStyle}>{view.reason ?? view.error ?? '—'}</span></td>
-        <td style={tdStyle}>{view.port}</td>
-        <td style={tdStyle}>{view.pid ?? '—'}</td>
-        <td style={tdStyle}>{view.mode ?? '—'}</td>
-        <td style={tdStyle}>{s?.indexed_files ?? '—'}</td>
-        <td style={tdStyle}>{s?.total_chunks ?? '—'}</td>
+        <td style={tdStyle} className="vectr-num">{view.port}</td>
+        <td style={tdStyle} className="vectr-num">{view.pid ?? '—'}</td>
+        <td style={tdStyle} className="vectr-num" title={view.mode ?? ''}>{formatMode(view.mode, view.live)}</td>
+        <td style={tdStyle} className="vectr-num">{s?.indexed_files ?? '—'}</td>
+        <td style={tdStyle} className="vectr-num">{s?.total_chunks ?? '—'}</td>
         <td style={tdStyle}><span style={ellipsisStyle}>{s?.languages?.join(', ') ?? '—'}</span></td>
         <td style={tdStyle}><span style={ellipsisStyle}>{s?.last_indexed ?? '—'}</span></td>
-        <td style={tdStyle}>{s?.notes_count ?? '—'}</td>
-        <td style={tdStyle}>{(s?.fully_ready ?? false) ? 'yes' : 'no'}</td>
+        <td style={tdStyle} className="vectr-num">{s?.notes_count ?? '—'}</td>
+        <td style={tdStyle}>
+          <span className={`vectr-pill ${s?.fully_ready === true ? 'vectr-pill-ready' : 'vectr-pill-pending'}`} title={s?.fully_ready === true ? 'index fully built' : 'index not fully ready yet'}>
+            <span className="vectr-pill-dot" />
+            {s?.fully_ready === true ? 'ready' : 'not ready'}
+          </span>
+        </td>
         <td style={tdStyle}>
           <button
             type="button"
@@ -540,21 +605,14 @@ export function WorkspaceConsole(): ReactNode {
     setLoading(true)
     setWsError(null)
     setCbError(null)
-    const wsReq = fetch('/api/vectr/workspaces')
-      .then((res) => {
-        if (!res.ok) throw new Error(`workspaces endpoint returned ${res.status}`)
-        return res.json() as Promise<WorkspaceView[]>
+    void loadConsoleData()
+      .then((data) => {
+        setWsViews(data.wsViews)
+        setCbViews(data.cbViews)
+        setWsError(data.wsError)
+        setCbError(data.cbError)
       })
-      .then((data) => setWsViews(data))
-      .catch((err: unknown) => setWsError(String(err)))
-    const cbReq = fetch('/api/vectr/codebases')
-      .then((res) => {
-        if (!res.ok) throw new Error(`codebases endpoint returned ${res.status}`)
-        return res.json() as Promise<CodebaseView[]>
-      })
-      .then((data) => setCbViews(data))
-      .catch((err: unknown) => setCbError(String(err)))
-    void Promise.allSettled([wsReq, cbReq]).finally(() => setLoading(false))
+      .finally(() => setLoading(false))
   }
 
   useEffect(() => { refresh() }, [])
@@ -635,6 +693,57 @@ export function WorkspaceConsole(): ReactNode {
     })
   }
 
+  return (
+    <WorkspaceConsoleView
+      wsViews={wsViews}
+      cbViews={cbViews}
+      wsError={wsError}
+      cbError={cbError}
+      loading={loading}
+      flash={flash}
+      busyPort={busyPort}
+      busySlug={busySlug}
+      expanded={expanded}
+      onRefresh={refresh}
+      onToggle={toggle}
+      onReindex={reindex}
+      onTest={test}
+      onStart={start}
+      onDelete={del}
+      onAssign={assign}
+    />
+  )
+}
+
+/** The console's whole visual tree, driven purely by props: no hooks, no fetch.
+ * Splitting it out of {@link WorkspaceConsole} is what makes the page renderable
+ * headlessly (`renderToStaticMarkup` never runs effects, so a component that
+ * fetches its own data could only ever be asserted in its empty state). */
+export function WorkspaceConsoleView(props: {
+  wsViews: WorkspaceView[] | null
+  cbViews: CodebaseView[] | null
+  wsError: string | null
+  cbError: string | null
+  loading: boolean
+  flash: string | null
+  busyPort: number | null
+  busySlug: string | null
+  expanded: ReadonlySet<string>
+  onRefresh: () => void
+  onToggle: (key: string) => void
+  onReindex: (port: number) => void
+  onTest: (slug: string, workspace?: string) => void
+  onStart: (slug: string, workspace?: string) => void
+  onDelete: (slug: string) => void
+  onAssign: (slug: string, workspace: string) => void
+}): ReactNode {
+  // The callbacks keep their local names so the render tree below is unchanged.
+  const {
+    wsViews, cbViews, wsError, cbError, loading, flash, busyPort, busySlug, expanded,
+    onRefresh: refresh, onToggle: toggle, onReindex: reindex, onTest: test, onStart: start,
+    onDelete: del, onAssign: assign,
+  } = props
+
   // Group codebases by workspace; everything unassigned/undefined falls into the
   // unassigned bucket; workspaces present in codebases but absent from the
   // workspaces endpoint become orphan pseudo-sections (so no entry is hidden).
@@ -654,25 +763,53 @@ export function WorkspaceConsole(): ReactNode {
     else list.push(cb)
   }
   const orphans = [...byWs.keys()].filter((ws) => !knownWorkspaces.includes(ws))
+  const summary = summarizeWorkspaces(wsViews)
+  // An error is never dressed up as "empty": the error block above is the state.
+  const showEmpty = wsError === null && wsViews !== null && wsViews.length === 0
+  const showTable = !showEmpty && wsViews !== null
 
   return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-        <button type="button" className={BTN.secondary} disabled={loading} onClick={refresh}>refresh</button>
-        <span>{loading ? 'loading…' : `${knownWorkspaces.length} workspace(s) · ${cbViews?.length ?? 0} codebase(s)`}</span>
-        {flash !== null ? <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{flash}</span> : null}
+    <div className="vectr-page">
+      <div className="vectr-page-head">
+        <div>
+          <h3 className="vectr-page-title">Vectr 工作区</h3>
+          <p className="vectr-page-subtitle">每个已注册的工作区对应一个 vectr daemon；展开任意一行可以查看并管理它的代码库，re-index 会重建该 daemon 的索引。</p>
+        </div>
+        <div className="vectr-toolbar">
+          <DaemonLauncher onChanged={refresh} />
+          <button type="button" className={BTN.secondary} disabled={loading} onClick={refresh} aria-label="refresh workspace list">
+            {loading ? 'refreshing…' : 'refresh'}
+          </button>
+          {flash !== null
+            ? <span className="vectr-flash">{flash}</span>
+            : loading
+              ? <span className="vectr-flash">loading…</span>
+              : null}
+        </div>
       </div>
-      {wsError !== null
-        ? <p style={{ color: 'var(--dsw-alias-state-error-primary)' }}>failed to load workspaces: {wsError}</p>
+
+      <div className="vectr-stat-strip">
+        <StatTile value={summary.total} label="已注册" />
+        <StatTile value={summary.live} label="在线" />
+        <StatTile value={summary.memoryOnly} label="仅记忆" />
+        <StatTile value={summary.offline} label="离线" />
+      </div>
+
+      {wsError !== null ? <p className="vectr-error">failed to load workspaces: {wsError}</p> : null}
+      {cbError !== null ? <p className="vectr-error">failed to load codebases: {cbError}</p> : null}
+
+      {showEmpty
+        ? (
+          <div className="vectr-state">
+            <p className="vectr-state-title">尚未注册任何 vectr 工作区</p>
+            <p className="vectr-state-hint">在某个项目目录里首次使用 vectr 工具（或在该目录完成一次 vectr 初始化）后，这个工作区就会出现在这里。</p>
+          </div>
+        )
         : null}
-      {cbError !== null
-        ? <p style={{ color: 'var(--dsw-alias-state-error-primary)' }}>failed to load codebases: {cbError}</p>
-        : null}
-      {wsViews !== null && wsViews.length === 0
-        ? <p style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>暂无工作区</p>
-        : (
-      <div style={scrollWrap}>
-      <table style={tableStyleWorkspaces}>
+      {showTable
+        ? (
+      <div style={scrollWrapSticky}>
+      <table className="vectr-table" style={tableStyleWorkspaces}>
         <thead>
           <tr>
             <th style={thStyle} />
@@ -742,13 +879,14 @@ export function WorkspaceConsole(): ReactNode {
         </tbody>
       </table>
       </div>
-      )}
+        )
+        : null}
 
       {/* Unassigned pseudo-section: entries with workspace === '__unassigned__'. */}
       <div style={{ marginTop: 14 }}>
-        <h4 style={{ margin: '0 0 6px', color: 'var(--dsw-alias-label-secondary)' }}>Unassigned codebases</h4>
+        <h4 className="vectr-section-title">Unassigned codebases</h4>
         {unassigned.length === 0
-          ? <p style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>none</p>
+          ? <p className="vectr-state-hint">none</p>
           : (
             <CodebaseSubTable
               entries={unassigned}

@@ -34,6 +34,46 @@ export { VectrNavIcon } from './VectrNavIcon';
 export { ConversationInputRightAction, SessionsBoundInputRightAction, SessionBoundInputRightAction, } from './ConversationInputRightAction';
 export { VectrDialogRoot } from './VectrDialogRoot';
 export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator';
+/** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
+interface WorkspaceView {
+    workspace: string;
+    port: number;
+    pid?: number;
+    mode?: string;
+    live: boolean;
+    error?: string;
+    /** Precise liveness-failure reason enum from the host; absent when live. */
+    reason?: string;
+    status?: {
+        indexed_files?: number;
+        total_chunks?: number;
+        languages?: string[];
+        last_indexed?: string | null;
+        notes_count?: number;
+        fully_ready?: boolean;
+        reindex_in_progress?: boolean;
+        embed_model?: string;
+        [key: string]: unknown;
+    };
+}
+/** Mirrors the host {@link CodebaseEntry} view (src/codebases.ts), secrets stripped. */
+interface CodebaseView {
+    id: string;
+    slug: string;
+    type: 'local' | 'remote';
+    path: string;
+    host?: string;
+    serverName: string;
+    localPort?: number;
+    remotePort?: number;
+    tunnelPid?: number;
+    status: 'up' | 'down' | 'error';
+    error?: string;
+    /** Owning workspace (absolute); '__unassigned__' or absent ⇒ unassigned bucket. */
+    workspace?: string;
+    /** Whether this is the primary codebase of the workspace. */
+    isPrimary?: boolean;
+}
 /** Minimal structural view of the Cordis client context this half needs. */
 interface ClientContext {
     slots: {
@@ -51,8 +91,63 @@ interface ClientContext {
     };
     effect(disposer: () => unknown, name?: string): void;
 }
+/** Summary-strip counts, derived from the already-fetched workspace list. Every
+ * row lands in exactly one bucket, so live + memoryOnly + offline === total. */
+export declare function summarizeWorkspaces(views: WorkspaceView[] | null): {
+    total: number;
+    live: number;
+    memoryOnly: number;
+    offline: number;
+};
+/** Fetch both management endpoints together. A failure keeps the real message
+ * (`String(err)`, e.g. "Error: workspaces endpoint returned 500") so the panel
+ * renders the actual error instead of silently showing nothing. */
+export declare function loadConsoleData(): Promise<{
+    wsViews: WorkspaceView[] | null;
+    cbViews: CodebaseView[] | null;
+    wsError: string | null;
+    cbError: string | null;
+}>;
+/** One workspace row + its expandable codebase sub-section. */
+export declare function WorkspaceRow(props: {
+    view: WorkspaceView;
+    entries: CodebaseView[];
+    expanded: boolean;
+    onToggle: () => void;
+    onReindex: (port: number) => void;
+    busyPort: boolean;
+    onTest: (slug: string, workspace?: string) => void;
+    onStart?: ((slug: string, workspace?: string) => void) | undefined;
+    onDelete: (slug: string) => void;
+    onAssign: (slug: string, ws: string) => void;
+    busySlug: string | null;
+    knownWorkspaces: string[];
+    onCreated: () => void;
+}): ReactNode;
 /** The full merged console panel (workspaces + their codebases). */
 export declare function WorkspaceConsole(): ReactNode;
+/** The console's whole visual tree, driven purely by props: no hooks, no fetch.
+ * Splitting it out of {@link WorkspaceConsole} is what makes the page renderable
+ * headlessly (`renderToStaticMarkup` never runs effects, so a component that
+ * fetches its own data could only ever be asserted in its empty state). */
+export declare function WorkspaceConsoleView(props: {
+    wsViews: WorkspaceView[] | null;
+    cbViews: CodebaseView[] | null;
+    wsError: string | null;
+    cbError: string | null;
+    loading: boolean;
+    flash: string | null;
+    busyPort: number | null;
+    busySlug: string | null;
+    expanded: ReadonlySet<string>;
+    onRefresh: () => void;
+    onToggle: (key: string) => void;
+    onReindex: (port: number) => void;
+    onTest: (slug: string, workspace?: string) => void;
+    onStart: (slug: string, workspace?: string) => void;
+    onDelete: (slug: string) => void;
+    onAssign: (slug: string, workspace: string) => void;
+}): ReactNode;
 /** Services required by the client half (informational; host resolves them). */
 export declare const inject: string[];
 /** Mount the Vectr shell as a top-level **Settings → Vectr** section. The shell

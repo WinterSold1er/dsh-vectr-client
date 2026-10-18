@@ -21,6 +21,7 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { readInstancesFile, type InstanceEntry, type InstancesFile } from './registry'
+import { normalizeMode } from './domain/rules'
 import { DEFAULT_TCP_TIMEOUT_MS, diagnoseDaemon, fetchStatus, type SkipReason, type VectrStatus } from './probe'
 
 // Re-exported so existing importers (and tests) keep resolving VectrStatus
@@ -106,12 +107,16 @@ export async function scanWorkspaces(
 
   const rows = await Promise.allSettled(entries.map(async (entry, i) => {
     const diag = liveness[i]!
+    // The registry stores whatever spelling the CLI wrote ("memory-only"), so
+    // canonicalize once here: every consumer of this payload compares against
+    // the canonical 'memory_only'.
+    const mode = normalizeMode(entry.mode)
     if (!diag.alive) {
       return {
         workspace: entry.workspace,
         port: entry.port,
         ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
-        ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+        ...(mode !== undefined ? { mode } : {}),
         live: false,
         ...(diag.reason !== undefined ? { reason: diag.reason } : {}),
         error: diag.reason !== undefined ? `daemon not alive: ${diag.reason}` : 'daemon not alive',
@@ -122,7 +127,7 @@ export async function scanWorkspaces(
       workspace: entry.workspace,
       port: entry.port,
       ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
-      ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+      ...(mode !== undefined ? { mode } : {}),
       live: true,
       ...(status !== undefined ? { status } : {}),
     } satisfies WorkspaceView
@@ -133,11 +138,12 @@ export async function scanWorkspaces(
     // A throw inside the row mapper is a programming error in the probe chain;
     // represent it as a non-live row with the reason rather than dropping it.
     const entry = entries[i]!
+    const mode = normalizeMode(entry.mode)
     return {
       workspace: entry.workspace,
       port: entry.port,
       ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
-      ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+      ...(mode !== undefined ? { mode } : {}),
       live: false,
       error: `status probe failed: ${String(settled.reason)}`,
     } satisfies WorkspaceView
@@ -169,7 +175,9 @@ export async function triggerIndex(
   opts: { timeoutMs?: number; status?: VectrStatus } = {},
 ): Promise<TriggerResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TRIGGER_TIMEOUT_MS
-  const mode = entry.mode
+  // Same canonical spelling as the API payload above: a registry entry written
+  // as "memory-only" must not slip past this gate and reach the network.
+  const mode = normalizeMode(entry.mode)
   if (mode === 'memory_only' || mode === 'search_only') {
     return { ok: false, error: `cannot re-index daemon in '${mode}' mode (no persistent index store)` }
   }

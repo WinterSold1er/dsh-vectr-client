@@ -7,7 +7,12 @@
  */
 
 import { useState, type ReactNode } from 'react'
-import { resolveUnifiedStatus, type SessionVectrState } from '../domain'
+import {
+  formatMode,
+  resolveUnifiedStatus,
+  type SessionVectrState,
+  type UnifiedStatus,
+} from '../domain'
 import { BTN } from './buttons'
 import { CodebaseModal } from './CodebaseModal'
 import { MemoryViewer } from './MemoryViewer'
@@ -19,6 +24,22 @@ export interface SessionDrawerModalProps {
   isOpen: boolean
   onClose: () => void
   onRefresh: () => void
+}
+
+/**
+ * Bilingual copy for the 运行就绪 row, keyed by the unified status kind.
+ * Presentation only — the kind always comes from `resolveUnifiedStatus`, so a
+ * resolver change (e.g. `fully_ready:true` moving off 'indexing') is reflected
+ * here without re-deriving status from raw daemon flags.
+ */
+const READINESS_COPY: Record<UnifiedStatus['kind'], string> = {
+  ready: '已就绪 (Ready)',
+  initializing: '构建中…',
+  indexing: '构建中…',
+  memory_only: '仅记忆 (Memory Only)',
+  search_only: '仅检索 (Search Only)',
+  offline: '未运行 (Offline)',
+  unknown: '未知 (Unknown)',
 }
 
 export function SessionDrawerModal({
@@ -59,16 +80,21 @@ export function SessionDrawerModal({
   if (!isOpen) return null
 
   const live = state?.live === true
-  const mode = state?.mode ?? 'unknown'
-  const isMemoryOnly = mode === 'memory_only'
   const status = state?.status
+  // Single source of truth for "what state is this workspace in": one resolver
+  // call, and every mode-derived flag below is read from its canonical form.
   const unifiedStatus = resolveUnifiedStatus({
     live,
-    mode,
+    mode: state?.mode,
     status,
     reason: state?.reason,
     error: state?.error,
   })
+  // Canonical mode, tolerant of the hyphenated `memory-only` the registry emits.
+  // Never compare `state.mode` directly: a hyphen or a mixed case flips the flag.
+  const canonicalMode = formatMode(state?.mode, live)
+  const isMemoryOnly = canonicalMode === 'memory_only'
+  const isSearchOnly = canonicalMode === 'search_only'
 
   const handleReindex = async (): Promise<void> => {
     setReindexing(true)
@@ -315,17 +341,17 @@ export function SessionDrawerModal({
                     fontWeight: 500,
                     background: isMemoryOnly
                       ? 'var(--dsw-alias-brand-tertiary)'
-                      : mode === 'search_only'
+                      : isSearchOnly
                         ? 'var(--dsw-alias-state-warn-tertiary)'
                         : 'var(--dsw-alias-brand-tertiary)',
                     color: isMemoryOnly
                       ? 'var(--dsw-alias-brand-primary)'
-                      : mode === 'search_only'
+                      : isSearchOnly
                         ? 'var(--dsw-alias-state-warn-primary)'
                         : 'var(--dsw-alias-brand-primary)',
                   }}
                 >
-                  {mode}
+                  {canonicalMode}
                 </span>
                 {state?.port && (
                   <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
@@ -442,12 +468,20 @@ export function SessionDrawerModal({
             <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
               ⚡ 运行就绪
             </span>
-            <span style={{ fontSize: 14, fontWeight: 600 }}>
-              {live ? (status?.fully_ready !== false ? '已就绪 (Ready)' : '构建中…') : '未运行 (Offline)'}
+            <span
+              style={{ fontSize: 14, fontWeight: 600 }}
+              title={`${unifiedStatus.label}${unifiedStatus.description ? ` — ${unifiedStatus.description}` : ''}`}
+            >
+              {READINESS_COPY[unifiedStatus.kind]}
             </span>
             <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
               {status?.embed_model ? status.embed_model.split('/').pop() : '嵌入模型未就绪'}
             </span>
+            {unifiedStatus.background && (
+              <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {unifiedStatus.background}
+              </span>
+            )}
           </div>
         </div>
 

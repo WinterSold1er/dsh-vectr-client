@@ -45,6 +45,7 @@ import {
   createCodebase,
   deleteCodebase,
   ensureTunnelUp,
+  withLocalDaemonLock,
   FileCredentialStore,
   healLocalCodebase,
   loadCodebases,
@@ -77,7 +78,9 @@ import {
   diagnoseDaemon,
   fetchStatus,
   isPortListening,
+  type AliveDiagnosis,
 } from './probe'
+import type { InstanceEntry, StartResult, VectrStartOptions } from './domain'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
 import { hasCodebase, hasIndexedCodebase, isSystemPrimarySlug, isValidInstanceEntry } from './domain'
@@ -963,7 +966,174 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promi
  * @param instancesPath - absolute path of `instances.json`.
  * @param config - resolved plugin configuration (supplies `daemonHttpTimeoutMs`).
  */
-export function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>): void {
+/** Outcome of one workspace inside a {@link StartAllResponse}. */
+export interface StartAllEntryResult {
+  /** Absolute workspace path as recorded in `instances.json`. */
+  workspace: string
+  /** Daemon port, or `null` when no port could be established. */
+  port: number | null
+  /** `started` = spawned and re-probed live; `already-running` = no spawn; `failed`. */
+  status: 'started' | 'already-running' | 'failed'
+  /** Real failure text; present only when `status === 'failed'`. */
+  error?: string
+}
+
+/** Response body of `POST /api/vectr/daemons/start-all`. */
+export interface StartAllResponse {
+  /** `true` only when no entry failed. */
+  ok: boolean
+  started: number
+  alreadyRunning: number
+  failed: number
+  results: StartAllEntryResult[]
+}
+
+/**
+ * Injected seams for {@link startAllDaemons}. Production wires the real registry
+ * reader, probe layer and CLI runner in {@link buildStartAllDeps}; tests inject
+ * fakes so the handler runs unmodified with no socket and no child process.
+ */
+export interface StartAllDeps {
+  /** Registry reader (production: {@link readInstancesFile}). */
+  readInstances: () => InstancesFile | undefined
+  /** Bounded liveness probe (production: {@link diagnoseDaemon}). */
+  probe: (entry: InstanceEntry) => Promise<AliveDiagnosis>
+  /** Daemon spawn (production: {@link VectrCliRunner.start}). */
+  start: (options: VectrStartOptions) => Promise<StartResult>
+}
+
+/**
+ * Start the vectr daemon for every workspace recorded in the registry, strictly
+ * one at a time (deterministic order: port ascending, then workspace path —
+ * `instances.json` is keyed by sha256 hash, so its own key order carries no
+ * meaning). Sequential by construction: concurrent `vectr start` runs race on
+ * free-port discovery and on the lock-guarded `instances.json` write.
+ *
+ * A workspace whose daemon already answers the probe is reported
+ * `already-running` and is NOT spawned again (a second daemon would fight the
+ * first over the same registry port). A spawn is followed by exactly ONE
+ * bounded re-probe of the (possibly rewritten) registry record; an endpoint
+ * that never answers is reported `failed`, never `started`.
+ *
+ * A per-workspace failure is recorded in `results[].error`, counted in `failed`,
+ * and forces `ok:false` — the sweep never reports success over a failed spawn.
+ *
+ * @param deps - registry/probe/spawn seams (see {@link StartAllDeps}).
+ * @param body - parsed JSON request body; `{ memoryOnly?: boolean }` is honored.
+ * @returns the aggregated {@link StartAllResponse}.
+ */
+export async function startAllDaemons(deps: StartAllDeps, body: unknown): Promise<StartAllResponse> {
+  const requested = (body as { memoryOnly?: unknown } | null)?.memoryOnly
+  const forcedMemoryOnly = typeof requested === 'boolean' ? requested : undefined
+
+  const raw = Object.values(deps.readInstances() ?? {})
+  const valid = raw.filter(isValidInstanceEntry)
+  const sorted = valid.sort((a, b) => a.port - b.port || a.workspace.localeCompare(b.workspace))
+  const results: StartAllEntryResult[] = []
+
+  for (const entry of sorted) {
+    // The entry's own mode wins; the request body overrides it when it is an
+    // explicit boolean. No mode is invented here: an entry with no recorded
+    // mode is started with `vectr start`'s own default (no mode flag), which is
+    // the only configured default this plugin has.
+    const entryMemoryOnly = entry.mode === 'memory_only' || entry.mode === 'memory-only'
+    const memoryOnly = forcedMemoryOnly ?? entryMemoryOnly
+    const extraRoots = entry.extra_roots
+
+    try {
+      const before = await deps.probe(entry)
+      if (before.alive) {
+        results.push({ workspace: entry.workspace, port: entry.port, status: 'already-running' })
+        continue
+      }
+
+      const started = await deps.start({
+        workspace: entry.workspace,
+        memoryOnly,
+        ...(extraRoots !== undefined && extraRoots.length > 0 ? { extraRoots } : {}),
+      })
+      if (!started.ok) {
+        results.push({
+          workspace: entry.workspace,
+          port: null,
+          status: 'failed',
+          error: started.error ?? `vectr start failed: ${started.stderr ?? 'no diagnostic'}`,
+        })
+        continue
+      }
+
+      // Re-probe the registry once: a successful `vectr start` may have moved
+      // the daemon to a different free port, so the pre-start record is stale.
+      const refreshed = resolveInstanceExact(deps.readInstances() ?? {}, entry.workspace) ?? entry
+      const after = await deps.probe(refreshed)
+      results.push(after.alive
+        ? { workspace: entry.workspace, port: refreshed.port, status: 'started' }
+        : {
+            workspace: entry.workspace,
+            port: refreshed.port ?? null,
+            status: 'failed',
+            error: `daemon did not answer the post-start probe (${after.reason ?? 'no reason reported'})`,
+          })
+    } catch (error) {
+      results.push({ workspace: entry.workspace, port: null, status: 'failed', error: String(error) })
+    }
+  }
+
+  // Malformed registry records are surfaced as failures, not dropped: a
+  // workspace this sweep cannot even describe must not read as "nothing to do".
+  for (const entry of raw.filter(e => !isValidInstanceEntry(e))) {
+    results.push({
+      workspace: typeof (entry as { workspace?: unknown }).workspace === 'string'
+        ? String((entry as { workspace?: unknown }).workspace)
+        : '(invalid registry entry)',
+      port: null,
+      status: 'failed',
+      error: 'invalid registry entry: missing a non-empty workspace and a valid port',
+    })
+  }
+
+  const started = results.filter(r => r.status === 'started').length
+  const alreadyRunning = results.filter(r => r.status === 'already-running').length
+  const failed = results.filter(r => r.status === 'failed').length
+  return { ok: failed === 0, started, alreadyRunning, failed, results }
+}
+
+/**
+ * Build the production {@link StartAllDeps}: the shared registry reader, the
+ * shared probe layer with the plugin's configured budgets, and the same
+ * {@link VectrCliRunner} the session service uses (one CLI path, one timeout).
+ *
+ * @param ctx - plugin context (registry read diagnostics).
+ * @param instancesPath - absolute path of `instances.json`.
+ * @param config - resolved plugin configuration (timeouts + CLI path).
+ * @returns the assembled {@link StartAllDeps}.
+ */
+export function buildStartAllDeps(
+  ctx: Context,
+  instancesPath: string,
+  config: Required<Config>,
+): StartAllDeps {
+  const cliRunner = new VectrCliRunner({
+    cliPath: config.cliPath || undefined,
+    timeoutMs: config.cliTimeoutMs,
+  })
+  return {
+    readInstances: () => readInstancesFile(ctx, instancesPath),
+    probe: entry => diagnoseDaemon(entry, {
+      httpProbe: fetchStatus,
+      httpTimeoutMs: config.daemonHttpTimeoutMs ?? DEFAULT_DAEMON_HTTP_TIMEOUT_MS,
+      tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_TCP_TIMEOUT_MS,
+    }),
+    start: options => cliRunner.start(options),
+  }
+}
+
+export function registerManagementRoutes(
+  ctx: Context,
+  instancesPath: string,
+  config: Required<Config>,
+  startAllDeps?: StartAllDeps,
+): void {
   // `webServer` is provided by the host; in headless/unit contexts it may be
   // absent. `ctx.get` returns undefined (rather than throwing) so the plugin
   // still loads and the MCP-binding path keeps working without the console
@@ -1026,6 +1196,35 @@ export function registerManagementRoutes(ctx: Context, instancesPath: string, co
       sendJson(res, result.ok ? 200 : 409, result)
     },
   }), 'vectr-client: POST /api/vectr/trigger-index')
+
+  // One-click start-all: POST /api/vectr/daemons/start-all -> start the daemon
+  // of every registered workspace that is not already answering. Runs under the
+  // existing process-wide local-daemon lock (codebases.ts `withLocalDaemonLock`)
+  // so this sweep cannot race the codebase manager's own starts on free-port
+  // discovery; the sweep itself is sequential (see `startAllDaemons`).
+  const deps = startAllDeps ?? buildStartAllDeps(ctx, instancesPath, config)
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: '/api/vectr/daemons/start-all',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: `Invalid JSON body: ${String(error)}` })
+        return
+      }
+      try {
+        sendJson(res, 200, await withLocalDaemonLock(() => startAllDaemons(deps, body)))
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error) })
+      }
+    },
+  }), 'vectr-client: POST /api/vectr/daemons/start-all')
 }
 
 /**

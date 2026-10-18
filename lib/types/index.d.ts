@@ -24,6 +24,8 @@ import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
 import { type CodebaseDeps, type CodebaseEntry, type CredentialStore, type DaemonAliveProbe, type SpawnRunner, type SshRunner } from './codebases';
 import { type InstancesFile } from './registry';
+import { type AliveDiagnosis } from './probe';
+import type { InstanceEntry, StartResult, VectrStartOptions } from './domain';
 export * from './domain';
 export * from './infra';
 export * from './bridge';
@@ -232,7 +234,72 @@ export declare function apply(ctx: Context, config?: Config): void;
  * @param instancesPath - absolute path of `instances.json`.
  * @param config - resolved plugin configuration (supplies `daemonHttpTimeoutMs`).
  */
-export declare function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>): void;
+/** Outcome of one workspace inside a {@link StartAllResponse}. */
+export interface StartAllEntryResult {
+    /** Absolute workspace path as recorded in `instances.json`. */
+    workspace: string;
+    /** Daemon port, or `null` when no port could be established. */
+    port: number | null;
+    /** `started` = spawned and re-probed live; `already-running` = no spawn; `failed`. */
+    status: 'started' | 'already-running' | 'failed';
+    /** Real failure text; present only when `status === 'failed'`. */
+    error?: string;
+}
+/** Response body of `POST /api/vectr/daemons/start-all`. */
+export interface StartAllResponse {
+    /** `true` only when no entry failed. */
+    ok: boolean;
+    started: number;
+    alreadyRunning: number;
+    failed: number;
+    results: StartAllEntryResult[];
+}
+/**
+ * Injected seams for {@link startAllDaemons}. Production wires the real registry
+ * reader, probe layer and CLI runner in {@link buildStartAllDeps}; tests inject
+ * fakes so the handler runs unmodified with no socket and no child process.
+ */
+export interface StartAllDeps {
+    /** Registry reader (production: {@link readInstancesFile}). */
+    readInstances: () => InstancesFile | undefined;
+    /** Bounded liveness probe (production: {@link diagnoseDaemon}). */
+    probe: (entry: InstanceEntry) => Promise<AliveDiagnosis>;
+    /** Daemon spawn (production: {@link VectrCliRunner.start}). */
+    start: (options: VectrStartOptions) => Promise<StartResult>;
+}
+/**
+ * Start the vectr daemon for every workspace recorded in the registry, strictly
+ * one at a time (deterministic order: port ascending, then workspace path —
+ * `instances.json` is keyed by sha256 hash, so its own key order carries no
+ * meaning). Sequential by construction: concurrent `vectr start` runs race on
+ * free-port discovery and on the lock-guarded `instances.json` write.
+ *
+ * A workspace whose daemon already answers the probe is reported
+ * `already-running` and is NOT spawned again (a second daemon would fight the
+ * first over the same registry port). A spawn is followed by exactly ONE
+ * bounded re-probe of the (possibly rewritten) registry record; an endpoint
+ * that never answers is reported `failed`, never `started`.
+ *
+ * A per-workspace failure is recorded in `results[].error`, counted in `failed`,
+ * and forces `ok:false` — the sweep never reports success over a failed spawn.
+ *
+ * @param deps - registry/probe/spawn seams (see {@link StartAllDeps}).
+ * @param body - parsed JSON request body; `{ memoryOnly?: boolean }` is honored.
+ * @returns the aggregated {@link StartAllResponse}.
+ */
+export declare function startAllDaemons(deps: StartAllDeps, body: unknown): Promise<StartAllResponse>;
+/**
+ * Build the production {@link StartAllDeps}: the shared registry reader, the
+ * shared probe layer with the plugin's configured budgets, and the same
+ * {@link VectrCliRunner} the session service uses (one CLI path, one timeout).
+ *
+ * @param ctx - plugin context (registry read diagnostics).
+ * @param instancesPath - absolute path of `instances.json`.
+ * @param config - resolved plugin configuration (timeouts + CLI path).
+ * @returns the assembled {@link StartAllDeps}.
+ */
+export declare function buildStartAllDeps(ctx: Context, instancesPath: string, config: Required<Config>): StartAllDeps;
+export declare function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>, startAllDeps?: StartAllDeps): void;
 /**
  * Build the runtime dependencies for the codebase manager from the host
  * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`

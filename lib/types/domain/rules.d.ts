@@ -147,6 +147,18 @@ export declare function canReindex(live: boolean, mode?: string, status?: VectrS
     reason?: string;
 };
 /**
+ * Canonicalize a raw mode string at any trust boundary (registry file -> API -> UI).
+ *
+ * The vectr CLI writes both spellings ("memory-only" in instances.json, but the
+ * daemon's `/v1/status` reports "memory_only"), so every consumer must agree on
+ * one spelling. Hyphens become underscores, case is folded, whitespace trimmed.
+ *
+ * A non-string, empty, or whitespace-only input has no mode to report and yields
+ * `undefined`; anything else is returned normalized rather than dropped, so an
+ * unrecognized future mode still reaches callers intact.
+ */
+export declare function normalizeMode(mode?: string): string | undefined;
+/**
  * Normalize raw mode string and liveness state into typed VectrMode.
  */
 export declare function formatMode(mode?: string, live?: boolean): VectrMode;
@@ -158,6 +170,8 @@ export interface UnifiedStatus {
     label: string;
     isBusy?: boolean;
     description?: string;
+    /** Non-blocking work still running on an otherwise ready daemon, e.g. a background re-index. */
+    background?: string | undefined;
 }
 export interface ResolveUnifiedStatusInput {
     live?: boolean | undefined;

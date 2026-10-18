@@ -342,6 +342,23 @@ export function canReindex(
 }
 
 /**
+ * Canonicalize a raw mode string at any trust boundary (registry file -> API -> UI).
+ *
+ * The vectr CLI writes both spellings ("memory-only" in instances.json, but the
+ * daemon's `/v1/status` reports "memory_only"), so every consumer must agree on
+ * one spelling. Hyphens become underscores, case is folded, whitespace trimmed.
+ *
+ * A non-string, empty, or whitespace-only input has no mode to report and yields
+ * `undefined`; anything else is returned normalized rather than dropped, so an
+ * unrecognized future mode still reaches callers intact.
+ */
+export function normalizeMode(mode?: string): string | undefined {
+  if (typeof mode !== 'string') return undefined
+  const normalized = mode.trim().toLowerCase().replace(/-/g, '_')
+  return normalized === '' ? undefined : normalized
+}
+
+/**
  * Normalize raw mode string and liveness state into typed VectrMode.
  */
 export function formatMode(mode?: string, live?: boolean): VectrMode {
@@ -364,6 +381,8 @@ export interface UnifiedStatus {
   label: string
   isBusy?: boolean
   description?: string
+  /** Non-blocking work still running on an otherwise ready daemon, e.g. a background re-index. */
+  background?: string | undefined
 }
 
 export interface ResolveUnifiedStatusInput {
@@ -415,6 +434,29 @@ export function resolveUnifiedStatus(input?: ResolveUnifiedStatusInput): Unified
     }
   }
 
+  if (normalizedMode === 'search_only') {
+    return {
+      kind: 'search_only',
+      label: 'Search Only',
+      isBusy: false,
+      description: 'Semantic search active without working memory',
+    }
+  }
+
+  // Readiness outranks the background re-index flag. A daemon reporting
+  // fully_ready:true is serving queries; reindex_in_progress then describes
+  // background work, not a blocking state. Checking reindex first (the old
+  // order) pinned an otherwise-ready daemon to kind:'indexing' forever.
+  if (input.status?.fully_ready === true) {
+    return {
+      kind: 'ready',
+      label: 'Ready',
+      isBusy: false,
+      description: 'Daemon fully ready and synchronized',
+      background: input.status.reindex_in_progress === true ? 'Background re-index in progress' : undefined,
+    }
+  }
+
   if (input.status?.reindex_in_progress === true) {
     return {
       kind: 'indexing',
@@ -430,15 +472,6 @@ export function resolveUnifiedStatus(input?: ResolveUnifiedStatusInput): Unified
       label: 'Initializing',
       isBusy: true,
       description: 'Daemon starting or warming up initial index',
-    }
-  }
-
-  if (normalizedMode === 'search_only') {
-    return {
-      kind: 'search_only',
-      label: 'Search Only',
-      isBusy: false,
-      description: 'Semantic search active without working memory',
     }
   }
 
