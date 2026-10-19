@@ -8,13 +8,13 @@
  * registered (`/api/vectr/workspaces`, `/api/vectr/codebases`,
  * `/api/vectr/trigger-index`) and renders:
  *
- *  - the workspace table (13 cols, unchanged from feature A),
- *  - a per-row chevron that expands a **codebase sub-table** (5 cols: name /
- *    type / target / status / actions) listing the codebases whose
- *    `workspace` equals this row's workspace,
- *  - an **Unassigned** pseudo-section for codebases with
- *    `workspace === '__unassigned__'` (plus an inline assign action),
- *  - a create form inside every expanded section, pre-bound to that section's
+ *  - one **workspace card** per registered workspace: identity, state pills
+ *    (liveness / canonical mode / readiness), the key index facts and the
+ *    re-index control,
+ *  - a card toggle that expands a **codebase sub-table** (5 cols: name / type /
+ *    target / status / actions) listing the codebases whose `workspace` equals
+ *    that card's workspace,
+ *  - a create form inside every expanded card, pre-bound to that card's
  *    workspace (the 阶段2 "form reports workspace" requirement).
  *
  * The host serves this bundle from `lib/client.js` (the `dsh.client` dual-face
@@ -29,7 +29,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { formatMode, isMemoryOnly, isReservedPrimarySlug, normalizeMode, normalizePath, type VectrLanguageEntry } from '../domain'
 import { VectrSettings } from './vectr-settings'
-import { scrollWrapSticky, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
+import { thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
 import { DaemonLauncher } from './DaemonLauncher'
 import { SessionHeaderAction } from './SessionHeaderAction'
@@ -49,9 +49,6 @@ export {
 } from './ConversationInputRightAction'
 export { VectrDialogRoot } from './VectrDialogRoot'
 export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator'
-
-/** Sentinel workspace for entries that could not be inferred during migration. */
-const UNASSIGNED_WORKSPACE = '__unassigned__'
 
 /** One `status.languages` entry — the shared domain union ({@link VectrLanguageEntry}),
  * so the host mirror and this one cannot drift apart again. */
@@ -94,7 +91,7 @@ interface CodebaseView {
   tunnelPid?: number
   status: 'up' | 'down' | 'error'
   error?: string
-  /** Owning workspace (absolute); '__unassigned__' or absent ⇒ unassigned bucket. */
+  /** Owning workspace (absolute); absent ⇒ not shown under any workspace card. */
   workspace?: string
   /** Whether this is the primary codebase of the workspace. */
   isPrimary?: boolean
@@ -175,16 +172,9 @@ function CodebaseSubRow(props: {
   onTest: (slug: string, workspace?: string) => void
   onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
-  onAssign: (slug: string, workspace: string) => void
   busy: boolean
-  /** Show the inline "assign" action (unassigned bucket only). */
-  showAssign: boolean
-  /** Workspaces available as assign targets. */
-  knownWorkspaces: string[]
 }): ReactNode {
-  const { view, onTest, onStart, onDelete, onAssign, busy, showAssign, knownWorkspaces } = props
-  const [assigning, setAssigning] = useState(false)
-  const [target, setTarget] = useState(knownWorkspaces[0] ?? '')
+  const { view, onTest, onStart, onDelete, busy } = props
   return (
     <tr>
       <td style={tdStyle} title={view.slug}>
@@ -226,25 +216,6 @@ function CodebaseSubRow(props: {
           >
             delete
           </button>
-          {showAssign
-            ? assigning
-              ? (
-                <>
-                  <select
-                    className="vectr-select"
-                    style={{ height: 26, fontSize: 12 }}
-                    value={target}
-                    onChange={(e) => setTarget(e.target.value)}
-                  >
-                    {knownWorkspaces.map((ws) => <option key={ws} value={ws}>{ws.split('/').slice(-2).join('/')}</option>)}
-                    <option value={UNASSIGNED_WORKSPACE}>__unassigned__</option>
-                  </select>
-                  <button type="button" className={BTN.primary} disabled={busy} onClick={() => { setAssigning(false); onAssign(view.slug, target) }}>apply</button>
-                  <button type="button" className={BTN.secondary} disabled={busy} onClick={() => setAssigning(false)}>cancel</button>
-                </>
-              )
-              : <button type="button" className={BTN.secondary} disabled={busy} onClick={() => setAssigning(true)}>assign</button>
-            : null}
         </div>
       </td>
     </tr>
@@ -257,14 +228,11 @@ function CodebaseSubTable(props: {
   onTest: (slug: string, workspace?: string) => void
   onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
-  onAssign: (slug: string, workspace: string) => void
   busySlug: string | null
-  showAssign: boolean
-  knownWorkspaces: string[]
 }): ReactNode {
-  const { entries, onTest, onStart, onDelete, onAssign, busySlug, showAssign, knownWorkspaces } = props
+  const { entries, onTest, onStart, onDelete, busySlug } = props
   return (
-    <div style={{ margin: '4px 0 8px 18px' }}>
+    <div style={{ margin: '4px 0 8px' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 460 }}>
         <thead>
           <tr>
@@ -291,10 +259,7 @@ function CodebaseSubTable(props: {
                 onTest={onTest}
                 onStart={onStart}
                 onDelete={onDelete}
-                onAssign={onAssign}
                 busy={busySlug === view.slug}
-                showAssign={showAssign}
-                knownWorkspaces={knownWorkspaces}
               />
             ))}
         </tbody>
@@ -303,22 +268,19 @@ function CodebaseSubTable(props: {
   )
 }
 
-/** Create form, pre-bound to a section workspace when `presetWorkspace` is given. */
+/** Create form, bound to the workspace card it is rendered in. */
 function CodebaseCreateForm(props: {
-  /** Section workspace; when set the form reports it and hides the picker. */
-  presetWorkspace?: string
-  /** All known workspaces, offered as assign targets when no preset. */
-  knownWorkspaces: string[]
+  /** Card workspace; every entry the form creates reports it. */
+  presetWorkspace: string
   onCreated: () => void
 }): ReactNode {
-  const { presetWorkspace, knownWorkspaces, onCreated } = props
+  const { presetWorkspace, onCreated } = props
   const [type, setType] = useState<'local' | 'remote'>('local')
   const [slug, setSlug] = useState('')
-  const [path, setPath] = useState(presetWorkspace ?? '')
+  const [path, setPath] = useState<string>(presetWorkspace)
   const [host, setHost] = useState('')
   const [auth, setAuth] = useState<'key' | 'password'>('key')
   const [password, setPassword] = useState('')
-  const [workspace, setWorkspace] = useState(presetWorkspace ?? (knownWorkspaces[0] ?? UNASSIGNED_WORKSPACE))
   const [formError, setFormError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
@@ -330,11 +292,10 @@ function CodebaseCreateForm(props: {
       return
     }
     setCreating(true)
-    // 阶段2: the form ALWAYS reports `workspace`. In a section it is the preset
-    // (so the entry binds to that workspace); in the unassigned area it is the
-    // user's pick. The backend REQUIRES `workspace` for remote, and reporting it
-    // for local is what enables per-workspace binding isolation.
-    const reportedWorkspace = presetWorkspace ?? workspace
+    // 阶段2: the form ALWAYS reports `workspace` — the card it lives in owns the
+    // entry. The backend REQUIRES `workspace` for remote, and reporting it for
+    // local is what enables per-workspace binding isolation.
+    const reportedWorkspace = presetWorkspace
     const normalizedPath = normalizePath(path)
     const body: Record<string, unknown> = {
       type,
@@ -383,7 +344,7 @@ function CodebaseCreateForm(props: {
               setType(nextType)
               if (nextType === 'remote') {
                 setPath('')
-              } else if (nextType === 'local' && !path && presetWorkspace) {
+              } else if (nextType === 'local' && !path) {
                 setPath(presetWorkspace)
               }
             }}
@@ -434,16 +395,9 @@ function CodebaseCreateForm(props: {
         )
         : null}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-        <div style={{ flex: presetWorkspace === undefined ? '0 0 auto' : '1 1 240px', minWidth: 200 }}>
+        <div style={{ flex: '1 1 240px', minWidth: 200 }}>
           <label className="vectr-label" htmlFor="cb-workspace">workspace</label>
-          {presetWorkspace !== undefined
-            ? <input id="cb-workspace" className="vectr-input" value={presetWorkspace} disabled title="bound to this workspace section" />
-            : (
-              <select id="cb-workspace" className="vectr-select" style={{ width: '100%' }} value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
-                {knownWorkspaces.map((ws) => <option key={ws} value={ws}>{ws}</option>)}
-                <option value={UNASSIGNED_WORKSPACE}>__unassigned__</option>
-              </select>
-            )}
+          <input id="cb-workspace" className="vectr-input" value={presetWorkspace} disabled title="bound to this workspace card" />
         </div>
         <button type="submit" className={BTN.primary} disabled={creating || slug.length === 0 || path.length === 0}>{creating ? '…' : 'create'}</button>
       </div>
@@ -546,8 +500,9 @@ export async function loadConsoleData(): Promise<{
   }
 }
 
-/** One workspace row + its expandable codebase sub-section. */
-export function WorkspaceRow(props: {
+/** One workspace as a card: identity + state pills + re-index on the header row,
+ * the key index facts below it, and the codebase detail when expanded. */
+export function WorkspaceCard(props: {
   view: WorkspaceView
   entries: CodebaseView[]
   expanded: boolean
@@ -557,74 +512,108 @@ export function WorkspaceRow(props: {
   onTest: (slug: string, workspace?: string) => void
   onStart?: ((slug: string, workspace?: string) => void) | undefined
   onDelete: (slug: string) => void
-  onAssign: (slug: string, ws: string) => void
   busySlug: string | null
-  knownWorkspaces: string[]
   onCreated: () => void
 }): ReactNode {
-  const { view, entries, expanded, onToggle, onReindex, busyPort, onTest, onStart, onDelete, onAssign, busySlug, knownWorkspaces, onCreated } = props
+  const { view, entries, expanded, onToggle, onReindex, busyPort, onTest, onStart, onDelete, busySlug, onCreated } = props
   const disabledReason = reindexDisabledReason(view)
   const disabled = disabledReason !== undefined || busyPort
   const s = view.status
   const langs = languagesLabel(s?.languages)
+  const diagnostic = view.reason ?? view.error
   return (
-    <>
-      <tr>
-        <td style={{ ...tdStyle, cursor: 'pointer', userSelect: 'none' }} onClick={onToggle} title={expanded ? 'collapse codebases' : 'expand codebases'}>
-          <span style={{ display: 'inline-block', width: 12 }}>{expanded ? '▾' : '▸'}</span>
-        </td>
-        <td style={tdStyle} title={view.workspace}><span style={ellipsisStyle}>{view.workspace.split('/').slice(-2).join('/')}</span></td>
-        <td style={tdStyle}>
-          <span className={`vectr-pill ${view.live ? 'vectr-pill-live' : 'vectr-pill-offline'}`} title={view.reason ?? view.error ?? (view.live ? 'daemon alive' : 'daemon offline')}>
+    <article className="vectr-card">
+      <div className="vectr-card-head">
+        <button
+          type="button"
+          className={BTN.action}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'collapse codebases' : 'expand codebases'}
+          title={expanded ? 'collapse codebases' : 'expand codebases'}
+          onClick={onToggle}
+        >
+          <span className="vectr-caret">{expanded ? '▾' : '▸'}</span>
+        </button>
+        <div className="vectr-card-identity">
+          <h4 className="vectr-card-title" title={view.workspace}>{view.workspace.split('/').slice(-2).join('/')}</h4>
+          <p className="vectr-card-path" title={view.workspace}>{view.workspace}</p>
+        </div>
+        <div className="vectr-card-pills">
+          {/* The liveness pill carries the raw reason/error diagnostic in its title. */}
+          <span className={`vectr-pill ${view.live ? 'vectr-pill-live' : 'vectr-pill-offline'}`} title={diagnostic ?? (view.live ? 'daemon alive' : 'daemon offline')}>
             <span className="vectr-pill-dot" />
             {view.live ? 'online' : 'offline'}
           </span>
-        </td>
-        <td style={tdStyle} className="vectr-num" title={view.mode ?? ''}>{formatMode(view.mode, view.live)}</td>
-        <td style={tdStyle} title={view.error ?? ''}><span style={ellipsisStyle}>{view.reason ?? view.error ?? '—'}</span></td>
-        <td style={tdStyle} className="vectr-num" title={view.pid !== undefined ? `pid ${view.pid}` : 'pid unknown'}>{view.port}</td>
-        <td style={tdStyle} className="vectr-num" title={indexSummary(s)}>{s?.indexed_files ?? '—'}</td>
-        <td style={tdStyle} title={languagesTitle(s?.languages)}><span style={ellipsisStyle}>{langs === '' ? '—' : langs}</span></td>
-        <td style={tdStyle} className="vectr-num">{s?.notes_count ?? '—'}</td>
-        <td style={tdStyle}>
+          {/* Only shown when the daemon actually reported a mode: a dead daemon
+              would otherwise repeat "offline" in a second pill. */}
+          {view.mode !== undefined
+            ? <span className="vectr-pill" title={view.mode}>{formatMode(view.mode, view.live)}</span>
+            : null}
           <span className={`vectr-pill ${s?.fully_ready === true ? 'vectr-pill-ready' : 'vectr-pill-pending'}`} title={s?.fully_ready === true ? 'index fully built' : 'index not fully ready yet'}>
             <span className="vectr-pill-dot" />
             {s?.fully_ready === true ? 'ready' : 'not ready'}
           </span>
-        </td>
-        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
+        </div>
+        <div className="vectr-card-actions">
           <button
             type="button"
             className={BTN.action}
             disabled={disabled}
             title={disabledReason ?? 'Re-index this workspace'}
+            /* T23: the shared `:disabled` rule dims with opacity, which composited an
+               already-muted host colour down to 1.46:1 on this card. Paint the disabled
+               state with host tokens instead (label-tertiary is 7.36:1 in dark, 3.71:1
+               in light on the card) so it stays legible while still reading as disabled. */
+            style={disabled ? {
+              color: 'var(--dsw-alias-label-tertiary)',
+              borderColor: 'var(--dsw-alias-border-l2)',
+              opacity: 1,
+            } : undefined}
             onClick={() => onReindex(view.port)}
           >
             {busyPort ? '…' : 're-index'}
           </button>
-        </td>
-      </tr>
+        </div>
+      </div>
+
+      {diagnostic !== undefined
+        ? <p className="vectr-card-diagnostic" title={view.error ?? diagnostic}>{diagnostic}</p>
+        : null}
+
+      <dl className="vectr-facts">
+        <div className="vectr-fact">
+          <dt className="vectr-fact-label">port</dt>
+          <dd className="vectr-fact-value" title={view.pid !== undefined ? `pid ${view.pid}` : 'pid unknown'}>{view.port}</dd>
+        </div>
+        <div className="vectr-fact">
+          <dt className="vectr-fact-label">files</dt>
+          <dd className="vectr-fact-value" title={indexSummary(s)}>{s?.indexed_files ?? '—'}</dd>
+        </div>
+        <div className="vectr-fact">
+          <dt className="vectr-fact-label">notes</dt>
+          <dd className="vectr-fact-value">{s?.notes_count ?? '—'}</dd>
+        </div>
+        <div className="vectr-fact">
+          <dt className="vectr-fact-label">languages</dt>
+          <dd className="vectr-fact-value" title={languagesTitle(s?.languages)}>{langs === '' ? '—' : langs}</dd>
+        </div>
+      </dl>
+
       {expanded
         ? (
-          <tr>
-            <td />
-            <td colSpan={10} style={{ padding: 0, borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
-              <CodebaseSubTable
-                entries={entries}
-                onTest={onTest}
-                onStart={onStart}
-                onDelete={onDelete}
-                onAssign={onAssign}
-                busySlug={busySlug}
-                showAssign={false}
-                knownWorkspaces={knownWorkspaces}
-              />
-              <CodebaseCreateForm presetWorkspace={view.workspace} knownWorkspaces={knownWorkspaces} onCreated={onCreated} />
-            </td>
-          </tr>
+          <div className="vectr-card-detail">
+            <CodebaseSubTable
+              entries={entries}
+              onTest={onTest}
+              onStart={onStart}
+              onDelete={onDelete}
+              busySlug={busySlug}
+            />
+            <CodebaseCreateForm presetWorkspace={view.workspace} onCreated={onCreated} />
+          </div>
         )
         : null}
-    </>
+    </article>
   )
 }
 
@@ -696,33 +685,6 @@ export function WorkspaceConsole(): ReactNode {
     run(slug, 'POST', `/start${wsParam}`, `started ${slug}`)
   }
   const del = (slug: string): void => run(slug, 'DELETE', '', `deleted ${slug}`)
-  // Assign calls the real backend PATCH route (src/index.ts) to move a
-  // codebase into a workspace; a 4xx from the host surfaces as a clear flash
-  // rather than a silent no-op.
-  const assign = (slug: string, ws: string): void => {
-    setBusySlug(slug)
-    setFlash(null)
-    fetch(`/api/vectr/codebases/${encodeURIComponent(slug)}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspace: ws }),
-    })
-      .then(async (res) => {
-        // Success is judged on the explicit HTTP status + absence of error, not
-        // on a hard-coded "not implemented" string: any 4xx/5xx or error payload
-        // is surfaced verbatim so ops is never misled.
-        const result = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
-        if (!res.ok || result.error !== undefined) {
-          setFlash(`assign failed: ${result.error ?? 'unknown'}`)
-        } else {
-          setFlash(`assigned "${slug}" → "${ws}"`)
-          refresh()
-        }
-      })
-      .catch((err: unknown) => setFlash(`assign request error: ${String(err)}`))
-      .finally(() => setBusySlug(null))
-  }
-
   const toggle = (key: string): void => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -749,7 +711,6 @@ export function WorkspaceConsole(): ReactNode {
       onTest={test}
       onStart={start}
       onDelete={del}
-      onAssign={assign}
     />
   )
 }
@@ -774,38 +735,32 @@ export function WorkspaceConsoleView(props: {
   onTest: (slug: string, workspace?: string) => void
   onStart: (slug: string, workspace?: string) => void
   onDelete: (slug: string) => void
-  onAssign: (slug: string, workspace: string) => void
 }): ReactNode {
   // The callbacks keep their local names so the render tree below is unchanged.
   const {
     wsViews, cbViews, wsError, cbError, loading, flash, busyPort, busySlug, expanded,
     onRefresh: refresh, onToggle: toggle, onReindex: reindex, onTest: test, onStart: start,
-    onDelete: del, onAssign: assign,
+    onDelete: del,
   } = props
 
-  // Group codebases by workspace; everything unassigned/undefined falls into the
-  // unassigned bucket; workspaces present in codebases but absent from the
-  // workspaces endpoint become orphan pseudo-sections (so no entry is hidden).
-  // Both key sides are normalized (trailing slash trimmed) so a backend that
-  // tolerates trailing slashes does not split one logical workspace into a
-  // phantom orphan section (B1).
+  // Group codebases under the workspace card that owns them. Both sides are
+  // normalized (trailing slash trimmed) so a backend that tolerates trailing
+  // slashes does not split one logical workspace across two cards (B1). A
+  // codebase with no owning workspace is not shown.
   const normWs = (w: string): string => normalizePath(w)
-  const knownWorkspaces = (wsViews ?? []).map((w) => normWs(w.workspace))
   const byWs = new Map<string, CodebaseView[]>()
-  const unassigned: CodebaseView[] = []
   for (const cb of cbViews ?? []) {
     const ws = cb.workspace
-    if (ws === undefined || ws === UNASSIGNED_WORKSPACE) { unassigned.push(cb); continue }
+    if (ws === undefined) continue
     const key = normWs(ws)
     const list = byWs.get(key)
     if (list === undefined) byWs.set(key, [cb])
     else list.push(cb)
   }
-  const orphans = [...byWs.keys()].filter((ws) => !knownWorkspaces.includes(ws))
   const summary = summarizeWorkspaces(wsViews)
   // An error is never dressed up as "empty": the error block above is the state.
   const showEmpty = wsError === null && wsViews !== null && wsViews.length === 0
-  const showTable = !showEmpty && wsViews !== null
+  const showList = !showEmpty && wsViews !== null
 
   return (
     <div className="vectr-page">
@@ -845,98 +800,32 @@ export function WorkspaceConsoleView(props: {
           </div>
         )
         : null}
-      {showTable
+      {showList
         ? (
-      <div style={scrollWrapSticky}>
-      <table className="vectr-table" style={tableStyleWorkspaces}>
-        <thead>
-          <tr>
-            <th style={thStyle} />
-            <th style={thStyle}>workspace</th>
-            <th style={thStyle}>status</th>
-            <th style={thStyle}>mode</th>
-            <th style={thStyle}>reason</th>
-            <th style={thStyle}>port</th>
-            <th style={thStyle}>files</th>
-            <th style={thStyle}>languages</th>
-            <th style={thStyle}>notes</th>
-            <th style={thStyle}>ready</th>
-            <th style={thStyle}>action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {wsViews?.map((view) => {
-            const affiliated = byWs.get(view.workspace) ?? []
-            const key = `ws:${view.workspace}`
-            return (
-              <WorkspaceRow
-                key={key}
-                view={view}
-                entries={affiliated}
-                expanded={expanded.has(key)}
-                onToggle={() => toggle(key)}
-                onReindex={reindex}
-                busyPort={busyPort === view.port}
-                onTest={test}
-                onStart={start}
-                onDelete={del}
-                onAssign={assign}
-                busySlug={busySlug}
-                knownWorkspaces={knownWorkspaces}
-                onCreated={refresh}
-              />
-            )
-          })}
-          {orphans.map((ws) => {
-            const affiliated = byWs.get(ws) ?? []
-            const key = `orphan:${ws}`
-            // Orphan pseudo-row: reuse WorkspaceRow with a synthetic view so the
-            // expand/collapse + sub-table machinery stays identical.
-            const pseudo: WorkspaceView = { workspace: ws, port: 0, live: false, reason: 'not a running vectr daemon' }
-            return (
-              <WorkspaceRow
-                key={key}
-                view={pseudo}
-                entries={affiliated}
-                expanded={expanded.has(key)}
-                onToggle={() => toggle(key)}
-                onReindex={() => { /* no daemon to re-index */ }}
-                busyPort={false}
-                onTest={test}
-                onStart={start}
-                onDelete={del}
-                onAssign={assign}
-                busySlug={busySlug}
-                knownWorkspaces={knownWorkspaces}
-                onCreated={refresh}
-              />
-            )
-          })}
-        </tbody>
-      </table>
-      </div>
+          <div className="vectr-ws-list">
+            {wsViews?.map((view) => {
+              const affiliated = byWs.get(normWs(view.workspace)) ?? []
+              const key = `ws:${view.workspace}`
+              return (
+                <WorkspaceCard
+                  key={key}
+                  view={view}
+                  entries={affiliated}
+                  expanded={expanded.has(key)}
+                  onToggle={() => toggle(key)}
+                  onReindex={reindex}
+                  busyPort={busyPort === view.port}
+                  onTest={test}
+                  onStart={start}
+                  onDelete={del}
+                  busySlug={busySlug}
+                  onCreated={refresh}
+                />
+              )
+            })}
+          </div>
         )
         : null}
-
-      {/* Unassigned pseudo-section: entries with workspace === '__unassigned__'. */}
-      <div style={{ marginTop: 14 }}>
-        <h4 className="vectr-section-title">Unassigned codebases</h4>
-        {unassigned.length === 0
-          ? <p className="vectr-state-hint">none</p>
-          : (
-            <CodebaseSubTable
-              entries={unassigned}
-              onTest={test}
-              onStart={start}
-              onDelete={del}
-              onAssign={assign}
-              busySlug={busySlug}
-              showAssign
-              knownWorkspaces={knownWorkspaces}
-            />
-          )}
-        <CodebaseCreateForm knownWorkspaces={knownWorkspaces} onCreated={refresh} />
-      </div>
     </div>
   )
 }

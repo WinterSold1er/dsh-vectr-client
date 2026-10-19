@@ -112,15 +112,30 @@ export const VECTR_CSS = `
 .vectr-pill-offline { color: var(--dsw-alias-label-secondary); }
 .vectr-pill-ready { color: var(--dsw-alias-state-success-primary); }
 .vectr-pill-pending { color: var(--dsw-alias-label-tertiary); }
-.vectr-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.vectr-table { border-collapse: collapse; width: 100%; }
-.vectr-table thead th { position: sticky; top: 0; z-index: 1; background: var(--dsw-alias-bg-base); }
-.vectr-table tbody tr:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .vectr-state { padding: 18px 16px; border: 1px dashed var(--dsw-alias-border-l2); border-radius: 10px; text-align: center; }
 .vectr-state-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
 .vectr-state-hint { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 .vectr-error { margin: 0; padding: 10px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 1.5; }
-.vectr-section-title { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+/* --- Settings → Vectr workspace cards (T18: the table dump is gone) --- */
+.vectr-settings { display: block; padding: 2px 0 6px; }
+.vectr-ws-list { display: flex; flex-direction: column; gap: 10px; }
+.vectr-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); }
+.vectr-card:hover { border-color: var(--dsw-alias-border-l3); }
+/* T23: nowrap so the action cell never drops to a second row when a card carries
+   three pills (memory_only is the widest case); the identity/pills shrink instead. */
+.vectr-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.vectr-caret { display: inline-block; width: 10px; text-align: center; }
+.vectr-card-identity { display: flex; flex-direction: column; gap: 1px; flex: 1 1 200px; min-width: 0; }
+.vectr-card-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vectr-card-path { margin: 0; font-size: 11px; color: var(--dsw-alias-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vectr-card-pills { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.vectr-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
+.vectr-card-diagnostic { margin: 0; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.vectr-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 4px 10px; margin: 0; }
+.vectr-fact { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.vectr-fact-label { font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); }
+.vectr-fact-value { margin: 0; font-size: 12px; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vectr-card-detail { padding-top: 10px; border-top: 1px solid var(--dsw-alias-border-l2); }
 
 @keyframes vectr-fade-in {
   from { opacity: 0; } to { opacity: 1; }

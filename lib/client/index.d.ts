@@ -8,13 +8,13 @@
  * registered (`/api/vectr/workspaces`, `/api/vectr/codebases`,
  * `/api/vectr/trigger-index`) and renders:
  *
- *  - the workspace table (13 cols, unchanged from feature A),
- *  - a per-row chevron that expands a **codebase sub-table** (5 cols: name /
- *    type / target / status / actions) listing the codebases whose
- *    `workspace` equals this row's workspace,
- *  - an **Unassigned** pseudo-section for codebases with
- *    `workspace === '__unassigned__'` (plus an inline assign action),
- *  - a create form inside every expanded section, pre-bound to that section's
+ *  - one **workspace card** per registered workspace: identity, state pills
+ *    (liveness / canonical mode / readiness), the key index facts and the
+ *    re-index control,
+ *  - a card toggle that expands a **codebase sub-table** (5 cols: name / type /
+ *    target / status / actions) listing the codebases whose `workspace` equals
+ *    that card's workspace,
+ *  - a create form inside every expanded card, pre-bound to that card's
  *    workspace (the 阶段2 "form reports workspace" requirement).
  *
  * The host serves this bundle from `lib/client.js` (the `dsh.client` dual-face
@@ -74,7 +74,7 @@ interface CodebaseView {
     tunnelPid?: number;
     status: 'up' | 'down' | 'error';
     error?: string;
-    /** Owning workspace (absolute); '__unassigned__' or absent ⇒ unassigned bucket. */
+    /** Owning workspace (absolute); absent ⇒ not shown under any workspace card. */
     workspace?: string;
     /** Whether this is the primary codebase of the workspace. */
     isPrimary?: boolean;
@@ -113,8 +113,9 @@ export declare function loadConsoleData(): Promise<{
     wsError: string | null;
     cbError: string | null;
 }>;
-/** One workspace row + its expandable codebase sub-section. */
-export declare function WorkspaceRow(props: {
+/** One workspace as a card: identity + state pills + re-index on the header row,
+ * the key index facts below it, and the codebase detail when expanded. */
+export declare function WorkspaceCard(props: {
     view: WorkspaceView;
     entries: CodebaseView[];
     expanded: boolean;
@@ -124,9 +125,7 @@ export declare function WorkspaceRow(props: {
     onTest: (slug: string, workspace?: string) => void;
     onStart?: ((slug: string, workspace?: string) => void) | undefined;
     onDelete: (slug: string) => void;
-    onAssign: (slug: string, ws: string) => void;
     busySlug: string | null;
-    knownWorkspaces: string[];
     onCreated: () => void;
 }): ReactNode;
 /** The full merged console panel (workspaces + their codebases). */
@@ -151,7 +150,6 @@ export declare function WorkspaceConsoleView(props: {
     onTest: (slug: string, workspace?: string) => void;
     onStart: (slug: string, workspace?: string) => void;
     onDelete: (slug: string) => void;
-    onAssign: (slug: string, workspace: string) => void;
 }): ReactNode;
 /** Services required by the client half (informational; host resolves them). */
 export declare const inject: string[];

@@ -16,7 +16,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as React from 'react'
 import { renderToHtml } from './react-render'
-import { WorkspaceConsoleView, WorkspaceRow, loadConsoleData, summarizeWorkspaces } from '../src/client/index'
+import { WorkspaceCard, WorkspaceConsoleView, loadConsoleData, summarizeWorkspaces } from '../src/client/index'
+import { VECTR_CSS } from '../src/client/buttons'
 
 /** 4 workspaces: 2 plain live, 1 live memory-only (hyphen spelling from the CLI), 1 offline. */
 const VIEWS = [
@@ -74,7 +75,6 @@ function viewProps(overrides: Record<string, unknown> = {}): Record<string, unkn
     onTest: noop,
     onStart: noop,
     onDelete: noop,
-    onAssign: noop,
     ...overrides,
   }
 }
@@ -133,7 +133,7 @@ describe('T3 status pills and mode canonicalization', () => {
 })
 
 describe('T3 re-index control', () => {
-  const rowProps = (view: Record<string, unknown>): Record<string, unknown> => ({
+  const cardProps = (view: Record<string, unknown>): Record<string, unknown> => ({
     view,
     entries: [],
     expanded: false,
@@ -143,29 +143,41 @@ describe('T3 re-index control', () => {
     onTest: noop,
     onStart: noop,
     onDelete: noop,
-    onAssign: noop,
     busySlug: null,
-    knownWorkspaces: [],
     onCreated: noop,
   })
 
   it('leaves a memory-only row (hyphen spelling) with the re-index action DISABLED', () => {
-    const html = renderToHtml(<WorkspaceRow {...rowProps(VIEWS[2])} />)
+    const html = renderToHtml(<WorkspaceCard {...cardProps(VIEWS[2])} />)
     const button = reindexButton(html)
 
     expect(button).toContain('disabled=""')
+    // T23 (a): the control stays inside the no-wrap action cell of the head row.
+    expect(html).toContain('class="vectr-card-actions"')
+    expect(VECTR_CSS).toMatch(/\.vectr-card-head\s*\{[^}]*flex-wrap:\s*nowrap/)
+    expect(VECTR_CSS).toMatch(/\.vectr-card-actions\s*\{[^}]*white-space:\s*nowrap/)
+    expect(VECTR_CSS).toMatch(/\.vectr-card-actions\s*\{[^}]*flex-shrink:\s*0/)
+    // T23 (b): painted with host tokens instead of the opacity dim that measured 1.46:1.
+    expect(button).toContain('color:var(--dsw-alias-label-tertiary)')
+    expect(button).toContain('border-color:var(--dsw-alias-border-l2)')
+    expect(button).toContain('opacity:1')
+    expect(button).not.toContain('opacity:0.4')
     // …and the tooltip still explains why, verbatim.
     expect(html).toContain('cannot be re-indexed')
     expect(html).toContain('memory_only')
   })
 
   it('enables the same control for a live, fully-ready workspace row (control case)', () => {
-    const html = renderToHtml(<WorkspaceRow {...rowProps(VIEWS[0])} />)
-    expect(reindexButton(html)).not.toContain('disabled')
+    const html = renderToHtml(<WorkspaceCard {...cardProps(VIEWS[0])} />)
+    const button = reindexButton(html)
+
+    expect(button).not.toContain('disabled')
+    // The disabled-only presentation must not leak onto an enabled control.
+    expect(button).not.toContain('var(--dsw-alias-label-tertiary)')
   })
 
   it('disables the control for an offline row and keeps its error text', () => {
-    const html = renderToHtml(<WorkspaceRow {...rowProps(VIEWS[3])} />)
+    const html = renderToHtml(<WorkspaceCard {...cardProps(VIEWS[3])} />)
     expect(reindexButton(html)).toContain('disabled=""')
     expect(html).toContain('daemon not alive: PORT_CLOSED')
   })
@@ -234,7 +246,7 @@ describe('T3 DaemonLauncher mount', () => {
 })
 
 /** A workspace row carrying a `status.languages` payload in either daemon shape. */
-function languagesRow(languages: unknown[]): Record<string, unknown> {
+function languagesCard(languages: unknown[]): Record<string, unknown> {
   return {
     view: {
       workspace: '/home/dev/langs',
@@ -252,9 +264,7 @@ function languagesRow(languages: unknown[]): Record<string, unknown> {
     onTest: noop,
     onStart: noop,
     onDelete: noop,
-    onAssign: noop,
     busySlug: null,
-    knownWorkspaces: [],
     onCreated: noop,
   }
 }
@@ -265,7 +275,7 @@ function headerCells(html: string): string[] {
   return [...head.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((match) => match[1] as string)
 }
 
-describe('T10 languages cell (daemon sends objects, older payloads plain strings)', () => {
+describe('languages fact (daemon sends objects, older payloads plain strings)', () => {
   // Shape taken from a real `/v1/status`: [{language, files, chunks, symbols}, …].
   const OBJECT_SHAPE = [
     { language: 'typescript', files: 5441, chunks: 48961, symbols: true },
@@ -273,28 +283,28 @@ describe('T10 languages cell (daemon sends objects, older payloads plain strings
   ]
 
   it('renders the language NAMES for the object payload, never [object Object]', () => {
-    const html = renderToHtml(<WorkspaceRow {...languagesRow(OBJECT_SHAPE)} />)
+    const html = renderToHtml(<WorkspaceCard {...languagesCard(OBJECT_SHAPE)} />)
 
     expect(html).toContain('>typescript, markdown<')
     expect(html).not.toContain('[object Object]')
   })
 
   it('still renders the legacy plain-string payload', () => {
-    const html = renderToHtml(<WorkspaceRow {...languagesRow(['typescript', 'markdown'])} />)
+    const html = renderToHtml(<WorkspaceCard {...languagesCard(['typescript', 'markdown'])} />)
 
     expect(html).toContain('>typescript, markdown<')
     expect(html).not.toContain('[object Object]')
   })
 
-  it('keeps the per-language files/chunks detail in the cell tooltip', () => {
-    const html = renderToHtml(<WorkspaceRow {...languagesRow(OBJECT_SHAPE)} />)
+  it('keeps the per-language files/chunks detail in the fact tooltip', () => {
+    const html = renderToHtml(<WorkspaceCard {...languagesCard(OBJECT_SHAPE)} />)
 
     expect(html).toContain('typescript · 5441 files · 48961 chunks · symbols: yes')
     expect(html).toContain('markdown · 1751 files · 22038 chunks · symbols: no')
   })
 
   it('skips entries with no language name instead of rendering a blank slot', () => {
-    const html = renderToHtml(<WorkspaceRow {...languagesRow(['typescript', { files: 3 }, ''])} />)
+    const html = renderToHtml(<WorkspaceCard {...languagesCard(['typescript', { files: 3 }, ''])} />)
 
     expect(html).toContain('>typescript<')
     expect(html).not.toContain(', ,')
@@ -302,35 +312,77 @@ describe('T10 languages cell (daemon sends objects, older payloads plain strings
   })
 })
 
-describe('T10 column set fits the settings modal', () => {
-  it('orders the columns so `mode` is early enough to be on screen unscrolled', () => {
+describe('T18 the workspace list is cards, not a table', () => {
+  it('renders one card per workspace, with the canonical mode visible in the card head', () => {
     const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
 
-    expect(headerCells(html)).toEqual([
-      '', 'workspace', 'status', 'mode', 'reason', 'port', 'files', 'languages', 'notes', 'ready', 'action',
-    ])
-    expect(headerCells(html).indexOf('mode')).toBeLessThan(4)
+    expect(html.match(/<article class="vectr-card">/g)?.length).toBe(VIEWS.length)
+    expect(html).not.toContain('<table')
+    expect(html).toContain('>memory_only<')
+    expect(html).toContain('dev/alpha')
   })
 
-  it('moves pid / chunks / last indexed into tooltips instead of columns', () => {
+  it('keeps pid / chunks / last indexed reachable in card tooltips', () => {
     const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
 
-    expect(headerCells(html)).not.toContain('pid')
-    expect(headerCells(html)).not.toContain('chunks')
-    expect(headerCells(html)).not.toContain('last indexed')
     expect(html).toContain('pid 101')
     expect(html).toContain('480 chunks · last indexed: never')
+    expect(html).toContain('>port<')
+    expect(html).toContain('>files<')
+    expect(html).not.toContain('>pid<')
+    expect(html).not.toContain('>chunks<')
   })
 
-  it('keeps the header and the body cell counts in sync', () => {
+  it('renders the reason / error diagnostic on an offline card', () => {
     const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+
+    expect(html).toContain('PORT_CLOSED')
+    expect(html).toContain('daemon not alive: PORT_CLOSED')
+  })
+
+  it('expands a card into the codebase sub-table, header and body in sync', () => {
+    const entry = {
+      id: 'cb-1',
+      slug: 'vectr',
+      type: 'local',
+      path: '/home/dev/alpha',
+      serverName: 'vectr-alpha',
+      status: 'up',
+      workspace: '/home/dev/alpha',
+    }
+    const html = renderToHtml(<WorkspaceCard {...languagesCard([])} entries={[entry]} expanded />)
     const headers = headerCells(html)
+
+    expect(headers).toEqual(['name', 'type', 'target', 'status', 'actions'])
     const bodyStart = html.indexOf('<tbody>')
     const firstRow = html.slice(bodyStart, html.indexOf('</tr>', bodyStart))
-
     expect([...firstRow.matchAll(/<td[\s>]/g)].length).toBe(headers.length)
-    // The expanded sub-row spans everything but the chevron column.
-    const expanded = renderToHtml(<WorkspaceRow {...languagesRow([])} expanded />)
-    expect(expanded).toMatch(new RegExp(`colspan="${headers.length - 1}"`, 'i'))
+  })
+})
+
+describe('T18 Unassigned element is gone', () => {
+  /** Codebases that used to land in the Unassigned bucket: the sentinel and no owner at all. */
+  const BUCKET_CODEBASES = [
+    { id: 'cb-u1', slug: 'orphan-a', type: 'local', path: '/home/dev/u1', serverName: 's1', status: 'up', workspace: '__unassigned__' },
+    { id: 'cb-u2', slug: 'orphan-b', type: 'local', path: '/home/dev/u2', serverName: 's2', status: 'down' },
+  ]
+
+  it('renders no Unassigned element (and no bucket codebase) for that payload', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps({ cbViews: BUCKET_CODEBASES })} />)
+
+    expect(html).not.toMatch(/unassigned/i)
+    expect(html).not.toContain('__unassigned__')
+    expect(html).not.toContain('orphan-a')
+    expect(html).not.toContain('orphan-b')
+    // …and the real cards are still there, so the assertion is not vacuous.
+    expect(html.match(/<article class="vectr-card">/g)?.length).toBe(VIEWS.length)
+  })
+
+  it('does not invent a card for a workspace with no registered daemon', () => {
+    const ghost = { id: 'cb-g', slug: 'ghost', type: 'local', path: '/home/dev/ghost', serverName: 's', status: 'up', workspace: '/home/dev/ghost' }
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps({ cbViews: [ghost] })} />)
+
+    expect(html).not.toContain('dev/ghost')
+    expect(html.match(/<article class="vectr-card">/g)?.length).toBe(VIEWS.length)
   })
 })
