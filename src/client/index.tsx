@@ -27,7 +27,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { formatMode, isMemoryOnly, isReservedPrimarySlug, normalizeMode, normalizePath } from '../domain'
+import { formatMode, isMemoryOnly, isReservedPrimarySlug, normalizeMode, normalizePath, type VectrLanguageEntry } from '../domain'
 import { VectrSettings } from './vectr-settings'
 import { scrollWrapSticky, tableStyleWorkspaces, thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
@@ -53,6 +53,10 @@ export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator'
 /** Sentinel workspace for entries that could not be inferred during migration. */
 const UNASSIGNED_WORKSPACE = '__unassigned__'
 
+/** One `status.languages` entry — the shared domain union ({@link VectrLanguageEntry}),
+ * so the host mirror and this one cannot drift apart again. */
+type LanguageEntry = VectrLanguageEntry
+
 /** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
 interface WorkspaceView {
   workspace: string
@@ -66,7 +70,8 @@ interface WorkspaceView {
   status?: {
     indexed_files?: number
     total_chunks?: number
-    languages?: string[]
+    /** Newer daemons send objects (`{language, files, chunks, symbols}`); older ones plain strings. */
+    languages?: LanguageEntry[]
     last_indexed?: string | null
     notes_count?: number
     fully_ready?: boolean
@@ -449,6 +454,42 @@ function CodebaseCreateForm(props: {
   )
 }
 
+/** Display name of one language entry ('' when the entry carries no name). */
+function languageName(entry: LanguageEntry): string {
+  return typeof entry === 'string' ? entry : entry.language ?? ''
+}
+
+/** `typescript, markdown` for the languages cell ('' when nothing is named). */
+function languagesLabel(languages: LanguageEntry[] | undefined): string {
+  return (languages ?? []).map(languageName).filter((name) => name !== '').join(', ')
+}
+
+/** Per-language files/chunks/symbols for the languages cell tooltip, one line per
+ * language, so the detail the daemon reports is not thrown away by the label. */
+function languagesTitle(languages: LanguageEntry[] | undefined): string {
+  return (languages ?? [])
+    .map((entry) => typeof entry === 'string'
+      ? entry
+      : [
+        languageName(entry),
+        entry.files !== undefined ? `${entry.files} files` : '',
+        entry.chunks !== undefined ? `${entry.chunks} chunks` : '',
+        entry.symbols !== undefined ? `symbols: ${entry.symbols ? 'yes' : 'no'}` : '',
+      ].filter((part) => part !== '').join(' · '))
+    .filter((line) => line !== '')
+    .join('\n')
+}
+
+/** Tooltip for the files cell: the chunk count and last-indexed timestamp live
+ * here instead of in their own columns, so the table fits the settings modal. */
+function indexSummary(status: WorkspaceView['status']): string {
+  if (status === undefined) return ''
+  return [
+    status.total_chunks !== undefined ? `${status.total_chunks} chunks` : '',
+    `last indexed: ${status.last_indexed ?? 'never'}`,
+  ].filter((part) => part !== '').join(' · ')
+}
+
 /** Compact stat tile for the summary strip: a number plus a short label. */
 function StatTile(props: { value: number; label: string }): ReactNode {
   return (
@@ -525,6 +566,7 @@ export function WorkspaceRow(props: {
   const disabledReason = reindexDisabledReason(view)
   const disabled = disabledReason !== undefined || busyPort
   const s = view.status
+  const langs = languagesLabel(s?.languages)
   return (
     <>
       <tr>
@@ -538,14 +580,11 @@ export function WorkspaceRow(props: {
             {view.live ? 'online' : 'offline'}
           </span>
         </td>
-        <td style={tdStyle} title={view.error ?? ''}><span style={ellipsisStyle}>{view.reason ?? view.error ?? '—'}</span></td>
-        <td style={tdStyle} className="vectr-num">{view.port}</td>
-        <td style={tdStyle} className="vectr-num">{view.pid ?? '—'}</td>
         <td style={tdStyle} className="vectr-num" title={view.mode ?? ''}>{formatMode(view.mode, view.live)}</td>
-        <td style={tdStyle} className="vectr-num">{s?.indexed_files ?? '—'}</td>
-        <td style={tdStyle} className="vectr-num">{s?.total_chunks ?? '—'}</td>
-        <td style={tdStyle}><span style={ellipsisStyle}>{s?.languages?.join(', ') ?? '—'}</span></td>
-        <td style={tdStyle}><span style={ellipsisStyle}>{s?.last_indexed ?? '—'}</span></td>
+        <td style={tdStyle} title={view.error ?? ''}><span style={ellipsisStyle}>{view.reason ?? view.error ?? '—'}</span></td>
+        <td style={tdStyle} className="vectr-num" title={view.pid !== undefined ? `pid ${view.pid}` : 'pid unknown'}>{view.port}</td>
+        <td style={tdStyle} className="vectr-num" title={indexSummary(s)}>{s?.indexed_files ?? '—'}</td>
+        <td style={tdStyle} title={languagesTitle(s?.languages)}><span style={ellipsisStyle}>{langs === '' ? '—' : langs}</span></td>
         <td style={tdStyle} className="vectr-num">{s?.notes_count ?? '—'}</td>
         <td style={tdStyle}>
           <span className={`vectr-pill ${s?.fully_ready === true ? 'vectr-pill-ready' : 'vectr-pill-pending'}`} title={s?.fully_ready === true ? 'index fully built' : 'index not fully ready yet'}>
@@ -553,7 +592,7 @@ export function WorkspaceRow(props: {
             {s?.fully_ready === true ? 'ready' : 'not ready'}
           </span>
         </td>
-        <td style={tdStyle}>
+        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
           <button
             type="button"
             className={BTN.action}
@@ -569,7 +608,7 @@ export function WorkspaceRow(props: {
         ? (
           <tr>
             <td />
-            <td colSpan={13} style={{ padding: 0, borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
+            <td colSpan={10} style={{ padding: 0, borderBottom: '1px solid var(--dsw-alias-border-l2)' }}>
               <CodebaseSubTable
                 entries={entries}
                 onTest={onTest}
@@ -815,14 +854,11 @@ export function WorkspaceConsoleView(props: {
             <th style={thStyle} />
             <th style={thStyle}>workspace</th>
             <th style={thStyle}>status</th>
+            <th style={thStyle}>mode</th>
             <th style={thStyle}>reason</th>
             <th style={thStyle}>port</th>
-            <th style={thStyle}>pid</th>
-            <th style={thStyle}>mode</th>
             <th style={thStyle}>files</th>
-            <th style={thStyle}>chunks</th>
             <th style={thStyle}>languages</th>
-            <th style={thStyle}>last indexed</th>
             <th style={thStyle}>notes</th>
             <th style={thStyle}>ready</th>
             <th style={thStyle}>action</th>

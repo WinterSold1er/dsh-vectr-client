@@ -15,10 +15,11 @@ import type { CSSProperties } from 'react'
 /** Outer wrapper that enables horizontal scrolling when the table overflows. */
 export const scrollWrap: CSSProperties = { overflowX: 'auto' }
 
-/** Same as {@link scrollWrap} but with a bounded height, which makes the wrapper
- * its own scrollport so `.vectr-table thead th { position: sticky }` has
- * something to stick to while the page itself scrolls. */
-export const scrollWrapSticky: CSSProperties = { ...scrollWrap, maxHeight: '60vh' }
+/** Same as {@link scrollWrap} but bounded to ~8 rows, which makes the wrapper its
+ * own scrollport so `.vectr-table thead th { position: sticky }` does real work
+ * (verifier D2: an unbounded wrapper never scrolls, so the header just rides the
+ * page). The cap stays below the table height, so the bound actually binds. */
+export const scrollWrapSticky: CSSProperties = { ...scrollWrap, maxHeight: 'min(50vh, 420px)' }
 
 /** Collapsed-border + full-width base shared by every vectr table. */
 export const tableBase: CSSProperties = {
@@ -26,10 +27,13 @@ export const tableBase: CSSProperties = {
   width: '100%',
 }
 
-/** Workspaces table: 13 columns, needs a wide minWidth or columns cram (<53px). */
+/** Workspaces table: 11 columns. The minWidth sits under the settings modal's
+ * content box (~705px inside the ~800px modal), so the whole row — including the
+ * canonical `mode` value — is on screen without scrolling; narrower viewports
+ * still get {@link scrollWrap}, and `mode` is the 4th column either way. */
 export const tableStyleWorkspaces: CSSProperties = {
   ...tableBase,
-  minWidth: 1080,
+  minWidth: 680,
 }
 
 /** Codebases table: 8 columns, narrower minWidth so it does not scroll needlessly. */

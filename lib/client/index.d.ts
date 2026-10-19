@@ -26,6 +26,7 @@
  * @module dsh-vectr-client/client
  */
 import { type ReactNode } from 'react';
+import { type VectrLanguageEntry } from '../domain';
 export { SessionHeaderAction, SessionsBoundHeaderAction } from './SessionHeaderAction';
 export { SessionDrawerModal } from './SessionDrawerModal';
 export { CodebaseModal } from './CodebaseModal';
@@ -34,6 +35,9 @@ export { VectrNavIcon } from './VectrNavIcon';
 export { ConversationInputRightAction, SessionsBoundInputRightAction, SessionBoundInputRightAction, } from './ConversationInputRightAction';
 export { VectrDialogRoot } from './VectrDialogRoot';
 export { dialogCoordinator, DialogCoordinator } from './dialogCoordinator';
+/** One `status.languages` entry — the shared domain union ({@link VectrLanguageEntry}),
+ * so the host mirror and this one cannot drift apart again. */
+type LanguageEntry = VectrLanguageEntry;
 /** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
 interface WorkspaceView {
     workspace: string;
@@ -47,7 +51,8 @@ interface WorkspaceView {
     status?: {
         indexed_files?: number;
         total_chunks?: number;
-        languages?: string[];
+        /** Newer daemons send objects (`{language, files, chunks, symbols}`); older ones plain strings. */
+        languages?: LanguageEntry[];
         last_indexed?: string | null;
         notes_count?: number;
         fully_ready?: boolean;

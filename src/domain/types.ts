@@ -7,11 +7,34 @@
  * @module dsh-vectr-client/domain/types
  */
 
+/**
+ * One entry of `VectrStatus.languages`.
+ *
+ * The daemon has changed shape across versions: older payloads sent bare
+ * language names (`"typescript"`), while current ones send a per-language
+ * object, e.g.
+ * `{"language":"typescript","files":5441,"chunks":48961,"symbols":true}`.
+ *
+ * Both are modelled, so a reader is forced by the compiler to narrow before
+ * using it. Treating the value as a string (e.g. `.join(', ')`) renders
+ * `[object Object]`, which is the defect this type previously let through.
+ */
+export type VectrLanguageEntry = string | {
+  language?: string
+  files?: number
+  chunks?: number
+  symbols?: boolean
+}
+
 /** Shape of `/v1/status` as vectr documents it (optional fields tolerated). */
 export interface VectrStatus {
   indexed_files?: number
   total_chunks?: number
-  languages?: string[]
+  /**
+   * Languages present in the index. Payloads may carry plain names, objects
+   * with per-language counts, or a mix of both — see {@link VectrLanguageEntry}.
+   */
+  languages?: VectrLanguageEntry[]
   last_indexed?: string | null
   notes_count?: number
   fully_ready?: boolean

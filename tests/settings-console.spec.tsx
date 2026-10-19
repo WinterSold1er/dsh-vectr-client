@@ -232,3 +232,105 @@ describe('T3 DaemonLauncher mount', () => {
     expect(launcherAt).toBeLessThan(refreshAt)
   })
 })
+
+/** A workspace row carrying a `status.languages` payload in either daemon shape. */
+function languagesRow(languages: unknown[]): Record<string, unknown> {
+  return {
+    view: {
+      workspace: '/home/dev/langs',
+      port: 7420,
+      pid: 420,
+      mode: 'full',
+      live: true,
+      status: { indexed_files: 7192, total_chunks: 70999, fully_ready: true, notes_count: 1, languages },
+    },
+    entries: [],
+    expanded: false,
+    onToggle: noop,
+    onReindex: noop,
+    busyPort: false,
+    onTest: noop,
+    onStart: noop,
+    onDelete: noop,
+    onAssign: noop,
+    busySlug: null,
+    knownWorkspaces: [],
+    onCreated: noop,
+  }
+}
+
+/** The `<th>` labels of a rendered console, in document order. */
+function headerCells(html: string): string[] {
+  const head = html.slice(html.indexOf('<thead>'), html.indexOf('</thead>'))
+  return [...head.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((match) => match[1] as string)
+}
+
+describe('T10 languages cell (daemon sends objects, older payloads plain strings)', () => {
+  // Shape taken from a real `/v1/status`: [{language, files, chunks, symbols}, …].
+  const OBJECT_SHAPE = [
+    { language: 'typescript', files: 5441, chunks: 48961, symbols: true },
+    { language: 'markdown', files: 1751, chunks: 22038, symbols: false },
+  ]
+
+  it('renders the language NAMES for the object payload, never [object Object]', () => {
+    const html = renderToHtml(<WorkspaceRow {...languagesRow(OBJECT_SHAPE)} />)
+
+    expect(html).toContain('>typescript, markdown<')
+    expect(html).not.toContain('[object Object]')
+  })
+
+  it('still renders the legacy plain-string payload', () => {
+    const html = renderToHtml(<WorkspaceRow {...languagesRow(['typescript', 'markdown'])} />)
+
+    expect(html).toContain('>typescript, markdown<')
+    expect(html).not.toContain('[object Object]')
+  })
+
+  it('keeps the per-language files/chunks detail in the cell tooltip', () => {
+    const html = renderToHtml(<WorkspaceRow {...languagesRow(OBJECT_SHAPE)} />)
+
+    expect(html).toContain('typescript · 5441 files · 48961 chunks · symbols: yes')
+    expect(html).toContain('markdown · 1751 files · 22038 chunks · symbols: no')
+  })
+
+  it('skips entries with no language name instead of rendering a blank slot', () => {
+    const html = renderToHtml(<WorkspaceRow {...languagesRow(['typescript', { files: 3 }, ''])} />)
+
+    expect(html).toContain('>typescript<')
+    expect(html).not.toContain(', ,')
+    expect(html).not.toContain('[object Object]')
+  })
+})
+
+describe('T10 column set fits the settings modal', () => {
+  it('orders the columns so `mode` is early enough to be on screen unscrolled', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+
+    expect(headerCells(html)).toEqual([
+      '', 'workspace', 'status', 'mode', 'reason', 'port', 'files', 'languages', 'notes', 'ready', 'action',
+    ])
+    expect(headerCells(html).indexOf('mode')).toBeLessThan(4)
+  })
+
+  it('moves pid / chunks / last indexed into tooltips instead of columns', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+
+    expect(headerCells(html)).not.toContain('pid')
+    expect(headerCells(html)).not.toContain('chunks')
+    expect(headerCells(html)).not.toContain('last indexed')
+    expect(html).toContain('pid 101')
+    expect(html).toContain('480 chunks · last indexed: never')
+  })
+
+  it('keeps the header and the body cell counts in sync', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+    const headers = headerCells(html)
+    const bodyStart = html.indexOf('<tbody>')
+    const firstRow = html.slice(bodyStart, html.indexOf('</tr>', bodyStart))
+
+    expect([...firstRow.matchAll(/<td[\s>]/g)].length).toBe(headers.length)
+    // The expanded sub-row spans everything but the chevron column.
+    const expanded = renderToHtml(<WorkspaceRow {...languagesRow([])} expanded />)
+    expect(expanded).toMatch(new RegExp(`colspan="${headers.length - 1}"`, 'i'))
+  })
+})
