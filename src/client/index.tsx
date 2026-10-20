@@ -766,7 +766,12 @@ export function WorkspaceConsoleView(props: {
     <div className="vectr-page">
       <div className="vectr-page-head">
         <div>
-          <h3 className="vectr-page-title">Vectr 工作区</h3>
+          {/* T28: our own standalone mark beside the page title — this is the
+              surface the user actually looks at, and it must not read as a gear. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <VectrNavIcon size={16} title="Vectr" />
+            <h3 className="vectr-page-title">Vectr 工作区</h3>
+          </div>
           <p className="vectr-page-subtitle">每个已注册的工作区对应一个 vectr daemon；展开任意一行可以查看并管理它的代码库，re-index 会重建该 daemon 的索引。</p>
         </div>
         <div className="vectr-toolbar">
