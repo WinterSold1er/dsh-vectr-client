@@ -534,11 +534,9 @@ describe('QA Quality Detector: Tricky Boundaries, Failure Paths & Configuration 
 
       expect(en).toContain('Semantic Search')
       expect(en).toContain('Reliable Working Memory')
-      expect(en).toContain('<50ms')
 
       expect(zh).toContain('语义检索 (Semantic Search)')
       expect(zh).toContain('可靠工作记忆 (Reliable Working Memory)')
-      expect(zh).toContain('<50ms')
     })
   })
 

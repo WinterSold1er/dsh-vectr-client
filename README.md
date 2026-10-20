@@ -8,19 +8,19 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin tha
 
 ## What you get
 
-- **Search by meaning** — the agent asks for a concept, a symbol or a call relationship ("where is the workspace lock released?") instead of running grep loops. Tools appear as `mcp__vectr__*`, in that agent's scope only.
-- **Memory that survives compaction** — findings stored as notes come back in one call, later in the session, after a context trim, or in a new session.
+- **Semantic Search** — search by meaning: the agent asks for a concept, a symbol or a call relationship ("where is the workspace lock released?") instead of running grep loops. Tools appear as `mcp__vectr__*`, in that agent's scope only.
+- **Reliable Working Memory** — findings stored as notes come back in one call, later in the session, after a context trim, or in a new session.
 - **Right daemon for the right directory, automatic** — on every agent start the plugin reads the session `cwd`, finds that directory's Vectr daemon in `~/.vectr/instances.json` and connects to it. Agent A never gets agent B's workspace tools, and there is no global MCP config to maintain.
 - **Never blocks, never hangs** — a missing, dead or unresponsive daemon means only "this agent has no Vectr tools"; the reason is logged with workspace/cwd/port/pid and the agent keeps working.
 - **Status where you type** — a capsule in the session header shows the state, mode and port of that session's daemon; a trigger next to the input opens the console. Both reset cleanly when the session has no directory yet.
 - **One-click daemon start** — a `一键启动全部 Daemon` ("start all daemons") button in the console starts every registered daemon in one request and lists the per-workspace outcome.
 - **Re-index from the panel** — rebuild a workspace's index, or read why it cannot be rebuilt (memory-only mode, already indexing, not ready, offline) in the button's tooltip.
-- **Several codebases per workspace** — local ones and remote ones over SSH (key or password auth), each with its own MCP connection (`vectr_<slug>`) and its own port.
+- **Several codebases per workspace** — local ones and remote ones over SSH (key or password auth), each with its own MCP connection (`vectr_<workspaceKey>_<slug>`, where the key is 12 hex chars of `sha256(workspace)`) and its own port.
 
 ## Requirements
 
 - A DeepSeek Harness host with a web profile.
-- Vectr installed, with at least one project indexed by it — the plugin binds to daemons that already exist in `~/.vectr/instances.json`; it does not install or create them. Setup and CLI usage live in [Vectr's documentation](https://swapnanilsaha.com/tools/vectr).
+- Vectr installed, with at least one project indexed by it. The binding needs a daemon that is already registered in `~/.vectr/instances.json`; the plugin does not install Vectr itself or build the initial index. Setup and CLI usage live in [Vectr's documentation](https://swapnanilsaha.com/tools/vectr).
 
 ## Install
 
@@ -38,7 +38,7 @@ dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
 
 Remove with `dsh plugin --profile web remove dsh-vectr-client`.
 
-Adding the plugin links it into the profile, appends it to `dsh.profile.bundles` and applies `cordis.patch.yml` on the next boot. **Restart the host afterwards** — the `/api/vectr/*` routes and the Settings section register at boot, so an already-running host shows no console.
+`dsh plugin add` links the package into the profile and installs it; it does **not** edit the profile manifest. The package still has to be listed in the profile's `dsh.profile.bundles` — add it to the profile `package.json` yourself, or use the plugin-manager UI — so the loader enumerates it and applies `cordis.patch.yml` on the next boot. **Restart the host afterwards** — the `/api/vectr/*` routes and the Settings section register at boot, so an already-running host shows no console.
 
 ## How the binding works
 

@@ -2,35 +2,35 @@
 
 # dsh-vectr-client
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：让每个在某个项目里干活的 Agent 都拿到**这个项目的语义索引和一份活过对话的记忆**。Agent 按“意思”找代码而不是满仓库 grep，把发现写成能在上下文压缩后依然取回的笔记，新会话能从上次的断点继续——按工作区自动发生，不用你配。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件。它给项目里的每个 Agent 两样东西：**语义检索 (Semantic Search)** 和**可靠工作记忆 (Reliable Working Memory)**。前者是当前项目的语义索引，后者是一份活过对话的记忆。Agent 按意思找代码，不用满仓库 grep；写下的笔记熬得过上下文压缩；新会话接着上次的进度继续干。这些按工作区自动完成，不用你操心。
 
-> **基于 Vectr 开发 (Based on Vectr)**：本项目建立在由 Swapnanil Saha 开发的 [Vectr](https://github.com/swapnanil/vectr) 之上（[官方网站与技术文档](https://swapnanilsaha.com/tools/vectr)）。索引、记忆存储与守护进程都是 Vectr 的能力；本插件是它在 Harness 里的集成层（绑定、界面、按工作区路由）。
+> **基于 Vectr 开发 (Based on Vectr)**：本项目建立在 Swapnanil Saha 开发的 [Vectr](https://github.com/swapnanil/vectr) 之上，[官网与文档](https://swapnanilsaha.com/tools/vectr) 在这里。索引、记忆存储和守护进程都由 Vectr 提供；本插件是它在 Harness 里的集成层，负责绑定、界面和按工作区分发。
 
-## 你会得到什么
+## 能做什么
 
-- **按语义找代码** — Agent 描述概念、符号或调用关系（“工作区锁在哪里释放？”）即可命中，不需要靠猜路径或跑 grep 循环。工具以 `mcp__vectr__*` 出现在**该 Agent 自己的作用域**里。
-- **扛得住上下文压缩的记忆** — 存成笔记的发现一次调用就能取回：本次会话稍后、上下文被裁剪之后、甚至新开的会话。
-- **每个目录自动连对守护进程** — Agent 一启动，插件读取会话 `cwd`，在 `~/.vectr/instances.json` 里找到该目录对应的 Vectr 守护进程并连上。A 工作区的 Agent 永远拿不到 B 工作区的工具，也没有需要维护的全局 MCP 配置。
-- **不阻塞、不挂死** — 守护进程缺失、已死或无响应，后果只是“这个 Agent 没有 Vectr 工具”；原因会连 workspace/cwd/port/pid 一起写进日志，Agent 照常干活。
-- **在你打字的地方显示状态** — 会话头部胶囊显示该会话目录对应守护进程的状态、模式与端口；输入框旁有打开控制台的触发器。会话还没有目录时两者都会干净地复位。
-- **一键启动全部守护进程** — 控制台里的 `一键启动全部 Daemon` 按钮一次请求拉起所有已注册守护进程，并列出逐个工作区的结果。
-- **在面板里重建索引** — 直接 re-index 某个工作区；无法重建时（仅记忆模式、已在索引中、未就绪、离线），按钮的 tooltip 会说明原因。
-- **一个工作区可以挂多个代码库** — 本地目录，以及通过 SSH 隧道的远程主机（密钥或密码认证）；每个代码库有独立的 MCP 连接（`vectr_<slug>`）和独立端口。
+- **按语义找代码** —— Agent 说清楚要找什么概念、符号或调用关系（比如“工作区锁在哪儿释放的？”）就能命中，不用跑 grep 循环。工具挂在 `mcp__vectr__*` 下面，只对当前 Agent 可见。
+- **记忆熬得过上下文压缩** —— 存成笔记的发现，一次调用就能取回。不管是本次会话稍后、上下文被裁剪之后，还是新开的会话。
+- **目录对哪个守护进程，自动连** —— 每个 Agent 启动时，插件读会话的 `cwd`，去 `~/.vectr/instances.json` 里找这个目录对应的 Vectr 守护进程，然后连上。A 工作区的 Agent 拿不到 B 工作区的工具，也用不着维护全局 MCP 配置。
+- **不阻塞，不挂死** —— 守护进程没装、已死或者没响应，最坏也就是“这个 Agent 没有 Vectr 工具”。原因会连 workspace/cwd/port/pid 一起写进日志，Agent 照常干活。
+- **在输入框旁边看状态** —— 会话头部的胶囊显示当前会话守护进程的状态、模式和端口；输入框旁边有个触发器，点开就是控制台。会话还没有目录时，两处都会干净复位。
+- **一键拉起全部守护进程** —— 控制台里的 `一键启动全部 Daemon` 按钮，一次请求启完所有已注册的守护进程，并逐个工作区列出结果。
+- **在面板里重建索引** —— 可以直接重建某个工作区的索引；重建不了的时候（仅记忆模式、正在索引、还没就绪、离线），按钮的 tooltip 会说明原因。
+- **一个工作区挂多个代码库** —— 本地目录可以，走 SSH 的远程主机也可以（密钥或密码认证）。每个代码库有自己的 MCP 连接（`vectr_<workspaceKey>_<slug>`，key 是 `sha256(工作区路径)` 的前 12 位十六进制）和自己的端口。
 
-## 前置条件
+## 环境要求
 
 - 带 web profile 的 DeepSeek Harness 宿主。
-- 已安装 Vectr，且至少有一个项目被它索引过——插件只绑定 `~/.vectr/instances.json` 里**已经存在**的守护进程，不负责安装或创建它们。安装与 CLI 用法见 [Vectr 文档](https://swapnanilsaha.com/tools/vectr)。
+- 装好 Vectr，且至少有一个项目被它索引过。绑定需要一个**已经注册**的守护进程（`~/.vectr/instances.json` 里有它的记录）；插件不会替你安装 Vectr，也不会建初始索引。安装和 CLI 用法看 [Vectr 文档](https://swapnanilsaha.com/tools/vectr)。
 
 ## 安装
 
-在包含本仓库的目录下执行：
+在包含本仓库的目录里执行：
 
 ```sh
 dsh plugin --profile web add ./dsh-vectr-client
 ```
 
-从 git 安装（仓库已提交编译产物 `lib/`，安装时不构建）：
+从 git 安装也可以（仓库已提交编译产物 `lib/`，安装时不构建）：
 
 ```sh
 dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
@@ -38,53 +38,53 @@ dsh plugin --profile web add github:WinterSold1er/dsh-vectr-client
 
 卸载：`dsh plugin --profile web remove dsh-vectr-client`。
 
-`add` 会把插件链接进 Profile、写入 `dsh.profile.bundles`，并在下次启动时应用 `cordis.patch.yml`。**装完请重启宿主**——`/api/vectr/*` 路由和 Settings 分区都在启动时注册，已在运行的宿主不会凭空出现控制台。
+`dsh plugin add` 只负责把包装进 Profile，**不会改 Profile 清单**。还需要把这个包列进 Profile 的 `dsh.profile.bundles`——手动改 Profile 的 `package.json`，或者用插件管理界面加上——加载器才会枚举它，并在下次启动时套用 `cordis.patch.yml`。**装完记得重启宿主**。`/api/vectr/*` 路由和 Settings 分区都是启动时注册的，宿主已经在跑就不会凭空多出控制台。
 
-## 绑定是怎么工作的
+## 绑定机制
 
-1. `agent/created`（以及启动时已经在跑的 Agent）把会话 `cwd` 交给插件。
-2. `~/.vectr/instances.json` 以 `sha256(<工作区绝对路径>)[:12]` 为键。查找顺序：精确键 → 已存路径的精确字符串匹配（容错尾部斜杠）→ 前缀匹配（让注册工作区**内部**的子目录落到该工作区）。
-3. 绑定前先做存活检查：pid、TCP 端口，以及带短超时的 `GET /v1/status`。
-4. 工具只注册进该 Agent 的作用域；`agent/disposed` 时关闭连接并卸载。
+1. `agent/created` 事件（包括启动时已经在跑的 Agent）把会话的 `cwd` 交给插件。
+2. `~/.vectr/instances.json` 用 `sha256(<工作区绝对路径>)[:12]` 做键。查找顺序：先精确匹配键，再精确匹配已存路径（尾部斜杠容错），最后前缀匹配——这样注册工作区**里面**的某个目录也能落到该工作区。
+3. 绑定之前先验活：pid、TCP 端口，再来一次短超时的 `GET /v1/status`。
+4. 工具只注册进这个 Agent 的作用域。`agent/disposed` 时关闭连接，把工具卸干净。
 
-没有 `cwd` 的会话会被跳过并记一条警告——刻意不做 `process.cwd()` 兜底，那会把 Agent 绑到错误的工作区。细节见 `src/index.ts`、`src/registry.ts`。
+会话没有 `cwd` 就跳过，记一条警告。这里刻意不做 `process.cwd()` 兜底——那会把 Agent 绑到错误的工作区上。实现见 `src/index.ts`、`src/registry.ts`。
 
-## Settings → Vectr 控制台
+## Settings → Vectr
 
-Web 端挂载一个控制台（`/api/vectr/*` 路由由本插件提供服务端实现）：
+Web 端挂了一个控制台（`/api/vectr/*` 的服务端路由在本插件里）：
 
 - 顶部统计条：已注册 / 在线 / 仅记忆 / 离线；
-- **每个工作区一张卡片**：名称与完整路径、状态 + 模式 + 就绪三枚 pill（仅记忆模式始终按规范拼写显示）、端口 / 文件数 / 笔记数 / 语言，以及 re-index 按钮；
-- 展开卡片可见该工作区的代码库（测试 / 启动 / 删除）与新建表单，表单绑定到当前工作区；
-- 真实的空状态与错误状态——接口失败时显示接口返回的实际错误，而不是一张空表。
+- **每个工作区一张卡片**：名称和完整路径、状态 + 模式 + 就绪三个 pill（仅记忆模式始终按规范拼写显示）、端口 / 文件数 / 笔记数 / 语言，还有 re-index 操作；
+- 展开卡片，能看到它的代码库（测试 / 启动 / 删除），还有一个新建表单，绑定到当前工作区；
+- 空状态和错误状态都是真的——接口挂了就显示接口返回的实际错误，不会给你一张空表。
 
-关于图标的一句实话：设置**左侧导航**的图标由 Harness 宿主按固定 id→图标映射决定，未知 id 回落到设置齿轮，插件无法设置它。本插件自己的标记出现在面板标题旁与输入框旁。
+关于图标，说实话：设置**左侧导航**那个图标由 Harness 宿主按固定的 id→图标映射决定，认不出来的 id 回落成设置齿轮，插件设不了。插件自己的标记在面板标题旁边和输入框旁边。
 
 ## 配置
 
-`cordis.patch.yml` 只插入一行（`serverName: vectr`）；其余键可在你的 Profile patch 里覆盖：
+`cordis.patch.yml` 只插一行（`serverName: vectr`）；其余键在你自己的 Profile patch 里覆盖：
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `instancesPath` | `~/.vectr/instances.json` | 守护进程注册表文件 |
 | `serverName` | `vectr` | 工具命名空间 `mcp__<serverName>__*` |
 | `toolCallTimeoutMs` | `60000` | 单次 Vectr 工具调用超时 |
-| `reconnect.enabled` | `true` | 连接丢失后自动重连（同一端口） |
-| `reconnect.initialDelayMs` / `maxDelayMs` / `maxAttempts` | `500` / `30000` / `10` | 退避：每次失败翻倍；`maxDelayMs` 同时也是重试预算重置所需的连续在线时长 |
-| `daemonHttpTimeoutMs` | `5000` | `/v1/status` 探活预算 |
-| `daemonTcpTimeoutMs` | `300` | TCP 端口预检预算 |
+| `reconnect.enabled` | `true` | 连接断了自动重连（同一端口） |
+| `reconnect.initialDelayMs` / `maxDelayMs` / `maxAttempts` | `500` / `30000` / `10` | 每失败一次退避翻倍；`maxDelayMs` 同时是重试预算重置所需的连续在线时长 |
+| `daemonHttpTimeoutMs` | `5000` | `/v1/status` 探活超时 |
+| `daemonTcpTimeoutMs` | `300` | TCP 端口预检超时 |
 | `codebasesPath` | `~/.dsh/vectr-codebases.json` | 多代码库元数据 |
-| `secretsPath` | `~/.dsh/vectr-secrets.json` | 文件式凭据保险箱（权限 `0600`；宿主提供凭据服务时优先走系统安全通道） |
+| `secretsPath` | `~/.dsh/vectr-secrets.json` | 文件式凭据保险箱（权限 `0600`；宿主有凭据服务时以宿主为准） |
 | `cliPath` | 由 `PATH` 推导 | 自定义 `vectr` 可执行文件 |
-| `cliTimeoutMs` / `recallTimeoutMs` / `upgradeTimeoutMs` | `30000` / `10000` / `15000` | CLI、笔记召回、工作区升级的超时预算 |
+| `cliTimeoutMs` / `recallTimeoutMs` / `upgradeTimeoutMs` | `30000` / `10000` / `15000` | CLI、笔记召回、工作区升级的超时 |
 
 ## 已知限制
 
-- **首轮时序竞争** — 连接是异步建立的（这样守护进程死了也绝不会阻塞 Agent 发布），所以极少数情况下首轮提示词发出时工具尚未注册，下一轮就有。
-- **守护进程换端口重启不会被重新解析** — 重连只重试同一端口；新端口要等下一次 `agent/created`。挪动守护进程后请开新会话（或重启宿主）。
-- **绑定失败对模型不可见，只在日志里** — Agent 就是没有 Vectr 工具；警告里带 workspace/cwd/port/pid。
-- **只桥接工具** — Vectr 的 resources/prompts 不桥接。
-- **控制台需要重启宿主才出现** — 路由与 Web 分区在启动时注册；没有 `ctx.webServer` 的宿主组合会跳过它们并告警，MCP 绑定不受影响。
+- **首轮请求有时赶早** —— 连接是异步建立的，所以守护进程死了也挡不住 Agent。代价是第一条提示词有可能在工具注册完成之前就跑起来，下一步就好了。
+- **守护进程换了端口，不会被重新解析** —— 重连只认原端口；新端口要等下一次 `agent/created`。挪完守护进程，开个新会话（或者重启宿主）。
+- **绑定失败只在日志里，模型看不到** —— Agent 就是没有 Vectr 工具；警告里有 workspace/cwd/port/pid。
+- **只桥接工具** —— Vectr 的 resources/prompts 不过桥。
+- **控制台要重启宿主才出现** —— 路由和 Web 分区都是启动时注册的。没有 `ctx.webServer` 的宿主组合会跳过它们并告警，MCP 绑定不受影响。
 
 ## 开发
 
@@ -95,11 +95,11 @@ pnpm test        # vitest
 pnpm build       # tsc → lib/（服务端 + Web 端）
 ```
 
-`lib/` 已提交，使用者无需构建。`link:` 指向本地 Harness 检出且含绝对路径，因此 `pnpm-lock.yaml` 与 workspace 文件是开发专用的并已 gitignore——请把 `link:` 指到你自己的检出。
+`lib/` 已提交，用的人不用构建。`link:` 这类开发依赖指向本地 Harness 检出，会带上绝对路径——所以 `pnpm-lock.yaml` 和 workspace 文件都是开发专用、已 gitignore。把它们指到你自己的检出。
 
 ## 致谢
 
-- [Vectr](https://github.com/swapnanil/vectr)，作者 [Swapnanil Saha](https://swapnanilsaha.com/tools/vectr)：语义索引、工作记忆存储与守护进程。
+- [Vectr](https://github.com/swapnanil/vectr)，作者 [Swapnanil Saha](https://swapnanilsaha.com/tools/vectr)：语义索引、工作记忆存储和守护进程。
 - 本插件是它在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上的集成层。
 
 ## 许可证
