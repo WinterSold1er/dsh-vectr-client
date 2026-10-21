@@ -519,6 +519,7 @@ export function WorkspaceCard(props: {
   const disabledReason = reindexDisabledReason(view)
   const disabled = disabledReason !== undefined || busyPort
   const s = view.status
+const memOnly = isMemoryOnly(view.mode)
   const langs = languagesLabel(s?.languages)
   const diagnostic = view.reason ?? view.error
   return (
@@ -587,7 +588,7 @@ export function WorkspaceCard(props: {
         </div>
         <div className="vectr-fact">
           <dt className="vectr-fact-label">files</dt>
-          <dd className="vectr-fact-value" title={indexSummary(s)}>{s?.indexed_files ?? '—'}</dd>
+          <dd className="vectr-fact-value" title={memOnly ? 'memory-only mode: no index' : indexSummary(s)}>{memOnly ? '—' : (s?.indexed_files ?? '—')}</dd>
         </div>
         <div className="vectr-fact">
           <dt className="vectr-fact-label">notes</dt>

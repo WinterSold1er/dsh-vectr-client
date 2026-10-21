@@ -211,7 +211,7 @@ export function validateWorkspace(workspace: string): { valid: boolean; error?: 
  * Test whether a mode string indicates memory_only mode.
  */
 export function isMemoryOnly(mode?: string): boolean {
-  return mode === 'memory_only' || mode === 'memory-only'
+  return normalizeMode(mode) === 'memory_only'
 }
 
 /**
