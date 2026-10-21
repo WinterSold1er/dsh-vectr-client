@@ -35,9 +35,13 @@ export interface IVectrCliRunner {
   /**
    * Run `vectr restart` on a workspace directory.
    * @param workspace - workspace path.
-   * @param options - restart options (e.g. full: true).
+   * @param options - restart options (e.g. full: true, memoryOnly: true).
+   *   `full` and `memoryOnly` are mutually exclusive.
    */
-  restart(workspace: string, options?: { full?: boolean }): Promise<InitResult>
+  restart(
+    workspace: string,
+    options?: { full?: boolean; memoryOnly?: boolean },
+  ): Promise<InitResult>
 
   /**
    * Run `vectr start` on a workspace directory.
@@ -133,6 +137,13 @@ export interface ISessionStatusService {
    * Upgrade a memory-only workspace to full mode (indexing + memory).
    */
   upgradeWorkspace(workspace: string): Promise<UpgradeResult>
+
+  /**
+   * Downgrade a full-mode workspace to memory-only mode (persisted).
+   * Mirrors {@link upgradeWorkspace} in reverse: re-inits the workspace with
+   * the memory-only style and restarts the daemon in memory-only mode.
+   */
+  downgradeWorkspace(workspace: string): Promise<UpgradeResult>
 
   /**
    * Recall working memory notes for a workspace or port.

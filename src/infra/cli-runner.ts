@@ -115,15 +115,25 @@ export class VectrCliRunner implements IVectrCliRunner {
     return this.executeCommand(args)
   }
 
-  async restart(workspace: string, options?: { full?: boolean }): Promise<InitResult> {
+  async restart(
+    workspace: string,
+    options?: { full?: boolean; memoryOnly?: boolean },
+  ): Promise<InitResult> {
     const wsCheck = validateWorkspace(workspace)
     if (!wsCheck.valid) {
       return { ok: false, error: wsCheck.error }
     }
 
+    if (options?.full === true && options.memoryOnly === true) {
+      return { ok: false, error: 'restart: full and memoryOnly are mutually exclusive' }
+    }
+
     const args: string[] = ['restart', workspace]
     if (options?.full === true) {
       args.push('--full')
+    }
+    if (options?.memoryOnly === true) {
+      args.push('--memory-only')
     }
 
     return this.executeCommand(args)

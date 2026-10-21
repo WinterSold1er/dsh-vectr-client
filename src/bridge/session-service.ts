@@ -15,6 +15,7 @@ import {
   canReindex,
   formatMode,
   isSystemPrimarySlug,
+  normalizeMode,
   validateWorkspace,
   type CodebaseEntry,
   type CodebaseSummary,
@@ -405,6 +406,135 @@ export class SessionVectrService implements ISessionStatusService {
       return {
         ok: false,
         error: 'Vectr daemon is still in memory_only mode after upgrade restart',
+        mode: finalMode,
+        port: readyInstance.port,
+        stdout: restartResult.stdout,
+        stderr: restartResult.stderr,
+      }
+    }
+
+    return {
+      ok: true,
+      mode: finalMode,
+      port: readyInstance.port,
+      stdout: restartResult.stdout,
+      stderr: restartResult.stderr,
+    }
+  }
+
+  async downgradeWorkspace(workspace: string): Promise<UpgradeResult> {
+    const wsCheck = validateWorkspace(workspace)
+    if (!wsCheck.valid) {
+      return { ok: false, error: wsCheck.error }
+    }
+
+    const normWs = resolve(workspace)
+    // Share the in-flight map with upgrade: a concurrent mode change for the
+    // same workspace (either direction) must not restart the daemon twice.
+    const inFlight = this.inFlightUpgrades.get(normWs)
+    if (inFlight) {
+      return inFlight
+    }
+
+    const task = this.doDowngradeWorkspace(normWs)
+    this.inFlightUpgrades.set(normWs, task)
+    try {
+      return await task
+    } finally {
+      this.inFlightUpgrades.delete(normWs)
+    }
+  }
+
+  private async doDowngradeWorkspace(workspace: string): Promise<UpgradeResult> {
+    // 1. Run init with memory-only to persist the memory-only style
+    const initRes = await this.cliRunner.init({ workspace, hooks: true, memoryOnly: true })
+    if (!initRes.ok) {
+      return {
+        ok: false,
+        error: initRes.error ?? 'Failed to initialize workspace for downgrade',
+        stdout: initRes.stdout,
+        stderr: initRes.stderr,
+      }
+    }
+
+    // 2. Execute CLI restart --memory-only (daemon persists the registry entry)
+    const restartResult = await this.cliRunner.restart(workspace, { memoryOnly: true })
+    if (!restartResult.ok) {
+      return {
+        ok: false,
+        error: restartResult.error ?? 'Failed to restart Vectr in memory-only mode',
+        stdout: restartResult.stdout,
+        stderr: restartResult.stderr,
+      }
+    }
+
+    // 3. Probe until live and ready in memory-only mode
+    const probeDeadline = Date.now() + this.upgradeTimeoutMs
+    let readyInstance: InstanceEntry | undefined
+    let readyStatus: VectrStatus | undefined
+
+    while (Date.now() < probeDeadline) {
+      const inst = await this.instanceResolver.resolveForWorkspace(workspace)
+      if (inst && inst.port) {
+        const host = inst.host ?? this.defaultHost
+        const st = await this.apiClient.getStatus(host, inst.port, 1_000)
+        if (st !== undefined) {
+          const rawStMode = typeof st.mode === 'string' ? st.mode : undefined
+          const effectiveMode = formatMode(inst.mode ?? rawStMode, true)
+          if (effectiveMode === 'memory_only') {
+            readyInstance = inst
+            readyStatus = st
+            break
+          }
+        }
+      }
+      await sleep(200)
+    }
+
+    // Probe-timeout false-positive guard: never return ok: true without a
+    // verified memory_only readyInstance
+    if (!readyInstance) {
+      const finalInst = await this.instanceResolver.resolveForWorkspace(workspace)
+      let finalStatus: VectrStatus | undefined
+      if (finalInst && finalInst.port) {
+        finalStatus = await this.apiClient.getStatus(
+          finalInst.host ?? this.defaultHost,
+          finalInst.port,
+          1_000,
+        )
+      }
+      const rawMode = typeof finalInst?.mode === 'string'
+        ? finalInst.mode
+        : typeof finalStatus?.mode === 'string'
+          ? finalStatus.mode
+          : undefined
+      const finalMode = formatMode(rawMode, finalStatus !== undefined)
+      const isStuckFull = normalizeMode(rawMode) === 'full'
+      const errorMsg = isStuckFull
+        ? `Vectr daemon is still in full mode after downgrade restart (timeout: ${this.upgradeTimeoutMs}ms)`
+        : `Timed out waiting for Vectr instance to switch to memory-only mode (timeout: ${this.upgradeTimeoutMs}ms)`
+      return {
+        ok: false,
+        error: errorMsg,
+        mode: finalMode,
+        port: finalInst?.port,
+        stdout: restartResult.stdout,
+        stderr: restartResult.stderr,
+      }
+    }
+
+    const rawFinalMode =
+      typeof readyInstance.mode === 'string'
+        ? readyInstance.mode
+        : typeof readyStatus?.mode === 'string'
+          ? readyStatus.mode
+          : 'memory-only'
+    const finalMode = formatMode(rawFinalMode, true)
+
+    if (normalizeMode(rawFinalMode) !== 'memory_only') {
+      return {
+        ok: false,
+        error: `Vectr daemon is in ${finalMode} mode after downgrade restart`,
         mode: finalMode,
         port: readyInstance.port,
         stdout: restartResult.stdout,

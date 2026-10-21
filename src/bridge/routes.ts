@@ -165,6 +165,42 @@ export function registerSessionRoutes(ctx: Context, sessionService: ISessionStat
     'vectr-client: POST /api/vectr/upgrade',
   )
 
+  // 2b-2. Vectr downgrade endpoint (full -> memory-only mode, persisted)
+  ctx.effect(
+    () =>
+      webServer.register({
+        kind: 'exact',
+        path: '/api/vectr/downgrade',
+        handler: async (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'Method not allowed' })
+            return
+          }
+          let body: unknown
+          try {
+            body = await readJsonBody(req)
+          } catch (error) {
+            sendJson(res, 400, { error: `Invalid JSON body: ${String(error)}` })
+            return
+          }
+
+          const opts = body as { workspace?: string }
+          if (!opts || typeof opts.workspace !== 'string' || opts.workspace.trim().length === 0) {
+            sendJson(res, 400, { error: 'Missing required field "workspace" in request body' })
+            return
+          }
+
+          try {
+            const result = await sessionService.downgradeWorkspace(opts.workspace.trim())
+            sendJson(res, result.ok ? 200 : 400, result)
+          } catch (error) {
+            sendJson(res, 500, { ok: false, error: String(error) })
+          }
+        },
+      }),
+    'vectr-client: POST /api/vectr/downgrade',
+  )
+
   // 2c. Vectr session start endpoint (start daemon for workspace)
   ctx.effect(
     () =>
