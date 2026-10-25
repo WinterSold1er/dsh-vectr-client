@@ -93,7 +93,8 @@ describe('route honors daemonHttpTimeoutMs (config externalization, F5)', () => 
       logger: { warn() {}, info() {}, error() {} },
     } as unknown as Context
 
-    registerManagementRoutes(ctx, registryPath, { ...resolvedConfig, instancesPath: registryPath })
+    // No workspace discovery source: this spec pins the registry-only row set.
+    registerManagementRoutes(ctx, registryPath, { ...resolvedConfig, instancesPath: registryPath }, undefined, () => [])
 
     const handler = handlers['/api/vectr/workspaces']
     expect(handler).toBeTypeOf('function')

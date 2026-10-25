@@ -45,6 +45,7 @@ export declare class VectrCliRunner implements IVectrCliRunner {
     start(options: VectrStartOptions): Promise<InitResult>;
     restart(workspace: string, options?: {
         full?: boolean;
+        memoryOnly?: boolean;
     }): Promise<InitResult>;
     private executeCommand;
 }

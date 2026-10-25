@@ -36,6 +36,8 @@ export declare class SessionVectrService implements ISessionStatusService {
     startWorkspace(options: VectrStartOptions): Promise<StartResult>;
     upgradeWorkspace(workspace: string): Promise<UpgradeResult>;
     private doUpgradeWorkspace;
+    downgradeWorkspace(workspace: string): Promise<UpgradeResult>;
+    private doDowngradeWorkspace;
     recallNotes(target: {
         workspace?: string | undefined;
         port?: number | undefined;

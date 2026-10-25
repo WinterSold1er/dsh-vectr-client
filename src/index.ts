@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { rmSync, writeFileSync } from 'node:fs'
+import { rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -38,7 +38,13 @@ import {
 // re-exports { Config, apply, inject, name }. Pinning the subpath import is
 // intentional and must not be 'simplified' to the root, or the real binding is
 // lost at build time (rc.2 constraint; revisit if upstream adds root exports).
-import { scanWorkspaces, triggerIndex } from './workspaces'
+import {
+  DEFAULT_DSH_WORKSPACE_FILE,
+  discoverWorkspaceRoots,
+  scanWorkspaces,
+  triggerIndex,
+  type DiscoveredWorkspace,
+} from './workspaces'
 import {
   cleanupOrphanedTunnelsForCodebases,
   cleanupStaleTunnelSockets,
@@ -950,13 +956,16 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promi
 }
 
 /**
- * Register the two workspace-console HTTP routes on the injected webServer:
+ * Register the workspace-console HTTP routes on the injected webServer:
  *
  * - `GET /api/vectr/workspaces` → {@link scanWorkspaces} result (JSON array of
  *   {@link WorkspaceView}).
  * - `POST /api/vectr/trigger-index` body `{ "port": number }` (or
  *   `{ "workspace": string }`) → resolve the single matching registry entry and
  *   call {@link triggerIndex}; returns the {@link TriggerResult}.
+ * - `POST /api/vectr/daemons/start-all` / `POST /api/vectr/daemons/start` body
+ *   `{ "workspace": string }` → start the dead daemons of every registered
+ *   workspace / the daemon of one workspace ({@link startDaemonForWorkspace}).
  *
  * Both handlers are Cordis effects (the disposer from `webServer.register`),
  * so they vanish with the plugin fiber. A registry read failure on either
@@ -1098,6 +1107,106 @@ export async function startAllDaemons(deps: StartAllDeps, body: unknown): Promis
   return { ok: failed === 0, started, alreadyRunning, failed, results }
 }
 
+/** Response body of `POST /api/vectr/daemons/start`. */
+export interface StartOneResponse {
+  ok: boolean
+  /** Registry port of the workspace's daemon; present on success and on a 409 "already running". */
+  port?: number
+  pid?: number
+  /** Real failure text; present only when `ok` is false. */
+  error?: string
+}
+
+/**
+ * Start the vectr daemon of a single workspace (`POST /api/vectr/daemons/start`
+ * body `{ workspace }`).
+ *
+ * Shares the spawn/probe path with {@link startAllDaemons} — same injected
+ * {@link StartAllDeps}, no second spawner — and returns HTTP-shaped outcomes so
+ * the route stays a thin shell:
+ *
+ * - `400` — no usable `workspace` in the body, a relative path, or a directory
+ *   that does not exist (an unknown workspace is a client error).
+ * - `409` — a registry record for the workspace is already alive: no spawn, no
+ *   port churn, the body carries the live port.
+ * - `200` — spawned and re-probed; `{ ok: true, port, pid? }` from the refreshed
+ *   registry record (a successful `vectr start` may pick a different free port).
+ * - `500` — the spawn failed, no registry entry was recorded, or the daemon never
+ *   answered the post-start probe.
+ */
+export async function startDaemonForWorkspace(
+  deps: StartAllDeps,
+  body: unknown,
+): Promise<{ status: number; body: StartOneResponse }> {
+  const requested = (body as { workspace?: unknown } | null | undefined)?.workspace
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    return { status: 400, body: { ok: false, error: 'workspace must be a non-empty absolute path' } }
+  }
+  const workspace = requested.trim()
+  if (!isAbsolute(workspace)) {
+    return { status: 400, body: { ok: false, error: 'workspace must be a non-empty absolute path' } }
+  }
+  try {
+    if (!statSync(workspace).isDirectory()) {
+      return { status: 400, body: { ok: false, error: `no such workspace directory: ${workspace}` } }
+    }
+  } catch (error) {
+    // ENOENT/ENOTDIR (and an unreadable parent) all mean "not a workspace we can serve".
+    return {
+      status: 400,
+      body: { ok: false, error: `no such workspace directory: ${workspace} (${String(error)})` },
+    }
+  }
+
+  try {
+    const existing = resolveInstanceExact(deps.readInstances() ?? {}, workspace)
+    if (existing !== undefined && (await deps.probe(existing)).alive) {
+      // Already running: reported as a conflict, never as a second daemon.
+      return {
+        status: 409,
+        body: { ok: false, error: `daemon already running for ${workspace}`, port: existing.port },
+      }
+    }
+
+    // The entry's own mode wins, exactly as in the start-all sweep.
+    const memoryOnly = existing?.mode === 'memory_only' || existing?.mode === 'memory-only'
+    const started = await deps.start({ workspace, ...(memoryOnly ? { memoryOnly: true } : {}) })
+    if (!started.ok) {
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          error: started.error ?? `vectr start failed: ${started.stderr ?? 'no diagnostic'}`,
+        },
+      }
+    }
+
+    const refreshed = resolveInstanceExact(deps.readInstances() ?? {}, workspace)
+    if (refreshed === undefined) {
+      return {
+        status: 500,
+        body: { ok: false, error: 'daemon started but no registry entry was recorded for the workspace' },
+      }
+    }
+    const after = await deps.probe(refreshed)
+    if (!after.alive) {
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          error: `daemon did not answer the post-start probe (${after.reason ?? 'no reason reported'})`,
+        },
+      }
+    }
+    return {
+      status: 200,
+      body: { ok: true, port: refreshed.port, ...(refreshed.pid !== undefined ? { pid: refreshed.pid } : {}) },
+    }
+  } catch (error) {
+    return { status: 500, body: { ok: false, error: String(error) } }
+  }
+}
+
 /**
  * Build the production {@link StartAllDeps}: the shared registry reader, the
  * shared probe layer with the plugin's configured budgets, and the same
@@ -1133,6 +1242,14 @@ export function registerManagementRoutes(
   instancesPath: string,
   config: Required<Config>,
   startAllDeps?: StartAllDeps,
+  /**
+   * Workspace discovery source for the console table (production: DSH's own
+   * registry). Injected so tests drive a temp fixture and never read `$HOME`.
+   */
+  discover: () => DiscoveredWorkspace[] = () => discoverWorkspaceRoots(
+    DEFAULT_DSH_WORKSPACE_FILE,
+    error => ctx.logger.warn(`vectr-client: workspace discovery failed: ${String(error)}`),
+  ),
 ): void {
   // `webServer` is provided by the host; in headless/unit contexts it may be
   // absent. `ctx.get` returns undefined (rather than throwing) so the plugin
@@ -1149,7 +1266,10 @@ export function registerManagementRoutes(
     path: '/api/vectr/workspaces',
     handler: async (_req, res) => {
       try {
-        const views = await scanWorkspaces(ctx, instancesPath, { statusTimeoutMs: config.daemonHttpTimeoutMs })
+        const views = await scanWorkspaces(ctx, instancesPath, {
+          statusTimeoutMs: config.daemonHttpTimeoutMs,
+          discover,
+        })
         sendJson(res, 200, views)
       } catch (error) {
         sendJson(res, 500, { error: String(error) })
@@ -1225,6 +1345,34 @@ export function registerManagementRoutes(
       }
     },
   }), 'vectr-client: POST /api/vectr/daemons/start-all')
+
+  // Per-workspace start: POST /api/vectr/daemons/start body `{ workspace }` ->
+  // spawn the daemon of one known workspace, including one discovery listed but
+  // that has never run. Same lock and same injected deps as the start-all sweep
+  // so a per-workspace start cannot race it on free-port discovery.
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: '/api/vectr/daemons/start',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: `Invalid JSON body: ${String(error)}` })
+        return
+      }
+      try {
+        const result = await withLocalDaemonLock(() => startDaemonForWorkspace(deps, body))
+        sendJson(res, result.status, result.body)
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error) })
+      }
+    },
+  }), 'vectr-client: POST /api/vectr/daemons/start')
 }
 
 /**

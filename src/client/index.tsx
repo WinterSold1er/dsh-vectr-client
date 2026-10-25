@@ -57,13 +57,16 @@ type LanguageEntry = VectrLanguageEntry
 /** Mirrors the host {@link WorkspaceView} shape (see src/workspaces.ts). */
 interface WorkspaceView {
   workspace: string
-  port: number
+  /** Daemon port. Absent on a row that is known but not started (contract: no port). */
+  port?: number
   pid?: number
   mode?: string
   live: boolean
   error?: string
   /** Precise liveness-failure reason enum from the host; absent when live. */
   reason?: string
+  /** Human title from the DSH workspace registry (not-started rows carry it). */
+  title?: string
   status?: {
     indexed_files?: number
     total_chunks?: number
@@ -500,6 +503,74 @@ export async function loadConsoleData(): Promise<{
   }
 }
 
+/** Result of starting one workspace's daemon (frozen host contract):
+ * success carries the port/pid the host reported, failure the real message. */
+export type StartWorkspaceResult =
+  | { ok: true; port: number; pid?: number }
+  | { ok: false; error: string }
+
+/** POST `/api/vectr/daemons/start` for ONE workspace.
+ *
+ * Same error handling as the start-all launcher in `DaemonLauncher`: a non-2xx
+ * body's `error` wins, otherwise the HTTP status is the message; a body that
+ * claims `ok` but carries no port is a contract violation, not a success. */
+export async function startWorkspaceDaemon(workspace: string): Promise<StartWorkspaceResult> {
+  const res = await fetch('/api/vectr/daemons/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workspace }),
+  })
+  const payload = await res.json() as { ok?: boolean; port?: number; pid?: number; error?: string }
+  if (!res.ok || payload.ok === false) {
+    return { ok: false, error: payload.error ?? `start endpoint returned ${res.status}` }
+  }
+  if (typeof payload.port !== 'number') {
+    return { ok: false, error: 'start endpoint returned no port' }
+  }
+  return { ok: true, port: payload.port, ...(typeof payload.pid === 'number' ? { pid: payload.pid } : {}) }
+}
+
+/** Props of the hook-free start control (same split as `DaemonLauncherView`:
+ * the hook-free half is what the headless specs can render). */
+export interface StartDaemonButtonViewProps {
+  busy: boolean
+  error: string | null
+  onStart: () => void
+}
+
+/** Presentational half: the Start button plus the inline error text. */
+export function StartDaemonButtonView(props: StartDaemonButtonViewProps): ReactNode {
+  const { busy, error, onStart } = props
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+      <button type="button" className={BTN.primary} disabled={busy} onClick={onStart}>
+        {busy ? 'starting…' : 'start daemon'}
+      </button>
+      {/* The card's action cell sets `white-space: nowrap`; the error text must still wrap. */}
+      {error !== null ? <p className="vectr-error" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
+    </div>
+  )
+}
+
+/** Starts one workspace's daemon; `onStarted` is the console re-fetch, so the
+ * row flips from "not started" to live. Owns its own busy/error state. */
+export function StartDaemonButton(props: { workspace: string; onStarted: () => void }): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const start = (): void => {
+    setBusy(true)
+    setError(null)
+    startWorkspaceDaemon(props.workspace)
+      .then((result) => {
+        if (result.ok) props.onStarted()
+        else setError(result.error)
+      })
+      .catch((err: unknown) => setError(`start request error: ${String(err)}`))
+      .finally(() => setBusy(false))
+  }
+  return <StartDaemonButtonView busy={busy} error={error} onStart={start} />
+}
+
 /** One workspace as a card: identity + state pills + re-index on the header row,
  * the key index facts below it, and the codebase detail when expanded. */
 export function WorkspaceCard(props: {
@@ -536,14 +607,14 @@ const memOnly = isMemoryOnly(view.mode)
           <span className="vectr-caret">{expanded ? '▾' : '▸'}</span>
         </button>
         <div className="vectr-card-identity">
-          <h4 className="vectr-card-title" title={view.workspace}>{view.workspace.split('/').slice(-2).join('/')}</h4>
+          <h4 className="vectr-card-title" title={view.workspace}>{view.title ?? view.workspace.split('/').slice(-2).join('/')}</h4>
           <p className="vectr-card-path" title={view.workspace}>{view.workspace}</p>
         </div>
         <div className="vectr-card-pills">
           {/* The liveness pill carries the raw reason/error diagnostic in its title. */}
           <span className={`vectr-pill ${view.live ? 'vectr-pill-live' : 'vectr-pill-offline'}`} title={diagnostic ?? (view.live ? 'daemon alive' : 'daemon offline')}>
             <span className="vectr-pill-dot" />
-            {view.live ? 'online' : 'offline'}
+            {view.live ? 'online' : view.reason === 'not started' ? 'not started' : 'offline'}
           </span>
           {/* Only shown when the daemon actually reported a mode: a dead daemon
               would otherwise repeat "offline" in a second pill. */}
@@ -570,10 +641,14 @@ const memOnly = isMemoryOnly(view.mode)
               borderColor: 'var(--dsw-alias-border-l2)',
               opacity: 1,
             } : undefined}
-            onClick={() => onReindex(view.port)}
+            onClick={() => { if (view.port !== undefined) onReindex(view.port) }}
           >
             {busyPort ? '…' : 're-index'}
           </button>
+          {/* `onCreated` is the console re-fetch already handed to this card — reuse it as the post-start refetch. */}
+          {view.live
+            ? null
+            : <StartDaemonButton workspace={view.workspace} onStarted={onCreated} />}
         </div>
       </div>
 
@@ -584,7 +659,7 @@ const memOnly = isMemoryOnly(view.mode)
       <dl className="vectr-facts">
         <div className="vectr-fact">
           <dt className="vectr-fact-label">port</dt>
-          <dd className="vectr-fact-value" title={view.pid !== undefined ? `pid ${view.pid}` : 'pid unknown'}>{view.port}</dd>
+          <dd className="vectr-fact-value" title={view.pid !== undefined ? `pid ${view.pid}` : 'pid unknown'}>{view.port ?? '—'}</dd>
         </div>
         <div className="vectr-fact">
           <dt className="vectr-fact-label">files</dt>

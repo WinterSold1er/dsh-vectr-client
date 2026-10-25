@@ -5,7 +5,9 @@
  *
  * - {@link scanWorkspaces}: reads the vectr daemon registry, liveness-probes
  *   every entry, then concurrently asks each live daemon for `/v1/status`. One
- *   dead or unresponsive daemon never blocks the rest of the table.
+ *   dead or unresponsive daemon never blocks the rest of the table. The table is
+ *   then unioned with {@link discoverWorkspaceRoots}, so a workspace DSH knows
+ *   about but that has no daemon is still listed (`reason: 'not started'`).
  * - {@link triggerIndex}: POSTs `/v1/index` to one daemon, with a clear
  *   pre-flight gate for modes/state that must not be re-indexed, and a
  *   transparent pass-through of a daemon's 503 "reindex in progress" text.
@@ -13,11 +15,15 @@
  * Both are plain async functions over the already-exported registry helpers
  * (`readInstancesFile` / `resolveInstance` / `isDaemonAlive`) so they unit-test
  * against a temp registry file plus an in-process HTTP server, with no Cordis
- * or live daemon dependency.
+ * or live daemon dependency. Discovery takes its file path as an argument for
+ * the same reason: tests drive a temp fixture, never the real `$HOME`.
  *
  * @module dsh-vectr-client/workspaces
  */
 
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { readInstancesFile, type InstanceEntry, type InstancesFile } from './registry'
@@ -31,23 +37,109 @@ export type { VectrStatus }
 /** Default per-status request budget before a daemon is treated as unresponsive. */
 export const DEFAULT_STATUS_TIMEOUT_MS = 3000
 
+/** DSH's own workspace registry (`$DSH_HOME/storages/workspace.json`, `~/.dsh` fallback). */
+export const DEFAULT_DSH_WORKSPACE_FILE = join(
+  process.env['DSH_HOME'] ?? join(homedir(), '.dsh'),
+  'storages',
+  'workspace.json',
+)
+
+/** One workspace root DSH knows about, with the title it shows for it. */
+export interface DiscoveredWorkspace {
+  /** Absolute workspace directory. */
+  workspace: string
+  /** Display title from DSH's workspace registry; absent when it has none. */
+  title?: string
+}
+
+/**
+ * Dedupe key for a workspace path: absolute, trailing separators dropped.
+ *
+ * The two discovery sources spell the same directory differently (`/a/b`,
+ * `/a/b/`, `/a/./b`); without one canonical spelling the union would list a
+ * workspace twice.
+ */
+export function normalizeWorkspacePath(workspace: string): string {
+  return resolve(workspace)
+}
+
+/**
+ * Read every workspace root DSH records, best-effort.
+ *
+ * The source is the DSH unit store `{ tables: { workspaces: { <id>: { path,
+ * title } } } }`. Discovery is decoration for the console, never a blocker: a
+ * missing, unreadable or unparseable file degrades to an empty list and reports
+ * through `onError` (production: the logger) instead of throwing. A workspace
+ * whose `path` is absent, empty or relative is skipped — it cannot be served by
+ * a daemon.
+ *
+ * @param filePath - absolute path of DSH's `workspace.json`.
+ * @param onError - diagnostic sink for the degradation paths.
+ * @returns discovered roots in file order, deduped by {@link normalizeWorkspacePath}.
+ */
+export function discoverWorkspaceRoots(
+  filePath: string,
+  onError?: (error: unknown) => void,
+): DiscoveredWorkspace[] {
+  let text: string
+  try {
+    text = readFileSync(filePath, 'utf8')
+  } catch (error) {
+    onError?.(error)
+    return []
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    onError?.(error)
+    return []
+  }
+  const table = (parsed as { tables?: { workspaces?: unknown } } | null)?.tables?.workspaces
+  if (typeof table !== 'object' || table === null || Array.isArray(table)) return []
+
+  const roots: DiscoveredWorkspace[] = []
+  const seen = new Set<string>()
+  for (const record of Object.values(table as Record<string, unknown>)) {
+    const path = (record as { path?: unknown } | null)?.path
+    if (typeof path !== 'string' || path === '' || !isAbsolute(path)) continue
+    const key = normalizeWorkspacePath(path)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const title = (record as { title?: unknown }).title
+    roots.push({
+      workspace: path,
+      ...(typeof title === 'string' && title.trim() !== '' ? { title: title.trim() } : {}),
+    })
+  }
+  return roots
+}
+
 /** Default per-index-trigger request budget. */
 export const DEFAULT_TRIGGER_TIMEOUT_MS = 30_000
 
-/** One row in the workspace console table. */
+/**
+ * One row in the workspace console table.
+ *
+ * Three kinds share the shape: a live daemon, a registry record that failed its
+ * liveness probe, and a workspace DSH knows about that has no daemon at all
+ * (`live: false`, `reason: 'not started'`, no `port`).
+ */
 export interface WorkspaceView {
-  /** Absolute workspace directory the daemon serves. */
+  /** Absolute workspace directory. */
   workspace: string
-  /** Daemon TCP port. */
-  port: number
+  /** Daemon TCP port; absent on a known-but-not-started row. */
+  port?: number
   /** Daemon pid, when the registry recorded one. */
   pid?: number
   /** Registry mode (`full`, `lite`, `memory_only`, `search_only`, …). */
   mode?: string
   /** Whether the registry record passed the liveness probe. */
   live: boolean
-  /** Precise liveness-failure reason (PROCESS_DEAD_ESRCH / PORT_CLOSED / HTTP_PROBE_TIMEOUT / HTTP_PROBE_UNREACHABLE); absent when `live`. */
-  reason?: SkipReason
+  /** Display title from DSH's workspace registry, when known. */
+  title?: string
+  /** Why the row is not live: a probe failure reason, or `'not started'` for a discovered workspace with no daemon record. */
+  reason?: SkipReason | 'not started'
   /** Human-readable reason the row is not `live`; absent when live. */
   error?: string
   /** Parsed `/v1/status` payload; present only when `live` and the call succeeded. */
@@ -76,13 +168,15 @@ export interface TriggerResult {
  *
  * @param ctx - plugin context carrying the logger (registry read diagnostics).
  * @param instancesPath - absolute path of `instances.json`.
- * @param opts - optional per-call tuning (`statusTimeoutMs`).
- * @returns one {@link WorkspaceView} per registry entry, in registry order.
+ * @param opts - optional per-call tuning (`statusTimeoutMs`) and the workspace
+ *   discovery source (`discover`, production: {@link discoverWorkspaceRoots}).
+ * @returns registry rows in registry order, then not-started rows for every
+ * discovered workspace the registry does not already describe.
  */
 export async function scanWorkspaces(
   ctx: Context,
   instancesPath: string,
-  opts: { statusTimeoutMs?: number } = {},
+  opts: { statusTimeoutMs?: number; discover?: () => DiscoveredWorkspace[] } = {},
 ): Promise<WorkspaceView[]> {
   const timeoutMs = opts.statusTimeoutMs ?? DEFAULT_STATUS_TIMEOUT_MS
   let instances: InstancesFile | undefined
@@ -92,9 +186,8 @@ export async function scanWorkspaces(
     // An unparseable registry must surface, not masquerade as "no daemons".
     throw error
   }
-  if (instances === undefined) return []
 
-  const entries = Object.values(instances)
+  const entries = instances === undefined ? [] : Object.values(instances)
   // Use the precise diagnosis (not the boolean gate) so the console shows the
   // exact death reason (R4/M1) instead of a generic "not alive" string.
   const liveness = await Promise.all(entries.map(async (entry) =>
@@ -133,7 +226,7 @@ export async function scanWorkspaces(
     } satisfies WorkspaceView
   }))
 
-  return rows.map((settled, i) => {
+  const views = rows.map((settled, i) => {
     if (settled.status === 'fulfilled') return settled.value
     // A throw inside the row mapper is a programming error in the probe chain;
     // represent it as a non-live row with the reason rather than dropping it.
@@ -148,6 +241,37 @@ export async function scanWorkspaces(
       error: `status probe failed: ${String(settled.reason)}`,
     } satisfies WorkspaceView
   })
+
+  // Union in the workspaces DSH knows about that have no daemon record: without
+  // this the console only ever shows what a daemon wrote to the registry, so a
+  // workspace that was added but never started stays invisible. Registry
+  // records win a path collision — they carry the real daemon state.
+  const discovered = opts.discover?.() ?? []
+  if (discovered.length === 0) return views
+
+  const titleByPath = new Map<string, string>()
+  for (const root of discovered) {
+    if (root.title !== undefined) titleByPath.set(normalizeWorkspacePath(root.workspace), root.title)
+  }
+  const titled: WorkspaceView[] = views.map((view) => {
+    const title = titleByPath.get(normalizeWorkspacePath(view.workspace))
+    return title === undefined ? view : { ...view, title }
+  })
+
+  const seen = new Set(entries.map(entry => normalizeWorkspacePath(entry.workspace)))
+  for (const root of discovered) {
+    const key = normalizeWorkspacePath(root.workspace)
+    if (seen.has(key)) continue
+    seen.add(key)
+    titled.push({
+      workspace: root.workspace,
+      ...(root.title !== undefined ? { title: root.title } : {}),
+      live: false,
+      reason: 'not started',
+      error: 'daemon not started',
+    } satisfies WorkspaceView)
+  }
+  return titled
 }
 
 /**
