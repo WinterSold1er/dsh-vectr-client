@@ -7,8 +7,11 @@
  * `startAllDaemons` sweep, with the registry/probe/spawn seams injected. No
  * socket, no child process, no `NODE_ENV` branch anywhere.
  */
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import * as React from 'react'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   Config as ConfigSchema,
@@ -18,6 +21,7 @@ import {
   type StartAllDeps,
   type StartAllResponse,
 } from '../src/index.ts'
+import type { DiscoveredWorkspace } from '../src/workspaces.ts'
 import { DaemonLauncher, DaemonLauncherView } from '../src/client/DaemonLauncher.tsx'
 import type { AliveDiagnosis } from '../src/probe.ts'
 import type { InstanceEntry, StartResult, VectrStartOptions } from '../src/domain/index.ts'
@@ -40,12 +44,25 @@ function instances(entries: InstanceEntry[]): Record<string, InstanceEntry> {
   return out
 }
 
+/** One real temp root: the discovered-only branch stats directories on disk. */
+const TEMP_ROOT = mkdtempSync(join(tmpdir(), 'vectr-start-all-'))
+
+function realDir(name: string): string {
+  const dir = join(TEMP_ROOT, name)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+afterAll(() => { rmSync(TEMP_ROOT, { recursive: true, force: true }) })
+
 interface Recorded {
   deps: StartAllDeps
   /** Options every `start()` call received, in call order. */
   starts: VectrStartOptions[]
   /** Workspaces every `probe()` call received, in call order. */
   probes: string[]
+  /** Messages the sweep handed to the injected warn sink, in call order. */
+  warns: string[]
 }
 
 /** Fake registry/probe/spawn seams; only what a test overrides is behaviourally different. */
@@ -54,13 +71,16 @@ function fakeDeps(
   overrides: {
     probe?: (e: InstanceEntry) => AliveDiagnosis | Promise<AliveDiagnosis>
     start?: (o: VectrStartOptions) => StartResult | Promise<StartResult>
+    discover?: () => DiscoveredWorkspace[]
   } = {},
 ): Recorded {
   const starts: VectrStartOptions[] = []
   const probes: string[] = []
+  const warns: string[] = []
   return {
     starts,
     probes,
+    warns,
     deps: {
       readInstances,
       probe: async (e) => {
@@ -71,6 +91,8 @@ function fakeDeps(
         starts.push(o)
         return overrides.start === undefined ? { ok: true } : await overrides.start(o)
       },
+      discover: overrides.discover ?? (() => []),
+      warn: (message) => { warns.push(message) },
     },
   }
 }
@@ -320,6 +342,76 @@ describe('POST /api/vectr/daemons/start-all', () => {
       status: 'failed',
       error: 'invalid registry entry: missing a non-empty workspace and a valid port',
     })
+  })
+
+  it('sweeps registry ∪ discovery: registry port wins a path clash, discovered-only rows append in path order', async () => {
+    const registered = realDir('registered')
+    const discA = realDir('disc-a')
+    const discB = realDir('disc-b')
+    const registry = instances([entry(6201, registered)])
+    const alive = new Set([registered])
+    let nextPort = 6202
+    const { deps, starts } = fakeDeps(() => registry, {
+      probe: e => ({ alive: alive.has(e.workspace), reason: 'PORT_CLOSED' }),
+      start: (o) => {
+        const port = nextPort
+        nextPort += 1
+        registry[o.workspace] = { workspace: o.workspace, port }
+        alive.add(o.workspace)
+        return { ok: true }
+      },
+      // Deliberately unordered, and `registered/` spells the registry path with
+      // a trailing slash: the registry must win and the port must survive.
+      discover: () => [{ workspace: discB }, { workspace: `${registered}/` }, { workspace: discA }],
+    })
+
+    const result = await startAllDaemons(deps, {})
+
+    // The registry row is described at its recorded port, never re-spawned; the
+    // duplicate spelling costs nothing; only the two discovered-only dirs spawn.
+    expect(starts.map(s => s.workspace)).toEqual([discA, discB])
+    expect(starts.every(s => s.memoryOnly === false)).toBe(true)
+    expect(result.results).toEqual([
+      { workspace: registered, port: 6201, status: 'already-running' },
+      { workspace: discA, port: 6202, status: 'started' },
+      { workspace: discB, port: 6203, status: 'started' },
+    ])
+    expect(result.started).toBe(2)
+    expect(result.alreadyRunning).toBe(1)
+    expect(result.failed).toBe(0)
+    expect(result.ok).toBe(true)
+  })
+
+  it('reports a discovered-only workspace with no directory on disk as failed, never skips it', async () => {
+    const missing = join(TEMP_ROOT, 'never-created')
+    const { deps, starts } = fakeDeps(() => undefined, { discover: () => [{ workspace: missing }] })
+
+    const result = await startAllDaemons(deps, {})
+
+    expect(starts).toHaveLength(0)
+    expect(result.results).toEqual([
+      { workspace: missing, port: null, status: 'failed', error: `no such workspace directory: ${missing}` },
+    ])
+    expect(result.started).toBe(0)
+    expect(result.failed).toBe(1)
+    expect(result.ok).toBe(false)
+  })
+
+  it('degrades a throwing discover() to an empty set: the registry sweep still succeeds', async () => {
+    const registered = realDir('registered-throw')
+    const { deps, warns } = fakeDeps(() => instances([entry(6204, registered)]), {
+      probe: () => ({ alive: true }),
+      discover: () => { throw new Error('storages/workspace.json unreadable: EACCES') },
+    })
+
+    const result = await startAllDaemons(deps, {})
+
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('vectr-client: workspace discovery failed:')
+    expect(warns[0]).toContain('storages/workspace.json unreadable: EACCES')
+    expect(result.results).toEqual([{ workspace: registered, port: 6204, status: 'already-running' }])
+    expect(result.ok).toBe(true)
+    expect(result.failed).toBe(0)
   })
 })
 

@@ -22,6 +22,7 @@ import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { type ConnectionHandle, type ReconnectConfig } from '@deepseek-ai/dsh-mcp-client/src/connection.ts';
+import { type DiscoveredWorkspace } from './workspaces';
 import { type CodebaseDeps, type CodebaseEntry, type CredentialStore, type DaemonAliveProbe, type SpawnRunner, type SshRunner } from './codebases';
 import { type InstancesFile } from './registry';
 import { type AliveDiagnosis } from './probe';
@@ -98,6 +99,8 @@ export interface Config {
     recallTimeoutMs?: number;
     /** Vectr workspace upgrade timeout in ms (default 15000). */
     upgradeTimeoutMs?: number;
+    /** Start the daemon of every known workspace (registry ∪ DSH discovery) once at host boot (default `true`). */
+    autoStartDaemons?: boolean;
 }
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
 export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
@@ -218,13 +221,16 @@ export declare function startupHeal(deps: CodebaseDeps, codebasesPath: string, i
  */
 export declare function apply(ctx: Context, config?: Config): void;
 /**
- * Register the two workspace-console HTTP routes on the injected webServer:
+ * Register the workspace-console HTTP routes on the injected webServer:
  *
  * - `GET /api/vectr/workspaces` → {@link scanWorkspaces} result (JSON array of
  *   {@link WorkspaceView}).
  * - `POST /api/vectr/trigger-index` body `{ "port": number }` (or
  *   `{ "workspace": string }`) → resolve the single matching registry entry and
  *   call {@link triggerIndex}; returns the {@link TriggerResult}.
+ * - `POST /api/vectr/daemons/start-all` / `POST /api/vectr/daemons/start` body
+ *   `{ "workspace": string }` → start the dead daemons of every registered
+ *   workspace / the daemon of one workspace ({@link startDaemonForWorkspace}).
  *
  * Both handlers are Cordis effects (the disposer from `webServer.register`),
  * so they vanish with the plugin fiber. A registry read failure on either
@@ -266,28 +272,74 @@ export interface StartAllDeps {
     probe: (entry: InstanceEntry) => Promise<AliveDiagnosis>;
     /** Daemon spawn (production: {@link VectrCliRunner.start}). */
     start: (options: VectrStartOptions) => Promise<StartResult>;
+    /**
+     * DSH's own workspace list (production: {@link discoverWorkspaceRoots} over
+     * {@link DEFAULT_DSH_WORKSPACE_FILE}). The sweep unions it with the registry
+     * so a workspace whose daemon was never started is still started here.
+     */
+    discover: () => DiscoveredWorkspace[];
+    /** Optional warn sink for a non-fatal event (a throwing `discover`); absent in tests. */
+    warn?: (message: string) => void;
 }
 /**
- * Start the vectr daemon for every workspace recorded in the registry, strictly
- * one at a time (deterministic order: port ascending, then workspace path —
- * `instances.json` is keyed by sha256 hash, so its own key order carries no
- * meaning). Sequential by construction: concurrent `vectr start` runs race on
- * free-port discovery and on the lock-guarded `instances.json` write.
+ * Start the vectr daemon for every known workspace — registry entries plus
+ * `deps.discover()` entries that have no registry record — strictly one at a
+ * time (deterministic order: registry by port ascending then workspace path,
+ * then discovered-only by path ascending — `instances.json` is keyed by sha256
+ * hash, so its own key order carries no meaning). Sequential by construction:
+ * concurrent `vectr start` runs race on free-port discovery and on the
+ * lock-guarded `instances.json` write.
  *
  * A workspace whose daemon already answers the probe is reported
  * `already-running` and is NOT spawned again (a second daemon would fight the
  * first over the same registry port). A spawn is followed by exactly ONE
  * bounded re-probe of the (possibly rewritten) registry record; an endpoint
- * that never answers is reported `failed`, never `started`.
+ * that never answers is reported `failed`, never `started`. A discovered-only
+ * workspace whose directory is gone is `failed` (`no such workspace
+ * directory:`), never skipped — a known workspace must not read as "nothing to
+ * do".
  *
  * A per-workspace failure is recorded in `results[].error`, counted in `failed`,
  * and forces `ok:false` — the sweep never reports success over a failed spawn.
+ * A throwing `deps.discover()` is the one exception: it degrades to an empty
+ * discovery list (reported through `deps.warn`) and the registry sweep carries
+ * on.
  *
- * @param deps - registry/probe/spawn seams (see {@link StartAllDeps}).
+ * @param deps - registry/probe/spawn/discovery seams (see {@link StartAllDeps}).
  * @param body - parsed JSON request body; `{ memoryOnly?: boolean }` is honored.
  * @returns the aggregated {@link StartAllResponse}.
  */
 export declare function startAllDaemons(deps: StartAllDeps, body: unknown): Promise<StartAllResponse>;
+/** Response body of `POST /api/vectr/daemons/start`. */
+export interface StartOneResponse {
+    ok: boolean;
+    /** Registry port of the workspace's daemon; present on success and on a 409 "already running". */
+    port?: number;
+    pid?: number;
+    /** Real failure text; present only when `ok` is false. */
+    error?: string;
+}
+/**
+ * Start the vectr daemon of a single workspace (`POST /api/vectr/daemons/start`
+ * body `{ workspace }`).
+ *
+ * Shares the spawn/probe path with {@link startAllDaemons} — same injected
+ * {@link StartAllDeps}, no second spawner — and returns HTTP-shaped outcomes so
+ * the route stays a thin shell:
+ *
+ * - `400` — no usable `workspace` in the body, a relative path, or a directory
+ *   that does not exist (an unknown workspace is a client error).
+ * - `409` — a registry record for the workspace is already alive: no spawn, no
+ *   port churn, the body carries the live port.
+ * - `200` — spawned and re-probed; `{ ok: true, port, pid? }` from the refreshed
+ *   registry record (a successful `vectr start` may pick a different free port).
+ * - `500` — the spawn failed, no registry entry was recorded, or the daemon never
+ *   answered the post-start probe.
+ */
+export declare function startDaemonForWorkspace(deps: StartAllDeps, body: unknown): Promise<{
+    status: number;
+    body: StartOneResponse;
+}>;
 /**
  * Build the production {@link StartAllDeps}: the shared registry reader, the
  * shared probe layer with the plugin's configured budgets, and the same
@@ -299,7 +351,13 @@ export declare function startAllDaemons(deps: StartAllDeps, body: unknown): Prom
  * @returns the assembled {@link StartAllDeps}.
  */
 export declare function buildStartAllDeps(ctx: Context, instancesPath: string, config: Required<Config>): StartAllDeps;
-export declare function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>, startAllDeps?: StartAllDeps): void;
+export declare function registerManagementRoutes(ctx: Context, instancesPath: string, config: Required<Config>, startAllDeps?: StartAllDeps, 
+/**
+ * Workspace discovery source for the console table and the start-all sweep
+ * (production: DSH's own registry). Injected so tests drive a temp fixture and
+ * never read `$HOME`.
+ */
+discover?: () => DiscoveredWorkspace[]): void;
 /**
  * Build the runtime dependencies for the codebase manager from the host
  * environment. `spawnRunner` wraps `node:child_process spawn`; `sshRunner`

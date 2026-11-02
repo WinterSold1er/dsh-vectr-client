@@ -5,7 +5,9 @@
  *
  * - {@link scanWorkspaces}: reads the vectr daemon registry, liveness-probes
  *   every entry, then concurrently asks each live daemon for `/v1/status`. One
- *   dead or unresponsive daemon never blocks the rest of the table.
+ *   dead or unresponsive daemon never blocks the rest of the table. The table is
+ *   then unioned with {@link discoverWorkspaceRoots}, so a workspace DSH knows
+ *   about but that has no daemon is still listed (`reason: 'not started'`).
  * - {@link triggerIndex}: POSTs `/v1/index` to one daemon, with a clear
  *   pre-flight gate for modes/state that must not be re-indexed, and a
  *   transparent pass-through of a daemon's 503 "reindex in progress" text.
@@ -13,7 +15,8 @@
  * Both are plain async functions over the already-exported registry helpers
  * (`readInstancesFile` / `resolveInstance` / `isDaemonAlive`) so they unit-test
  * against a temp registry file plus an in-process HTTP server, with no Cordis
- * or live daemon dependency.
+ * or live daemon dependency. Discovery takes its file path as an argument for
+ * the same reason: tests drive a temp fixture, never the real `$HOME`.
  *
  * @module dsh-vectr-client/workspaces
  */
@@ -23,22 +26,62 @@ import { type SkipReason, type VectrStatus } from './probe';
 export type { VectrStatus };
 /** Default per-status request budget before a daemon is treated as unresponsive. */
 export declare const DEFAULT_STATUS_TIMEOUT_MS = 3000;
+/** DSH's own workspace registry (`$DSH_HOME/storages/workspace.json`, `~/.dsh` fallback). */
+export declare const DEFAULT_DSH_WORKSPACE_FILE: string;
+/** One workspace root DSH knows about, with the title it shows for it. */
+export interface DiscoveredWorkspace {
+    /** Absolute workspace directory. */
+    workspace: string;
+    /** Display title from DSH's workspace registry; absent when it has none. */
+    title?: string;
+}
+/**
+ * Dedupe key for a workspace path: absolute, trailing separators dropped.
+ *
+ * The two discovery sources spell the same directory differently (`/a/b`,
+ * `/a/b/`, `/a/./b`); without one canonical spelling the union would list a
+ * workspace twice.
+ */
+export declare function normalizeWorkspacePath(workspace: string): string;
+/**
+ * Read every workspace root DSH records, best-effort.
+ *
+ * The source is the DSH unit store `{ tables: { workspaces: { <id>: { path,
+ * title } } } }`. Discovery is decoration for the console, never a blocker: a
+ * missing, unreadable or unparseable file degrades to an empty list and reports
+ * through `onError` (production: the logger) instead of throwing. A workspace
+ * whose `path` is absent, empty or relative is skipped — it cannot be served by
+ * a daemon.
+ *
+ * @param filePath - absolute path of DSH's `workspace.json`.
+ * @param onError - diagnostic sink for the degradation paths.
+ * @returns discovered roots in file order, deduped by {@link normalizeWorkspacePath}.
+ */
+export declare function discoverWorkspaceRoots(filePath: string, onError?: (error: unknown) => void): DiscoveredWorkspace[];
 /** Default per-index-trigger request budget. */
 export declare const DEFAULT_TRIGGER_TIMEOUT_MS = 30000;
-/** One row in the workspace console table. */
+/**
+ * One row in the workspace console table.
+ *
+ * Three kinds share the shape: a live daemon, a registry record that failed its
+ * liveness probe, and a workspace DSH knows about that has no daemon at all
+ * (`live: false`, `reason: 'not started'`, no `port`).
+ */
 export interface WorkspaceView {
-    /** Absolute workspace directory the daemon serves. */
+    /** Absolute workspace directory. */
     workspace: string;
-    /** Daemon TCP port. */
-    port: number;
+    /** Daemon TCP port; absent on a known-but-not-started row. */
+    port?: number;
     /** Daemon pid, when the registry recorded one. */
     pid?: number;
     /** Registry mode (`full`, `lite`, `memory_only`, `search_only`, …). */
     mode?: string;
     /** Whether the registry record passed the liveness probe. */
     live: boolean;
-    /** Precise liveness-failure reason (PROCESS_DEAD_ESRCH / PORT_CLOSED / HTTP_PROBE_TIMEOUT / HTTP_PROBE_UNREACHABLE); absent when `live`. */
-    reason?: SkipReason;
+    /** Display title from DSH's workspace registry, when known. */
+    title?: string;
+    /** Why the row is not live: a probe failure reason, or `'not started'` for a discovered workspace with no daemon record. */
+    reason?: SkipReason | 'not started';
     /** Human-readable reason the row is not `live`; absent when live. */
     error?: string;
     /** Parsed `/v1/status` payload; present only when `live` and the call succeeded. */
@@ -65,11 +108,14 @@ export interface TriggerResult {
  *
  * @param ctx - plugin context carrying the logger (registry read diagnostics).
  * @param instancesPath - absolute path of `instances.json`.
- * @param opts - optional per-call tuning (`statusTimeoutMs`).
- * @returns one {@link WorkspaceView} per registry entry, in registry order.
+ * @param opts - optional per-call tuning (`statusTimeoutMs`) and the workspace
+ *   discovery source (`discover`, production: {@link discoverWorkspaceRoots}).
+ * @returns registry rows in registry order, then not-started rows for every
+ * discovered workspace the registry does not already describe.
  */
 export declare function scanWorkspaces(ctx: Context, instancesPath: string, opts?: {
     statusTimeoutMs?: number;
+    discover?: () => DiscoveredWorkspace[];
 }): Promise<WorkspaceView[]>;
 /**
  * Request a re-index from one daemon (`POST /v1/index` body `{"force":false}`).

@@ -41,6 +41,7 @@ import {
 import {
   DEFAULT_DSH_WORKSPACE_FILE,
   discoverWorkspaceRoots,
+  normalizeWorkspacePath,
   scanWorkspaces,
   triggerIndex,
   type DiscoveredWorkspace,
@@ -186,6 +187,8 @@ export interface Config {
   recallTimeoutMs?: number
   /** Vectr workspace upgrade timeout in ms (default 15000). */
   upgradeTimeoutMs?: number
+  /** Start the daemon of every known workspace (registry ∪ DSH discovery) once at host boot (default `true`). */
+  autoStartDaemons?: boolean
 }
 
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
@@ -284,6 +287,7 @@ export const Config: z<Config> = z.object({
   cliTimeoutMs: z.number().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
   recallTimeoutMs: z.number().min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
   upgradeTimeoutMs: z.number().min(1).default(DEFAULT_UPGRADE_TIMEOUT_MS),
+  autoStartDaemons: z.boolean().default(true),
 }) as unknown as z<Config>
 
 /**
@@ -705,6 +709,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (typeof envVal === 'number' && !isNaN(envVal) && envVal > 0) return envVal
       return config.upgradeTimeoutMs ?? DEFAULT_UPGRADE_TIMEOUT_MS
     })(),
+    autoStartDaemons: config.autoStartDaemons ?? true,
   }
   // Relative-path fallback (P3-safe): only resolves against process.cwd()
   // when Config supplies a *relative* path. Both defaults
@@ -768,6 +773,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
   } catch (err) {
     ctx.logger.warn(`vectr-client: startup codebase heal skipped: ${String(err)}`)
+  }
+  // Auto-start every known workspace's daemon (registry ∪ DSH discovery) once
+  // per host boot. Fire-and-forget: `apply` is sync in the host contract, the
+  // sweep is serialized behind the same local-daemon lock as every other start,
+  // and neither its latency nor a rejection may reach `apply`.
+  if (resolved.autoStartDaemons) {
+    void withLocalDaemonLock(() => startAllDaemons(buildStartAllDeps(ctx, instancesPath, resolved), {}))
+      .then((sweep) => {
+        ctx.logger.info(
+          `vectr-client: auto-start daemons: ${sweep.started} started, ${sweep.alreadyRunning} already running, ${sweep.failed} failed`,
+        )
+      })
+      .catch((err) => {
+        ctx.logger.warn(`vectr-client: auto-start daemons failed: ${String(err)}`)
+      })
   }
   const handles = new Map<Agent, ConnectionHandle>()
   const codebaseHandles = new Map<Agent, ConnectionHandle[]>()
@@ -1009,31 +1029,57 @@ export interface StartAllDeps {
   probe: (entry: InstanceEntry) => Promise<AliveDiagnosis>
   /** Daemon spawn (production: {@link VectrCliRunner.start}). */
   start: (options: VectrStartOptions) => Promise<StartResult>
+  /**
+   * DSH's own workspace list (production: {@link discoverWorkspaceRoots} over
+   * {@link DEFAULT_DSH_WORKSPACE_FILE}). The sweep unions it with the registry
+   * so a workspace whose daemon was never started is still started here.
+   */
+  discover: () => DiscoveredWorkspace[]
+  /** Optional warn sink for a non-fatal event (a throwing `discover`); absent in tests. */
+  warn?: (message: string) => void
 }
 
 /**
- * Start the vectr daemon for every workspace recorded in the registry, strictly
- * one at a time (deterministic order: port ascending, then workspace path —
- * `instances.json` is keyed by sha256 hash, so its own key order carries no
- * meaning). Sequential by construction: concurrent `vectr start` runs race on
- * free-port discovery and on the lock-guarded `instances.json` write.
+ * Start the vectr daemon for every known workspace — registry entries plus
+ * `deps.discover()` entries that have no registry record — strictly one at a
+ * time (deterministic order: registry by port ascending then workspace path,
+ * then discovered-only by path ascending — `instances.json` is keyed by sha256
+ * hash, so its own key order carries no meaning). Sequential by construction:
+ * concurrent `vectr start` runs race on free-port discovery and on the
+ * lock-guarded `instances.json` write.
  *
  * A workspace whose daemon already answers the probe is reported
  * `already-running` and is NOT spawned again (a second daemon would fight the
  * first over the same registry port). A spawn is followed by exactly ONE
  * bounded re-probe of the (possibly rewritten) registry record; an endpoint
- * that never answers is reported `failed`, never `started`.
+ * that never answers is reported `failed`, never `started`. A discovered-only
+ * workspace whose directory is gone is `failed` (`no such workspace
+ * directory:`), never skipped — a known workspace must not read as "nothing to
+ * do".
  *
  * A per-workspace failure is recorded in `results[].error`, counted in `failed`,
  * and forces `ok:false` — the sweep never reports success over a failed spawn.
+ * A throwing `deps.discover()` is the one exception: it degrades to an empty
+ * discovery list (reported through `deps.warn`) and the registry sweep carries
+ * on.
  *
- * @param deps - registry/probe/spawn seams (see {@link StartAllDeps}).
+ * @param deps - registry/probe/spawn/discovery seams (see {@link StartAllDeps}).
  * @param body - parsed JSON request body; `{ memoryOnly?: boolean }` is honored.
  * @returns the aggregated {@link StartAllResponse}.
  */
 export async function startAllDaemons(deps: StartAllDeps, body: unknown): Promise<StartAllResponse> {
   const requested = (body as { memoryOnly?: unknown } | null)?.memoryOnly
   const forcedMemoryOnly = typeof requested === 'boolean' ? requested : undefined
+
+  // The registry only knows daemons started at least once; DSH's own workspace
+  // list is what makes this the whole known set. Discovery is decoration, never
+  // a blocker: a throwing source degrades to an empty list (warn, no failure).
+  let discovered: DiscoveredWorkspace[] = []
+  try {
+    discovered = deps.discover()
+  } catch (error) {
+    deps.warn?.(`vectr-client: workspace discovery failed: ${String(error)}`)
+  }
 
   const raw = Object.values(deps.readInstances() ?? {})
   const valid = raw.filter(isValidInstanceEntry)
@@ -1099,6 +1145,77 @@ export async function startAllDaemons(deps: StartAllDeps, body: unknown): Promis
       status: 'failed',
       error: 'invalid registry entry: missing a non-empty workspace and a valid port',
     })
+  }
+
+  // Discovery-only candidates, appended after every registry entry (registry
+  // wins a path clash so its recorded port is preserved) and sorted by path so
+  // the tail is deterministic.
+  const known = new Set(valid.map(entry => normalizeWorkspacePath(entry.workspace)))
+  const extras = discovered
+    .filter(root => typeof root?.workspace === 'string' && root.workspace.trim() !== '')
+    .map(root => normalizeWorkspacePath(root.workspace))
+    .filter((workspace) => {
+      if (known.has(workspace)) return false
+      known.add(workspace)
+      return true
+    })
+    .sort((a, b) => a.localeCompare(b))
+
+  for (const workspace of extras) {
+    // No registry record carries the mode here, so only the request body can
+    // force memory-only; otherwise `vectr start`'s own default applies.
+    const memoryOnly = forcedMemoryOnly ?? false
+    try {
+      const stat = statSync(workspace, { throwIfNoEntry: false })
+      if (stat === undefined || !stat.isDirectory()) {
+        results.push({ workspace, port: null, status: 'failed', error: `no such workspace directory: ${workspace}` })
+        continue
+      }
+    } catch (error) {
+      // Unreadable/ENOTDIR paths are reported, never silently skipped.
+      results.push({
+        workspace,
+        port: null,
+        status: 'failed',
+        error: `no such workspace directory: ${workspace} (${String(error)})`,
+      })
+      continue
+    }
+
+    try {
+      const started = await deps.start({ workspace, memoryOnly })
+      if (!started.ok) {
+        results.push({
+          workspace,
+          port: null,
+          status: 'failed',
+          error: started.error ?? `vectr start failed: ${started.stderr ?? 'no diagnostic'}`,
+        })
+        continue
+      }
+
+      const refreshed = resolveInstanceExact(deps.readInstances() ?? {}, workspace)
+      if (refreshed === undefined) {
+        results.push({
+          workspace,
+          port: null,
+          status: 'failed',
+          error: 'daemon started but no registry entry was recorded for the workspace',
+        })
+        continue
+      }
+      const after = await deps.probe(refreshed)
+      results.push(after.alive
+        ? { workspace, port: refreshed.port, status: 'started' }
+        : {
+            workspace,
+            port: refreshed.port,
+            status: 'failed',
+            error: `daemon did not answer the post-start probe (${after.reason ?? 'no reason reported'})`,
+          })
+    } catch (error) {
+      results.push({ workspace, port: null, status: 'failed', error: String(error) })
+    }
   }
 
   const started = results.filter(r => r.status === 'started').length
@@ -1208,6 +1325,18 @@ export async function startDaemonForWorkspace(
 }
 
 /**
+ * Production workspace discovery: DSH's own registry file, read best-effort.
+ * One construction for both consumers (management table + start-all sweep) so
+ * the two can never disagree about which workspaces exist.
+ */
+function defaultWorkspaceDiscovery(ctx: Context): () => DiscoveredWorkspace[] {
+  return () => discoverWorkspaceRoots(
+    DEFAULT_DSH_WORKSPACE_FILE,
+    error => ctx.logger.warn(`vectr-client: workspace discovery failed: ${String(error)}`),
+  )
+}
+
+/**
  * Build the production {@link StartAllDeps}: the shared registry reader, the
  * shared probe layer with the plugin's configured budgets, and the same
  * {@link VectrCliRunner} the session service uses (one CLI path, one timeout).
@@ -1234,6 +1363,8 @@ export function buildStartAllDeps(
       tcpTimeoutMs: config.daemonTcpTimeoutMs ?? DEFAULT_TCP_TIMEOUT_MS,
     }),
     start: options => cliRunner.start(options),
+    discover: defaultWorkspaceDiscovery(ctx),
+    warn: message => ctx.logger.warn(message),
   }
 }
 
@@ -1243,13 +1374,11 @@ export function registerManagementRoutes(
   config: Required<Config>,
   startAllDeps?: StartAllDeps,
   /**
-   * Workspace discovery source for the console table (production: DSH's own
-   * registry). Injected so tests drive a temp fixture and never read `$HOME`.
+   * Workspace discovery source for the console table and the start-all sweep
+   * (production: DSH's own registry). Injected so tests drive a temp fixture and
+   * never read `$HOME`.
    */
-  discover: () => DiscoveredWorkspace[] = () => discoverWorkspaceRoots(
-    DEFAULT_DSH_WORKSPACE_FILE,
-    error => ctx.logger.warn(`vectr-client: workspace discovery failed: ${String(error)}`),
-  ),
+  discover: () => DiscoveredWorkspace[] = defaultWorkspaceDiscovery(ctx),
 ): void {
   // `webServer` is provided by the host; in headless/unit contexts it may be
   // absent. `ctx.get` returns undefined (rather than throwing) so the plugin
@@ -1318,11 +1447,13 @@ export function registerManagementRoutes(
   }), 'vectr-client: POST /api/vectr/trigger-index')
 
   // One-click start-all: POST /api/vectr/daemons/start-all -> start the daemon
-  // of every registered workspace that is not already answering. Runs under the
-  // existing process-wide local-daemon lock (codebases.ts `withLocalDaemonLock`)
-  // so this sweep cannot race the codebase manager's own starts on free-port
-  // discovery; the sweep itself is sequential (see `startAllDaemons`).
-  const deps = startAllDeps ?? buildStartAllDeps(ctx, instancesPath, config)
+  // of every registered or DSH-discovered workspace that is not already
+  // answering. Runs under the existing process-wide local-daemon lock
+  // (codebases.ts `withLocalDaemonLock`) so this sweep cannot race the codebase
+  // manager's own starts on free-port discovery; the sweep itself is sequential
+  // (see `startAllDaemons`). The injected `discover` also feeds the built deps:
+  // the console table and the sweep must see the same workspace set.
+  const deps = startAllDeps ?? { ...buildStartAllDeps(ctx, instancesPath, config), discover }
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: '/api/vectr/daemons/start-all',
