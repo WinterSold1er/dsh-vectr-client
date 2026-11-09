@@ -10,6 +10,7 @@ import {
   VECTR_GREP_SECTION_NAME,
   VECTR_GREP_SECTION_ORDER,
   VECTR_GREP_SECTION_TEXT,
+  VECTR_MEMORY_SECTION_NAME,
   DEFAULT_SERVER_NAME,
   install,
   type ConnectionHandle,
@@ -137,7 +138,8 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
           mockAgent,
         )
 
-        expect(sections.length).toBe(2)
+        expect(sections.length).toBe(3)
+        expect(sections.find((s) => s.name === VECTR_MEMORY_SECTION_NAME)).toBeDefined()
         const guidance = sections.find((s) => s.name === VECTR_GUIDANCE_SECTION_NAME)
         const grep = sections.find((s) => s.name === VECTR_GREP_SECTION_NAME)
 
@@ -205,8 +207,10 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
           mockAgent,
         )
 
-        // For memory-only workspace with no codebase, no code retrieval guidance should be injected!
-        expect(sections.length).toBe(0)
+        // For memory-only workspace with no codebase, only the working-memory
+        // doctrine ships; no code retrieval guidance and no grep shadow.
+        expect(sections.length).toBe(1)
+        expect(sections.find((s) => s.name === VECTR_MEMORY_SECTION_NAME)).toBeDefined()
         expect(sections.find((s) => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBeUndefined()
         expect(sections.find((s) => s.name === VECTR_GREP_SECTION_NAME)).toBeUndefined()
       } finally {
@@ -276,7 +280,8 @@ describe('Absolute Negative Constraint & Mandatory Fallback Chain Prompting', ()
           codebasesPath,
         )
 
-        expect(sections.length).toBe(2)
+        expect(sections.length).toBe(3)
+        expect(sections.find((s) => s.name === VECTR_MEMORY_SECTION_NAME)).toBeDefined()
         expect(sections.find((s) => s.name === VECTR_GUIDANCE_SECTION_NAME)).toBeDefined()
         expect(sections.find((s) => s.name === VECTR_GREP_SECTION_NAME)).toBeDefined()
       } finally {

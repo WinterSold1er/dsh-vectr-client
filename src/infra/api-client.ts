@@ -110,6 +110,18 @@ export class VectrApiClient implements IVectrApiClient {
       if (options.sort_by !== undefined) {
         payload.sort_by = options.sort_by
       }
+      // Hook-facing fields forwarded verbatim: the daemon owns boot-set
+      // selection, event firing, command normalization, and hook dedup.
+      if (options.boot === true) payload.boot = true
+      if (options.events !== undefined && options.events.length > 0) payload.events = options.events
+      if (options.hook_event !== undefined) payload.hook_event = options.hook_event
+      if (options.session_id !== undefined) payload.session_id = options.session_id
+      if (options.min_similarity !== undefined) payload.min_similarity = options.min_similarity
+      if (options.max_age_days !== undefined) payload.max_age_days = options.max_age_days
+      if (options.note_id !== undefined) payload.note_id = options.note_id
+      if (options.surface !== undefined) payload.surface = options.surface
+      if (options.file_path !== undefined) payload.file_path = options.file_path
+      if (options.command !== undefined) payload.command = options.command
 
       const res = await this.doFetch(`http://${host}:${port}/v1/recall`, {
         method: 'POST',

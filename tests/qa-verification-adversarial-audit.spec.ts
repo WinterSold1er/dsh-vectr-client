@@ -278,7 +278,7 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
         serverName: 'vectr_stage',
       }, agent)
 
-      expect(sectionSpy).toHaveBeenCalledTimes(2)
+      expect(sectionSpy).toHaveBeenCalledTimes(3)
       const guidanceCall = sectionSpy.mock.calls.find((c) => c[0].name === VECTR_GUIDANCE_SECTION_NAME)
       const grepCall = sectionSpy.mock.calls.find((c) => c[0].name === VECTR_GREP_SECTION_NAME)
 

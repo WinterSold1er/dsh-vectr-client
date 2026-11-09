@@ -56,7 +56,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-mcp-client": "*"
+    "@deepseek-ai/dsh-mcp-client": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:/home/csy/Code/installer/deepseek-harness/vendor/cordis",

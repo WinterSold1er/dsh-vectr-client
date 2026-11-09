@@ -91,6 +91,7 @@ import type { InstanceEntry, StartResult, VectrStartOptions } from './domain'
 import { VectrCliRunner, VectrApiClient, InstanceResolver, CodebaseService } from './infra'
 import { SessionVectrService, registerSessionRoutes } from './bridge'
 import { hasCodebase, hasIndexedCodebase, isSystemPrimarySlug, isValidInstanceEntry } from './domain'
+import { HostInjector, type InjectionConfig } from './injection'
 
 // Export 4-layer architecture modules (Domain Core, Infrastructure, Host RPC Bridge)
 export * from './domain'
@@ -189,6 +190,22 @@ export interface Config {
   upgradeTimeoutMs?: number
   /** Start the daemon of every known workspace (registry ∪ DSH discovery) once at host boot (default `true`). */
   autoStartDaemons?: boolean
+  /** Boot-recall budget in ms for the first step of a session (default 1500). */
+  bootRecallTimeoutMs?: number
+  /** Prompt-anchored recall budget in ms for each user turn (default 400). */
+  promptRecallTimeoutMs?: number
+  /** Tool-anchored gotcha recall budget in ms (default 300). */
+  toolRecallTimeoutMs?: number
+  /** Note limit for the per-turn prompt recall (default 3). */
+  promptRecallLimit?: number
+  /** Per-injection token cap, measured as chars/4 (default 500). */
+  perTurnTokenCap?: number
+  /** Per-session token cap across every injection (default 8000). */
+  perSessionTokenCap?: number
+  /** Hard character cap on one injected message (default 4000). */
+  maxInjectionChars?: number
+  /** Snapshot the session and reset the trigger ledger before compaction (default `true`). */
+  injectCompactionSnapshot?: boolean
 }
 
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
@@ -288,6 +305,14 @@ export const Config: z<Config> = z.object({
   recallTimeoutMs: z.number().min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
   upgradeTimeoutMs: z.number().min(1).default(DEFAULT_UPGRADE_TIMEOUT_MS),
   autoStartDaemons: z.boolean().default(true),
+  bootRecallTimeoutMs: z.number().min(1).default(1500),
+  promptRecallTimeoutMs: z.number().min(1).default(400),
+  toolRecallTimeoutMs: z.number().min(1).default(300),
+  promptRecallLimit: z.number().step(1).min(1).default(3),
+  perTurnTokenCap: z.number().min(0).default(500),
+  perSessionTokenCap: z.number().min(0).default(8000),
+  maxInjectionChars: z.number().min(0).default(4000),
+  injectCompactionSnapshot: z.boolean().default(true),
 }) as unknown as z<Config>
 
 /**
@@ -317,6 +342,35 @@ export function getVectrGuidanceText(serverName: string = DEFAULT_SERVER_NAME): 
 }
 
 export const VECTR_GUIDANCE_SECTION_TEXT = getVectrGuidanceText(DEFAULT_SERVER_NAME)
+
+/**
+ * Working-memory doctrine section. Always contributed when a vectr daemon is
+ * bound, including memory-only workspaces with no indexed codebase: working
+ * memory is orthogonal to code retrieval, so this section must NOT inherit the
+ * `hasCode` gate that guards the retrieval/grep sections.
+ */
+export const VECTR_MEMORY_SECTION_NAME = 'vectr:working-memory'
+export const VECTR_MEMORY_SECTION_ORDER = 96
+
+/**
+ * Static English text: only the delta that is not already implied by the MCP
+ * tool descriptions (which the host passes through verbatim). No tool table.
+ */
+export function getVectrMemoryText(): string {
+  return `Working memory lives in vectr, not in files: store findings with \`vectr_remember\`, never in scratch notes or an editor memory directory — only vectr notes are re-injected after compaction and immediately visible to every session and teammate.
+
+Relevant notes are injected automatically at session start and on each user prompt. Do not call \`vectr_recall\` just to re-fetch them; call it for a targeted query the injection did not cover, or for one specific note (\`note_id=\`).
+
+\`kind\` decides when a note comes back: \`directive\` = standing rule (every session start and after compaction); \`task\` = current-work checkpoint (newest first; supersede it when the work moves on); \`gotcha\` = file-anchored caveat (resurfaces when that file is edited); \`finding\` = relevance-ranked learning; \`reference\` = URL/ticket pointer; \`decision\` = design decision plus why (recall with kind="decision", sort_by="chronological"); \`operational\` = build/env/process fact. Store the code or the finding itself, not a file pointer.
+
+Correct memory that lags reality instead of rewriting it or leaving it wrong: \`vectr_remember(..., supersedes=<old id>)\` replaces a note; \`contradicts=<old id>\` replaces a note proven wrong and revokes the old one. Age alone never retires a task checkpoint describing finished work — supersede it.
+
+\`triggers\` is optional; each kind already has sensible defaults. Add triggers only when a note must also surface on a path glob, a lifecycle event, a symbol, a command family, or prompt similarity.
+
+Multi-agent: working memory is shared workspace-wide. Subagents must \`vectr_remember(..., agent="<name>")\` before finishing; orchestrators must \`vectr_recall\` after a subagent completes instead of parsing its transcript.`
+}
+
+export const VECTR_MEMORY_SECTION_TEXT = getVectrMemoryText()
 
 /**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
@@ -371,6 +425,8 @@ export function install(
   disposed: WeakSet<Agent> = new WeakSet<Agent>(),
   codebaseBoundAgents: WeakSet<Agent> = new WeakSet<Agent>(),
   codebaseHandles?: Map<Agent, ConnectionHandle[]>,
+  /** Dynamic working-memory injection; omitted by unit tests that only exercise prompt sections. */
+  injector?: HostInjector,
 ): void {
   // Guard against already-disposed agents immediately at the function entry
   if (disposed.has(agent)) return
@@ -422,13 +478,20 @@ export function install(
     return
   }
 
-  // Inject system prompt guidance sections ONLY when an indexed codebase is bound.
-  // Memory-only workspaces without codebases must NOT receive code retrieval negative constraints
-  // or grep shadowing, preserving standard agent search behavior while retaining working memory.
+  // Working-memory doctrine ships for every bound daemon: memory is orthogonal
+  // to code indexing, so memory-only workspaces must still get it. Only the
+  // code retrieval negative constraint and the grep shadow depend on an
+  // indexed codebase, where vectr can actually replace grep.
   const hasCode = hasIndexedCodebase({ workspace: cwd, entry: validEntry, codebases })
   const serverName = config.serverName || DEFAULT_SERVER_NAME
-  if (hasCode && !promptFibers.has(agent)) {
+  if (!promptFibers.has(agent)) {
     const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.section({
+        name: VECTR_MEMORY_SECTION_NAME,
+        order: VECTR_MEMORY_SECTION_ORDER,
+        text: getVectrMemoryText(),
+      })
+      if (!hasCode) return
       scope.systemPrompt.section({
         name: VECTR_GUIDANCE_SECTION_NAME,
         order: VECTR_GUIDANCE_SECTION_ORDER,
@@ -458,6 +521,7 @@ export function install(
     try {
       const host = validEntry.host ?? DEFAULT_HOST
       const port = validEntry.port
+      injector?.bind(agent, { host, port, hasCode })
       const policy = resolveReconnectPolicy(config.reconnect, `vectr-client(${config.serverName}): reconnect`)
       // The SCOPED agent context routes every registration into that agent's
       // tool layer; disposal of the scope (which the loop runs BEFORE emitting
@@ -710,6 +774,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       return config.upgradeTimeoutMs ?? DEFAULT_UPGRADE_TIMEOUT_MS
     })(),
     autoStartDaemons: config.autoStartDaemons ?? true,
+    bootRecallTimeoutMs: config.bootRecallTimeoutMs ?? 1500,
+    promptRecallTimeoutMs: config.promptRecallTimeoutMs ?? 400,
+    toolRecallTimeoutMs: config.toolRecallTimeoutMs ?? 300,
+    promptRecallLimit: config.promptRecallLimit ?? 3,
+    perTurnTokenCap: config.perTurnTokenCap ?? 500,
+    perSessionTokenCap: config.perSessionTokenCap ?? 8000,
+    maxInjectionChars: config.maxInjectionChars ?? 4000,
+    injectCompactionSnapshot: config.injectCompactionSnapshot ?? true,
   }
   // Relative-path fallback (P3-safe): only resolves against process.cwd()
   // when Config supplies a *relative* path. Both defaults
@@ -804,14 +876,46 @@ export function apply(ctx: Context, config: Config = {}): void {
   const disposed = new WeakSet<Agent>()
   const codebaseBoundAgents = new WeakSet<Agent>()
 
+  // Dynamic working-memory injection (boot / prompt / tool / compaction).
+  // Static doctrine stays in the system prompt; every per-turn pack is a
+  // pre-step user message so it is assembled after it was fetched.
+  const injectionConfig: InjectionConfig = {
+    bootRecallTimeoutMs: resolved.bootRecallTimeoutMs,
+    promptRecallTimeoutMs: resolved.promptRecallTimeoutMs,
+    toolRecallTimeoutMs: resolved.toolRecallTimeoutMs,
+    promptRecallLimit: resolved.promptRecallLimit,
+    perTurnTokenCap: resolved.perTurnTokenCap,
+    perSessionTokenCap: resolved.perSessionTokenCap,
+    maxInjectionChars: resolved.maxInjectionChars,
+    injectCompactionSnapshot: resolved.injectCompactionSnapshot,
+  }
+  const injector = new HostInjector({ logger: ctx.logger, config: injectionConfig })
+  ctx.on('agent/pre-step', (payload, next) => injector.onPreStep(payload, next), { prepend: true })
+  ctx.on('agent/disposed', ({ agent }) => { injector.dispose(agent) })
+  ctx.on('session/event', (session, event) => { injector.onSessionEvent(session, event) })
+  // Tool-anchored gotcha injection. Minimal test doubles for apply() omit
+  // `inject`, so attach only when the host exposes the dependency scope.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['tools'], (scope) => {
+      scope.on('tools/post-execute', (exec, _result, next) => injector.onPostExecute(exec, next))
+    })
+  }
+
   // The registry is read inside install() on every call (D-7), so seed and
   // each agent/created both see the current on-disk state. The codebase
   // metadata path is passed so install also binds up codebases.
+  // Ordering matters: install() binds the injector endpoint, then the session
+  // source decides whether the boot recall must be re-delivered, and only
+  // then is the boot prefetch issued.
   for (const agent of ctx.agents.list()) {
-    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles)
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles, injector)
+    injector.markSource(agent, 'startup')
+    injector.prefetchBoot(agent)
   }
-  ctx.on('agent/created', ({ agent }) => {
-    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles)
+  ctx.on('agent/created', ({ agent, source }) => {
+    install(ctx, handles, promptFibers, instancesPath, resolved, agent, codebasesPath, disposed, codebaseBoundAgents, codebaseHandles, injector)
+    injector.markSource(agent, source)
+    injector.prefetchBoot(agent)
     return undefined
   })
   ctx.on('agent/disposed', ({ agent }) => {

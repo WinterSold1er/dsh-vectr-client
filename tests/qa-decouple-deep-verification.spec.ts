@@ -28,6 +28,7 @@ import {
   VECTR_GUIDANCE_SECTION_ORDER,
   VECTR_GUIDANCE_SECTION_TEXT,
   VECTR_GREP_SECTION_NAME,
+  VECTR_MEMORY_SECTION_NAME,
   VECTR_GREP_SECTION_ORDER,
   VECTR_GREP_SECTION_TEXT,
   type InstanceEntry,
@@ -150,9 +151,10 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       // 100% immediate injection
       expect(promptFibers.has(agent)).toBe(true)
       expect(injectSpy).toHaveBeenCalledTimes(1)
-      expect(sectionSpy).toHaveBeenCalledTimes(2)
-      expect(sectionSpy.mock.calls[0][0].name).toBe(VECTR_GUIDANCE_SECTION_NAME)
-      expect(sectionSpy.mock.calls[1][0].name).toBe(VECTR_GREP_SECTION_NAME)
+      expect(sectionSpy).toHaveBeenCalledTimes(3)
+      expect(sectionSpy.mock.calls[0][0].name).toBe(VECTR_MEMORY_SECTION_NAME)
+      expect(sectionSpy.mock.calls[1][0].name).toBe(VECTR_GUIDANCE_SECTION_NAME)
+      expect(sectionSpy.mock.calls[2][0].name).toBe(VECTR_GREP_SECTION_NAME)
 
       // Verify explicit 'when available' precondition and fallback semantics
       expect(VECTR_GUIDANCE_SECTION_TEXT).toContain('when available')
@@ -201,7 +203,7 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
         // Immediate prompt injection
         expect(promptFibers.has(agent)).toBe(true)
         expect(injectSpy).toHaveBeenCalledTimes(1)
-        expect(sectionSpy).toHaveBeenCalledTimes(2)
+        expect(sectionSpy).toHaveBeenCalledTimes(3)
 
         // Wait for probe timeout
         await new Promise((r) => setTimeout(r, 150))
@@ -363,7 +365,7 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       install(ctx, handles, promptFibers, instancesPath, { ...baseConfig, instancesPath }, agent)
       expect(promptFibers.has(agent)).toBe(true)
       expect(injectSpy).toHaveBeenCalledTimes(1)
-      expect(sectionSpy).toHaveBeenCalledTimes(2)
+      expect(sectionSpy).toHaveBeenCalledTimes(3)
 
       // Probe settles and logs advisory warning, connection established on Round 1
       await new Promise((r) => setTimeout(r, 120))
@@ -377,7 +379,7 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
 
       // Prompt injection MUST NOT be called again
       expect(injectSpy).toHaveBeenCalledTimes(1)
-      expect(sectionSpy).toHaveBeenCalledTimes(2)
+      expect(sectionSpy).toHaveBeenCalledTimes(3)
 
       // Connection establishment retry succeeds
       await vi.waitFor(() => {
@@ -818,9 +820,9 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
         serverName: 'vectr_team_a',
       }, agent)
 
-      expect(sectionSpy).toHaveBeenCalledTimes(2)
-      const sec1 = sectionSpy.mock.calls[0][0]
-      const sec2 = sectionSpy.mock.calls[1][0]
+      expect(sectionSpy).toHaveBeenCalledTimes(3)
+      const sec1 = sectionSpy.mock.calls[1][0]
+      const sec2 = sectionSpy.mock.calls[2][0]
       expect(sec1.text).toContain('mcp__vectr_team_a*')
       expect(sec2.text).toContain('mcp__vectr_team_a*')
     })

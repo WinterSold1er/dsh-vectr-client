@@ -30,6 +30,8 @@ import {
   VECTR_GREP_SECTION_NAME,
   VECTR_GREP_SECTION_ORDER,
   VECTR_GREP_SECTION_TEXT,
+  VECTR_MEMORY_SECTION_NAME,
+  VECTR_MEMORY_SECTION_TEXT,
   type InstanceEntry,
 } from '../src/index.ts'
 import { fetchStatus } from '../src/probe.ts'
@@ -154,14 +156,17 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     expect(promptFibers.has(agent)).toBe(true)
     expect(injectSpy).toHaveBeenCalledTimes(1)
     expect(injectSpy.mock.calls[0]?.[0]).toEqual(['systemPrompt'])
-    expect(sectionSpy).toHaveBeenCalledTimes(2)
-    const section1 = sectionSpy.mock.calls[0]?.[0] as { name: string; order: number; text: unknown }
+    expect(sectionSpy).toHaveBeenCalledTimes(3)
+    const memory = sectionSpy.mock.calls[0]?.[0] as { name: string; order: number; text: unknown }
+    expect(memory.name).toBe(VECTR_MEMORY_SECTION_NAME)
+    expect(memory.text).toBe(VECTR_MEMORY_SECTION_TEXT)
+    const section1 = sectionSpy.mock.calls[1]?.[0] as { name: string; order: number; text: unknown }
     expect(section1.name).toBe(VECTR_GUIDANCE_SECTION_NAME)
     expect(section1.order).toBe(VECTR_GUIDANCE_SECTION_ORDER)
     expect(section1.text).toBe(VECTR_GUIDANCE_SECTION_TEXT)
     expect(String(section1.text)).toContain('when available')
     expect(String(section1.text)).toContain('if vectr tools are not available, query fails, or yields no results')
-    const section2 = sectionSpy.mock.calls[1]?.[0] as { name: string; order: number; text: unknown }
+    const section2 = sectionSpy.mock.calls[2]?.[0] as { name: string; order: number; text: unknown }
     expect(section2.name).toBe(VECTR_GREP_SECTION_NAME)
     expect(section2.order).toBe(VECTR_GREP_SECTION_ORDER)
     expect(section2.text).toBe(VECTR_GREP_SECTION_TEXT)
@@ -201,7 +206,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     // Decoupled: guidance is injected immediately without waiting for probe
     expect(promptFibers.has(agent)).toBe(true)
     expect(injectSpy).toHaveBeenCalledTimes(1)
-    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    expect(sectionSpy).toHaveBeenCalledTimes(3)
 
     await vi.waitFor(() => {
       expect(warn.mock.calls.some(
@@ -261,7 +266,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
 
     expect(promptFibers.has(agent)).toBe(true)
     expect(injectSpy).toHaveBeenCalledTimes(1)
-    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    expect(sectionSpy).toHaveBeenCalledTimes(3)
     expect(handles.has(agent)).toBe(false)
   })
 
@@ -284,7 +289,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     }, agent)
 
     expect(promptFibers.has(agent)).toBe(true)
-    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    expect(sectionSpy).toHaveBeenCalledTimes(3)
     // Simulate agent/disposed teardown: dispose the captured fiber.
     const fiber = promptFibers.get(agent) as { dispose: () => Promise<void> }
     await fiber.dispose()
@@ -324,7 +329,7 @@ describe('vectr guidance system-prompt section (feature A-2)', () => {
     // Prompt guidance injected immediately on first install attempt
     expect(promptFibers.has(agent)).toBe(true)
     expect(injectSpy).toHaveBeenCalledTimes(1)
-    expect(sectionSpy).toHaveBeenCalledTimes(2)
+    expect(sectionSpy).toHaveBeenCalledTimes(3)
 
     // Allow Round 1 probe to settle and fail in background telemetry
     await new Promise((r) => setTimeout(r, 150))
