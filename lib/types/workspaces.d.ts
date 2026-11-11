@@ -78,6 +78,8 @@ export interface WorkspaceView {
     mode?: string;
     /** Whether the registry record passed the liveness probe. */
     live: boolean;
+    /** Whether `vectr-codebases.json` already has a record for this workspace. */
+    registered: boolean;
     /** Display title from DSH's workspace registry, when known. */
     title?: string;
     /** Why the row is not live: a probe failure reason, or `'not started'` for a discovered workspace with no daemon record. */
@@ -116,6 +118,8 @@ export interface TriggerResult {
 export declare function scanWorkspaces(ctx: Context, instancesPath: string, opts?: {
     statusTimeoutMs?: number;
     discover?: () => DiscoveredWorkspace[];
+    /** Codebase metadata file; defaults to the real `~/.dsh/vectr-codebases.json`. */
+    codebasesPath?: string;
 }): Promise<WorkspaceView[]>;
 /**
  * Request a re-index from one daemon (`POST /v1/index` body `{"force":false}`).

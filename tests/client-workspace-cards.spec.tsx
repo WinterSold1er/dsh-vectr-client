@@ -19,13 +19,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as React from 'react'
 import { renderToHtml } from './react-render'
 import {
+  DowngradeButtonView,
   StartDaemonButtonView,
   WorkspaceCard,
   WorkspaceConsoleView,
   startWorkspaceDaemon,
+  downgradeWorkspace,
   summarizeWorkspaces,
 } from '../src/client/index'
-import type { StartDaemonButtonViewProps } from '../src/client/index'
+import type { DowngradeButtonViewProps, StartDaemonButtonViewProps } from '../src/client/index'
 
 /** A live row from `GET /api/vectr/workspaces`. */
 const LIVE_VIEW = {
@@ -272,5 +274,130 @@ describe('summary strip coherence', () => {
     const counts = summarizeWorkspaces([LIVE_VIEW, NOT_STARTED_VIEW] as never)
 
     expect(counts.total).toBe(counts.live + counts.memoryOnly + counts.offline)
+  })
+})
+
+/** A row that already runs memory-only: the downgrade control must be gone. */
+const MEMORY_ONLY_VIEW = { ...LIVE_VIEW, mode: 'memory_only' }
+
+/** Props for one rendered downgrade control; the callback is a no-op sentinel. */
+function downgradeProps(busy: boolean, error: string | null): DowngradeButtonViewProps {
+  return { busy, error, onDowngrade: noop }
+}
+
+describe('downgrade to memory-only', () => {
+  it('offers the downgrade control on a row that is not yet memory-only', () => {
+    const html = renderToHtml(<WorkspaceCard {...cardProps(LIVE_VIEW)} />)
+
+    expect(html).toContain('降级为仅记忆')
+  })
+
+  it('renders no downgrade control once the row already is memory-only', () => {
+    const html = renderToHtml(<WorkspaceCard {...cardProps(MEMORY_ONLY_VIEW)} />)
+
+    // Guard against a vacuous negative: the card must still have rendered its row.
+    expect(html).toContain('/home/dev/live-one')
+    expect(html).not.toContain('降级为仅记忆')
+  })
+})
+
+describe('POST /api/vectr/downgrade', () => {
+  it('posts to the downgrade path with method POST and a JSON content type', async () => {
+    const seen = stubFetch({ ok: true })
+
+    await downgradeWorkspace('/home/dev/live-one')
+
+    expect(seen.url).toBe('/api/vectr/downgrade')
+    expect(seen.method).toBe('POST')
+    expect(seen.contentType).toContain('application/json')
+  })
+
+  it('sends exactly { workspace } as the JSON body', async () => {
+    const seen = stubFetch({ ok: true })
+
+    await downgradeWorkspace('/home/dev/live-one')
+
+    expect(seen.body).toBeDefined()
+    expect(JSON.parse(seen.body as string).workspace).toBe('/home/dev/live-one')
+  })
+
+  it('resolves exactly { ok: true } when the endpoint accepts the downgrade', async () => {
+    stubFetch({ ok: true })
+
+    expect(await downgradeWorkspace('/home/dev/live-one')).toEqual({ ok: true })
+  })
+})
+
+describe('downgrade failure paths', () => {
+  it('returns the error text a non-2xx endpoint sent', async () => {
+    stubFetch({ ok: false, error: 'downgrade failed: daemon refused' }, { ok: false, status: 500 })
+
+    expect(await downgradeWorkspace('/home/dev/live-one')).toEqual({
+      ok: false,
+      error: 'downgrade failed: daemon refused',
+    })
+  })
+
+  it('treats a 200 whose payload says ok:false as a failure, not a success', async () => {
+    stubFetch({ ok: false, error: 'downgrade failed: already memory-only' })
+
+    const result = await downgradeWorkspace('/home/dev/live-one')
+
+    expect(result.ok).toBe(false)
+    if (result.ok === true) throw new Error('expected a failure, got a success')
+    expect(result.error).toBe('downgrade failed: already memory-only')
+  })
+
+  it('falls back to the HTTP status when the failure body has no `error` field', async () => {
+    stubFetch({ ok: false }, { ok: false, status: 503 })
+
+    const result = await downgradeWorkspace('/home/dev/live-one')
+
+    expect(result.ok).toBe(false)
+    if (result.ok === true) throw new Error('expected a failure, got a success')
+    expect(result.error).not.toBe('')
+    expect(result.error).toContain('503')
+  })
+
+  it('lets a rejecting fetch propagate its message instead of swallowing it', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('network down')
+    })
+
+    await expect(downgradeWorkspace('/home/dev/x')).rejects.toThrow('network down')
+  })
+})
+
+describe('downgrade control states', () => {
+  it('disables and relabels the downgrade control while a request is in flight', () => {
+    const html = renderToHtml(<DowngradeButtonView {...downgradeProps(true, null)} />)
+
+    expect(html).toContain('disabled')
+    expect(html).toContain('降级中…')
+    expect(html).not.toContain('降级为仅记忆')
+  })
+
+  it('renders the downgrade failure inline, verbatim, in the error slot', () => {
+    const html = renderToHtml(<DowngradeButtonView {...downgradeProps(false, 'downgrade failed: X')} />)
+
+    expect(html).toContain('downgrade failed: X')
+    expect(html).toContain('vectr-error')
+  })
+})
+
+describe('the `unregistered` badge', () => {
+  it('badges a row DSH knows but vectr-codebases.json has no record for', () => {
+    const html = renderToHtml(<WorkspaceCard {...cardProps({ ...NOT_STARTED_VIEW, registered: false })} />)
+
+    expect(html).toContain('unregistered')
+    expect(html).toContain('no record in vectr-codebases.json')
+  })
+
+  it('leaves a registered row, and a row that omits `registered`, unbadged', () => {
+    const registered = renderToHtml(<WorkspaceCard {...cardProps({ ...NOT_STARTED_VIEW, registered: true })} />)
+    const absent = renderToHtml(<WorkspaceCard {...cardProps(NOT_STARTED_VIEW)} />)
+
+    expect(registered).not.toContain('unregistered')
+    expect(absent).not.toContain('unregistered')
   })
 })

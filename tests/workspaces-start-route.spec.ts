@@ -81,6 +81,7 @@ function routesOf(
   instancesPath: string,
   deps: StartAllDeps,
   discover?: () => DiscoveredWorkspace[],
+  codebasesPath?: string,
 ): Map<string, Route> {
   const routes = new Map<string, Route>()
   const webServer = {
@@ -94,7 +95,11 @@ function routesOf(
     effect: (fn: () => unknown) => fn(),
     logger: { info() {}, warn() {}, error() {} },
   } as unknown as Context
-  registerManagementRoutes(ctx, instancesPath, { ...CONFIG, instancesPath }, deps, discover)
+  registerManagementRoutes(ctx, instancesPath, {
+    ...CONFIG,
+    instancesPath,
+    ...(codebasesPath === undefined ? {} : { codebasesPath }),
+  }, deps, discover)
   return routes
 }
 
@@ -257,8 +262,42 @@ describe('GET /api/vectr/workspaces wiring', () => {
       workspace: '/ws/never-started',
       title: 'never started',
       live: false,
+      registered: false,
       reason: 'not started',
       error: 'daemon not started',
     })
+  })
+
+  it('derives registered from the configured codebasesPath, not from the default metadata file', async () => {
+    // Regression guard: the console route called scanWorkspaces without
+    // config.codebasesPath, so a custom metadata file left every badge
+    // "unregistered" no matter what the user configured.
+    const customPath = join(tmp, 'custom-codebases.json')
+    await writeFile(customPath, JSON.stringify([
+      {
+        id: 'c',
+        slug: 'c',
+        type: 'local',
+        path: '/ws/custom-registered',
+        workspace: '/ws/custom-registered',
+        serverName: 'vectr_c',
+      },
+    ]))
+    await writeFile(registryPath, JSON.stringify({
+      aa: { workspace: '/ws/custom-registered', port: 1, mode: 'full', host: '127.0.0.1' },
+      bb: { workspace: '/ws/custom-absent', port: 2, mode: 'full', host: '127.0.0.1' },
+    }))
+    const { deps } = makeDeps({}, { probe: () => ({ alive: false, reason: 'PORT_CLOSED' }) })
+    const routes = routesOf(registryPath, deps, () => [], customPath)
+
+    const route = routes.get('/api/vectr/workspaces')
+    if (route === undefined) throw new Error('GET /api/vectr/workspaces was not registered')
+    const captured = captureRes()
+    await route.handler({ method: 'GET' }, captured.res)
+
+    expect(captured.state.code).toBe(200)
+    const views = JSON.parse(captured.state.body) as Array<Record<string, unknown>>
+    expect(views.find(view => view.workspace === '/ws/custom-registered')?.registered).toBe(true)
+    expect(views.find(view => view.workspace === '/ws/custom-absent')?.registered).toBe(false)
   })
 })

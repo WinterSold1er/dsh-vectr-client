@@ -27,8 +27,9 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { readInstancesFile, type InstanceEntry, type InstancesFile } from './registry'
-import { normalizeMode } from './domain/rules'
+import { normalizeMode, normalizePath } from './domain/rules'
 import { DEFAULT_TCP_TIMEOUT_MS, diagnoseDaemon, fetchStatus, type SkipReason, type VectrStatus } from './probe'
+import { DEFAULT_CODEBASES_FILE, loadCodebases } from './codebases'
 
 // Re-exported so existing importers (and tests) keep resolving VectrStatus
 // from this module without a Cordis/config dependency on the probe layer.
@@ -60,7 +61,7 @@ export interface DiscoveredWorkspace {
  * workspace twice.
  */
 export function normalizeWorkspacePath(workspace: string): string {
-  return resolve(workspace)
+  return normalizePath(resolve(workspace))
 }
 
 /**
@@ -136,6 +137,8 @@ export interface WorkspaceView {
   mode?: string
   /** Whether the registry record passed the liveness probe. */
   live: boolean
+  /** Whether `vectr-codebases.json` already has a record for this workspace. */
+  registered: boolean
   /** Display title from DSH's workspace registry, when known. */
   title?: string
   /** Why the row is not live: a probe failure reason, or `'not started'` for a discovered workspace with no daemon record. */
@@ -176,9 +179,31 @@ export interface TriggerResult {
 export async function scanWorkspaces(
   ctx: Context,
   instancesPath: string,
-  opts: { statusTimeoutMs?: number; discover?: () => DiscoveredWorkspace[] } = {},
+  opts: {
+    statusTimeoutMs?: number
+    discover?: () => DiscoveredWorkspace[]
+    /** Codebase metadata file; defaults to the real `~/.dsh/vectr-codebases.json`. */
+    codebasesPath?: string
+  } = {},
 ): Promise<WorkspaceView[]> {
   const timeoutMs = opts.statusTimeoutMs ?? DEFAULT_STATUS_TIMEOUT_MS
+  // Explicitly registered codebases, keyed by the same canonical path used for
+  // dedupe below: a workspace that only exists because DSH knows it has no
+  // record here, which is what the console needs to distinguish.
+  const codebasesPath = opts.codebasesPath ?? DEFAULT_CODEBASES_FILE
+  const registeredPaths = new Set<string>()
+  try {
+    for (const entry of loadCodebases(codebasesPath)) {
+      for (const p of [entry.path, entry.workspace]) {
+        if (typeof p === 'string' && p !== '') registeredPaths.add(normalizeWorkspacePath(p))
+      }
+    }
+  } catch (error) {
+    // A broken metadata file must not blank the workspace table: the badge
+    // degrades to "unregistered" and the real cause goes to the log.
+    ctx.logger.warn(`vectr-client: cannot read codebase metadata at ${codebasesPath} (${String(error)}); workspace rows report registered: false`)
+  }
+  const isRegistered = (workspace: string): boolean => registeredPaths.has(normalizeWorkspacePath(workspace))
   let instances: InstancesFile | undefined
   try {
     instances = readInstancesFile(ctx, instancesPath)
@@ -211,6 +236,7 @@ export async function scanWorkspaces(
         ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
         ...(mode !== undefined ? { mode } : {}),
         live: false,
+        registered: isRegistered(entry.workspace),
         ...(diag.reason !== undefined ? { reason: diag.reason } : {}),
         error: diag.reason !== undefined ? `daemon not alive: ${diag.reason}` : 'daemon not alive',
       } satisfies WorkspaceView
@@ -222,6 +248,7 @@ export async function scanWorkspaces(
       ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
       ...(mode !== undefined ? { mode } : {}),
       live: true,
+      registered: isRegistered(entry.workspace),
       ...(status !== undefined ? { status } : {}),
     } satisfies WorkspaceView
   }))
@@ -238,6 +265,7 @@ export async function scanWorkspaces(
       ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
       ...(mode !== undefined ? { mode } : {}),
       live: false,
+      registered: isRegistered(entry.workspace),
       error: `status probe failed: ${String(settled.reason)}`,
     } satisfies WorkspaceView
   })
@@ -267,6 +295,7 @@ export async function scanWorkspaces(
       workspace: root.workspace,
       ...(root.title !== undefined ? { title: root.title } : {}),
       live: false,
+      registered: isRegistered(root.workspace),
       reason: 'not started',
       error: 'daemon not started',
     } satisfies WorkspaceView)

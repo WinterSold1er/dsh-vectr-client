@@ -12,6 +12,8 @@ import {
   hasIndexedCodebase,
   isMemoryOnly,
   isSearchOnly,
+  isWorkspaceMatch,
+  normalizePath,
   SLUG_PATTERN,
   validateSlug,
   validateWorkspace,
@@ -287,6 +289,31 @@ describe('Domain Core: rules & validation', () => {
           { slug: 'primary', isPrimary: true, type: 'local', workspace: '/ws/my-project', path: '/ws/my-project', serverName: 'primary' } as any,
         ],
       })).toBe(false)
+    })
+  })
+
+  describe('normalizePath canonicalization (B2: console key == rules key)', () => {
+    it('collapses every spelling of one directory to the same key', () => {
+      expect(normalizePath('/x/two/')).toBe('/x/two')
+      expect(normalizePath('/x/two//')).toBe('/x/two')
+      expect(normalizePath('/x\\two\\')).toBe('/x/two')
+      expect(normalizePath('  /x/two  ')).toBe('/x/two')
+      expect(normalizePath('/')).toBe('/')
+      expect(normalizePath('')).toBe('')
+      expect(normalizePath(null)).toBe('')
+    })
+
+    it('matches a trailing-slash workspace against its codebase path', () => {
+      expect(isWorkspaceMatch(normalizePath('/x/two/'), '/x/two')).toBe(true)
+      expect(isWorkspaceMatch('/x/two/', '/x/two')).toBe(true)
+      expect(hasCodebase({
+        workspace: '/x/two/',
+        codebases: [{ id: '1', slug: '1', type: 'local', path: '/x/two', serverName: 'v1' }],
+      })).toBe(true)
+      expect(hasCodebase({
+        workspace: '/x/two',
+        codebases: [{ id: '1', slug: '1', type: 'local', path: '/x/two/', serverName: 'v1' }],
+      })).toBe(true)
     })
   })
 

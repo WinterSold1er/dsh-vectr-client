@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   _resetServerNameRegistry,
+  assertServerNameAvailable,
   createCodebase,
   deleteCodebase,
   deriveServerName,
@@ -19,6 +20,7 @@ import {
   healLocalCodebase,
   loadCodebases,
   migrateCodebases,
+  normalizeWorkspacePath,
   saveCodebases,
   startLocalDaemon,
   testCodebase,
@@ -785,6 +787,17 @@ describe('concurrency + port guards (P4)', () => {
     // exactly one entry persisted (no double registration / serverName clash)
     expect(loadCodebases(metaPath)).toHaveLength(1)
     expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/already in use|conflicts/)
+  })
+
+  it('normalizes the workspace before the composite server-name precheck (B1)', async () => {
+    // The in-flight precheck used to receive the raw spelling, so '/x/two/'
+    // derived a different server name than the registered '/x/two' and the
+    // duplicate slipped through to the core path.
+    await writeFile(metaPath, JSON.stringify([
+      { id: 'twoslash', slug: 'twoslash', type: 'local', path: '/x/two', serverName: deriveServerName('/x/two', 'twoslash') },
+    ]), 'utf8')
+    loadCodebases(metaPath) // hydrates the in-process uniqueness registry
+    expect(() => assertServerNameAvailable(normalizeWorkspacePath('/x/two/'), 'twoslash')).toThrow(/already in use/)
   })
 
   it('findFreePort skips ports listed in the exclude set', async () => {

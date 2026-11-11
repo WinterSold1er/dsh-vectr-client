@@ -15,10 +15,12 @@
       "default": "./lib/client.js"
     },
     "./src/*": "./src/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./icon": "./assets/icon.svg"
   },
   "files": [
     "lib",
+    "assets",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -87,5 +89,6 @@
     "typescript": "^5.9.0",
     "vitest": "^4.1.0",
     "zod": "^4.4.3"
-  }
+  },
+  "icon": "./assets/icon.svg"
 }

@@ -37,8 +37,10 @@ export interface HasCodebaseInput {
     codebases?: CodebaseEntry[] | null | undefined;
 }
 /**
- * Normalize directory path by trimming whitespace and stripping trailing slashes.
- * Preserves the root path '/' if it is exactly '/'.
+ * Canonical directory path (browser-safe: no node:path, this module is also
+ * bundled into the web client): trimmed, backslashes and duplicate separators
+ * collapsed, trailing slashes dropped, so `/x/two`, `/x/two//` and `/x\two\`
+ * all yield one key. Empty input yields ''; the root stays '/'.
  */
 export declare function normalizePath(p?: string | null): string;
 /**

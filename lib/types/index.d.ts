@@ -27,6 +27,7 @@ import { type CodebaseDeps, type CodebaseEntry, type CredentialStore, type Daemo
 import { type InstancesFile } from './registry';
 import { type AliveDiagnosis } from './probe';
 import type { InstanceEntry, StartResult, VectrStartOptions } from './domain';
+import { HostInjector } from './injection';
 export * from './domain';
 export * from './infra';
 export * from './bridge';
@@ -101,6 +102,22 @@ export interface Config {
     upgradeTimeoutMs?: number;
     /** Start the daemon of every known workspace (registry ∪ DSH discovery) once at host boot (default `true`). */
     autoStartDaemons?: boolean;
+    /** Boot-recall budget in ms for the first step of a session (default 1500). */
+    bootRecallTimeoutMs?: number;
+    /** Prompt-anchored recall budget in ms for each user turn (default 400). */
+    promptRecallTimeoutMs?: number;
+    /** Tool-anchored gotcha recall budget in ms (default 300). */
+    toolRecallTimeoutMs?: number;
+    /** Note limit for the per-turn prompt recall (default 3). */
+    promptRecallLimit?: number;
+    /** Per-injection token cap, measured as chars/4 (default 500). */
+    perTurnTokenCap?: number;
+    /** Per-session token cap across every injection (default 8000). */
+    perSessionTokenCap?: number;
+    /** Hard character cap on one injected message (default 4000). */
+    maxInjectionChars?: number;
+    /** Snapshot the session and reset the trigger ledger before compaction (default `true`). */
+    injectCompactionSnapshot?: boolean;
 }
 /** Default HTTP `/v1/status` liveness-probe budget (ms); below the known hang window. */
 export declare const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 5000;
@@ -159,6 +176,20 @@ export declare const VECTR_GUIDANCE_SECTION_ORDER = 95;
 export declare function getVectrGuidanceText(serverName?: string): string;
 export declare const VECTR_GUIDANCE_SECTION_TEXT: string;
 /**
+ * Working-memory doctrine section. Always contributed when a vectr daemon is
+ * bound, including memory-only workspaces with no indexed codebase: working
+ * memory is orthogonal to code retrieval, so this section must NOT inherit the
+ * `hasCode` gate that guards the retrieval/grep sections.
+ */
+export declare const VECTR_MEMORY_SECTION_NAME = "vectr:working-memory";
+export declare const VECTR_MEMORY_SECTION_ORDER = 96;
+/**
+ * Static English text: only the delta that is not already implied by the MCP
+ * tool descriptions (which the host passes through verbatim). No tool table.
+ */
+export declare function getVectrMemoryText(): string;
+export declare const VECTR_MEMORY_SECTION_TEXT: string;
+/**
  * Scoped prompt section that shadows the global `tool:grep` section for agents
  * in a verified vectr workspace. Instead of directly telling the model to use
  * grep to search file contents, it instructs the model to prioritize vectr tools
@@ -193,7 +224,9 @@ export declare function install(ctx: Context, handles: Map<Agent, ConnectionHand
  * `apply`). When set, the IIFE tears down the freshly-created connection /
  * prompt fiber instead of leaking it to host teardown. Defaults to an empty
  * set so callers that do not seed live agents (unit tests) need not pass it. */
-disposed?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>): void;
+disposed?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>, 
+/** Dynamic working-memory injection; omitted by unit tests that only exercise prompt sections. */
+injector?: HostInjector): void;
 /**
  * Connect the agent to every persisted codebase entry with `status === 'up'`.
  * Each entry exposes a Streamable HTTP MCP endpoint at

@@ -359,7 +359,7 @@ export async function createCodebase(
   const prev = createLocks.get(spec.slug)
   if (prev !== undefined) {
     await prev
-    assertServerNameAvailable(spec.workspace ?? spec.path, spec.slug)
+    assertServerNameAvailable(normalizeWorkspacePath(spec.workspace ?? spec.path), spec.slug)
   }
   const run = (async () => {
     try {

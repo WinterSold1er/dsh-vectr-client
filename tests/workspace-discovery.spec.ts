@@ -136,6 +136,8 @@ describe('scanWorkspaces union', () => {
 
     const views = await scanWorkspaces(ctx, registryPath, {
       discover: () => discoverWorkspaceRoots(dshPath),
+      // Absent metadata file keeps the badge hermetic: nothing is registered.
+      codebasesPath: join(tmp, 'absent-codebases.json'),
     })
 
     expect(views).toHaveLength(2)
@@ -144,6 +146,7 @@ describe('scanWorkspaces union', () => {
       workspace: '/ws/never-started',
       title: 'never started',
       live: false,
+      registered: false,
       reason: 'not started',
       error: 'daemon not started',
     })
@@ -190,10 +193,11 @@ describe('scanWorkspaces union', () => {
 
     const views = await scanWorkspaces(ctx, join(tmp, 'absent-instances.json'), {
       discover: () => discoverWorkspaceRoots(dshPath),
+      codebasesPath: join(tmp, 'absent-codebases.json'),
     })
 
     expect(views).toEqual([
-      { workspace: '/ws/never-started', live: false, reason: 'not started', error: 'daemon not started' },
+      { workspace: '/ws/never-started', live: false, registered: false, reason: 'not started', error: 'daemon not started' },
     ])
   })
 })

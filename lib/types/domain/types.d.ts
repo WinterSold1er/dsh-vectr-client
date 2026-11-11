@@ -198,6 +198,26 @@ export interface RecallOptions {
     limit?: number | undefined;
     detail?: ('index' | 'full') | undefined;
     sort_by?: ('relevance' | 'recency' | 'priority' | 'chronological') | undefined;
+    /** Boot mode: unconditional directives + high-priority tasks; ignores query/tags/priority/kind/limit. */
+    boot?: boolean | undefined;
+    /** Lifecycle events that may fire, e.g. `['session-start', 'post-compaction']` or `['prompt-submit']`. */
+    events?: string[] | undefined;
+    /** Hook surface that issued the recall (SessionStart, UserPromptSubmit, PreToolUse). */
+    hook_event?: string | undefined;
+    /** Per-session ledger identity used for dedup/cooldown on hook-triggered recalls. */
+    session_id?: string | undefined;
+    /** Relevance cutoff for query matches (cosine similarity). */
+    min_similarity?: number | undefined;
+    /** Only notes created within this many days. */
+    max_age_days?: number | undefined;
+    /** Expand one note body by id. */
+    note_id?: number | undefined;
+    /** Delivery surface label recorded with the recall. */
+    surface?: string | undefined;
+    /** Path-anchored recall: notes recorded against this file. */
+    file_path?: string | undefined;
+    /** Command-anchored recall: raw about-to-run shell command (normalized server-side). */
+    command?: string | undefined;
 }
 /**
  * Structure of daemon /v1/resume response.

@@ -1502,6 +1502,7 @@ export function registerManagementRoutes(
         const views = await scanWorkspaces(ctx, instancesPath, {
           statusTimeoutMs: config.daemonHttpTimeoutMs,
           discover,
+          codebasesPath: config.codebasesPath,
         })
         sendJson(res, 200, views)
       } catch (error) {

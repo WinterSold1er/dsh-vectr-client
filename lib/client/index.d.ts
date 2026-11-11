@@ -46,6 +46,8 @@ interface WorkspaceView {
     pid?: number;
     mode?: string;
     live: boolean;
+    /** Host-computed: `vectr-codebases.json` already has a record for this workspace. */
+    registered?: boolean;
     error?: string;
     /** Precise liveness-failure reason enum from the host; absent when live. */
     reason?: string;
@@ -132,6 +134,15 @@ export type StartWorkspaceResult = {
  * body's `error` wins, otherwise the HTTP status is the message; a body that
  * claims `ok` but carries no port is a contract violation, not a success. */
 export declare function startWorkspaceDaemon(workspace: string): Promise<StartWorkspaceResult>;
+/** Result of the downgrade action: no body on success, the real message on failure. */
+export type DowngradeResult = {
+    ok: true;
+} | {
+    ok: false;
+    error: string;
+};
+/** POST `/api/vectr/downgrade` for ONE workspace; same error convention as `startWorkspaceDaemon`. */
+export declare function downgradeWorkspace(workspace: string): Promise<DowngradeResult>;
 /** Props of the hook-free start control (same split as `DaemonLauncherView`:
  * the hook-free half is what the headless specs can render). */
 export interface StartDaemonButtonViewProps {
@@ -146,6 +157,18 @@ export declare function StartDaemonButtonView(props: StartDaemonButtonViewProps)
 export declare function StartDaemonButton(props: {
     workspace: string;
     onStarted: () => void;
+}): ReactNode;
+/** Presentational half of the downgrade control (same wrapper/error style as `StartDaemonButtonView`). */
+export interface DowngradeButtonViewProps {
+    busy: boolean;
+    error: string | null;
+    onDowngrade: () => void;
+}
+export declare function DowngradeButtonView(props: DowngradeButtonViewProps): ReactNode;
+/** Downgrades one workspace to memory-only; `onDowngraded` is the console re-fetch. */
+export declare function DowngradeButton(props: {
+    workspace: string;
+    onDowngraded: () => void;
 }): ReactNode;
 /** One workspace as a card: identity + state pills + re-index on the header row,
  * the key index facts below it, and the codebase detail when expanded. */

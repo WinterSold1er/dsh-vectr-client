@@ -188,6 +188,26 @@ describe('scanWorkspaces', () => {
     expect(views[0]!.status).toBeUndefined()
     await new Promise<void>((r) => a.server.close(() => r()))
   })
+
+  it('flags registered codebases vs discovered-only workspaces', async () => {
+    const codebasesPath = join(tmp, 'codebases.json')
+    // Persisted with a trailing slash: the lookup must use the same canonical
+    // key as the row, otherwise every real record would read as unregistered.
+    await writeFile(codebasesPath, JSON.stringify([
+      { id: 'a', slug: 'a', type: 'local', path: '/ws/a/', serverName: 'vectr_a' },
+    ]), 'utf8')
+    await writeRegistry({ aa: { workspace: '/ws/a', port: 1, mode: 'full', host: '127.0.0.1' } })
+    const views = await scanWorkspaces(ctx, registryPath, {
+      statusTimeoutMs: 50,
+      codebasesPath,
+      discover: () => [{ workspace: '/ws/a/' }, { workspace: '/ws/b' }],
+    })
+    // '/ws/a/' dedupes against the registry's '/ws/a' row; '/ws/b' is discovered-only.
+    expect(views.map(v => [v.workspace, v.registered])).toEqual([
+      ['/ws/a', true],
+      ['/ws/b', false],
+    ])
+  })
 })
 
 describe('triggerIndex', () => {

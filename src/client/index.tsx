@@ -62,6 +62,8 @@ interface WorkspaceView {
   pid?: number
   mode?: string
   live: boolean
+  /** Host-computed: `vectr-codebases.json` already has a record for this workspace. */
+  registered?: boolean
   error?: string
   /** Precise liveness-failure reason enum from the host; absent when live. */
   reason?: string
@@ -530,6 +532,23 @@ export async function startWorkspaceDaemon(workspace: string): Promise<StartWork
   return { ok: true, port: payload.port, ...(typeof payload.pid === 'number' ? { pid: payload.pid } : {}) }
 }
 
+/** Result of the downgrade action: no body on success, the real message on failure. */
+export type DowngradeResult = { ok: true } | { ok: false; error: string }
+
+/** POST `/api/vectr/downgrade` for ONE workspace; same error convention as `startWorkspaceDaemon`. */
+export async function downgradeWorkspace(workspace: string): Promise<DowngradeResult> {
+  const res = await fetch('/api/vectr/downgrade', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ workspace }),
+  })
+  const payload = await res.json() as { ok?: boolean; error?: string }
+  if (!res.ok || payload.ok === false) {
+    return { ok: false, error: payload.error ?? `downgrade endpoint returned ${res.status}` }
+  }
+  return { ok: true }
+}
+
 /** Props of the hook-free start control (same split as `DaemonLauncherView`:
  * the hook-free half is what the headless specs can render). */
 export interface StartDaemonButtonViewProps {
@@ -569,6 +588,43 @@ export function StartDaemonButton(props: { workspace: string; onStarted: () => v
       .finally(() => setBusy(false))
   }
   return <StartDaemonButtonView busy={busy} error={error} onStart={start} />
+}
+
+/** Presentational half of the downgrade control (same wrapper/error style as `StartDaemonButtonView`). */
+export interface DowngradeButtonViewProps {
+  busy: boolean
+  error: string | null
+  onDowngrade: () => void
+}
+
+export function DowngradeButtonView(props: DowngradeButtonViewProps): ReactNode {
+  const { busy, error, onDowngrade } = props
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+      <button type="button" className={BTN.secondary} disabled={busy} onClick={onDowngrade}>
+        {busy ? '降级中…' : '降级为仅记忆'}
+      </button>
+      {error !== null ? <p className="vectr-error" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
+    </div>
+  )
+}
+
+/** Downgrades one workspace to memory-only; `onDowngraded` is the console re-fetch. */
+export function DowngradeButton(props: { workspace: string; onDowngraded: () => void }): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const downgrade = (): void => {
+    setBusy(true)
+    setError(null)
+    downgradeWorkspace(props.workspace)
+      .then((result) => {
+        if (result.ok) props.onDowngraded()
+        else setError(result.error)
+      })
+      .catch((err: unknown) => setError(`downgrade request error: ${String(err)}`))
+      .finally(() => setBusy(false))
+  }
+  return <DowngradeButtonView busy={busy} error={error} onDowngrade={downgrade} />
 }
 
 /** One workspace as a card: identity + state pills + re-index on the header row,
@@ -625,6 +681,11 @@ const memOnly = isMemoryOnly(view.mode)
             <span className="vectr-pill-dot" />
             {s?.fully_ready === true ? 'ready' : 'not ready'}
           </span>
+          {/* DSH knows this workspace but vectr-codebases.json has no record:
+              without the badge such a row is indistinguishable from a real one. */}
+          {view.registered === false
+            ? <span className="vectr-pill vectr-pill-pending" title="no record in vectr-codebases.json">unregistered</span>
+            : null}
         </div>
         <div className="vectr-card-actions">
           <button
@@ -649,6 +710,7 @@ const memOnly = isMemoryOnly(view.mode)
           {view.live
             ? null
             : <StartDaemonButton workspace={view.workspace} onStarted={onCreated} />}
+          {memOnly ? null : <DowngradeButton workspace={view.workspace} onDowngraded={onCreated} />}
         </div>
       </div>
 
