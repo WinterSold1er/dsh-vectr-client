@@ -59,12 +59,72 @@ describe('Adversarial Review Fixes', () => {
       const drawerContent = readFileSync(join(__dirname, '../src/client/SessionDrawerModal.tsx'), 'utf-8')
 
       expect(drawerContent).toContain('var(--dsw-alias-border-l2)')
-      expect(drawerContent).toContain('var(--dsw-alias-state-warn-tertiary)')
-      expect(drawerContent).toContain('var(--dsw-alias-state-warn-primary)')
-      expect(drawerContent).toContain('var(--dsw-alias-state-success-tertiary)')
-      expect(drawerContent).toContain('var(--dsw-alias-state-success-primary)')
-      expect(drawerContent).toContain('var(--dsw-alias-brand-tertiary)')
-      expect(drawerContent).toContain('var(--dsw-alias-brand-primary)')
+
+      // Positional, not "the name appears somewhere in the file". On this platform each
+      // state ships a FILL layer and a deep layer, and putting them in the wrong job is
+      // the defect this guard exists to catch: --dsw-alias-state-warn-tertiary is
+      // amber-100 rgb(254,245,231) in light and amber-900 rgb(39,36,31) in dark
+      // (design-platform.css:276 / :400), --dsw-alias-state-success-tertiary is green-100
+      // rgb(230,250,237) / green-900 rgb(35,60,44) (:272 / :396). As *text* those measure
+      // 1.08:1 on a white panel and 1.18:1 on this panel's dark surface — unreadable, and
+      // even the deepest warn text alias the host publishes (warn-label, amber-600
+      // rgb(221,134,41), :273) only reaches 2.79:1 — while the -primary layer (amber-500
+      // rgb(245,158,11) / green-500 rgb(34,197,94), :274 / :270) is deep enough to read as
+      // a ring or a glyph. The old assertions were satisfied by either reading, including
+      // the one that made the chip illegible, so they asserted nothing about the job the
+      // token was doing.
+      //
+      // The fill is declared once, in the shared sheet the drawer renders with, so the
+      // assertion spans both halves: the chip the drawer mounts, and what the sheet paints
+      // on it. Neither half alone is enough — a class the drawer never applies proves
+      // nothing, and a sheet that fills the wrong alias is the defect itself.
+      const sheet = readFileSync(join(__dirname, '../src/client/buttons.tsx'), 'utf-8')
+      expect(drawerContent).toMatch(/vectr-pill-live vectr-pill-live-filled/)
+      expect(drawerContent).toMatch(/vectr-pill-pending vectr-pill-pending-filled/)
+      for (const cls of ['vectr-pill-live-filled', 'vectr-pill-pending-filled']) {
+        expect(sheet, `${cls} must paint its state as a FILL`).toMatch(
+          new RegExp(`\\.${cls}\\s*\\{[^}]*background:\\s*var\\(--dsw-alias-state-\\w+-tertiary\\)`),
+        )
+        expect(sheet, `${cls} must ring with the deep state alias`).toMatch(
+          new RegExp(`\\.${cls}\\s*\\{[^}]*border-color:\\s*var\\(--dsw-alias-state-\\w+-primary\\)`),
+        )
+        expect(sheet, `${cls} must keep its word on a label alias`).toMatch(
+          new RegExp(`\\.${cls}\\s*\\{[^}]*color:\\s*var\\(--dsw-alias-label-primary\\)`),
+        )
+      }
+      // The warn fill specifically: the sheet may not quietly swap it for success.
+      expect(sheet).toMatch(/\.vectr-pill-pending-filled\s*\{[^}]*background:\s*var\(--dsw-alias-state-warn-tertiary\)/)
+      expect(sheet).toMatch(/\.vectr-pill-live-filled\s*\{[^}]*background:\s*var\(--dsw-alias-state-success-tertiary\)/)
+      // …and no state fill/ring alias is ever painted as a *word* in the drawer.
+      expect(drawerContent).not.toMatch(/color:\s*'var\(--dsw-alias-state-(warn|success)-(tertiary|secondary)\)'/)
+
+      // Two assertions this revision inverts, each because the original demanded a defect
+      // rather than forbidding one:
+      //
+      // 1. `toContain('var(--dsw-alias-brand-tertiary)')` demanded a token no host
+      //    stylesheet defines. `grep -rn -- "--dsw-alias-brand-tertiary"` over the whole
+      //    deepseek-harness-0.2.2-rc.1 checkout, packages/client/ui-theme/src/styles
+      //    included, returns 0 hits, while brand-primary / brand-primary-invert /
+      //    brand-primary-new-colorprimary-new-color are declared at design-platform.css
+      //    :200-202 (light) and :324-326 (dark). A declaration that paints an undefined
+      //    alias paints nothing at all: the "Primary" badge built on this token had no fill
+      //    — which is exactly what tests/e2e/visual-settings.spec.tsx recorded in
+      //    KNOWN_DEFECTS as `deadNoFallback`. Requiring the token therefore required the
+      //    hole, so it becomes a prohibition.
+      expect(drawerContent).not.toContain('var(--dsw-alias-brand-tertiary)')
+      //
+      // 2. `toContain('var(--dsw-alias-brand-primary)')` demanded the drawer paint an ink
+      //    alias as chrome: design-platform.css:202 binds brand-primary to
+      //    neutral-bluish-1000 = rgb(15,17,21) in light and :326 to neutral-bluish-50 =
+      //    rgb(249,250,251) in dark, so honouring it means a near-black ring on a light
+      //    card or a near-white ring on a dark card. buttons.tsx:138 and :178 already record
+      //    avoiding brand-primary for borders and interactive states for this reason; the
+      //    accent the panel really uses is --vx-accent, which resolves through
+      //    --dsw-alias-state-done-primary (violet-600 / violet-400, :266 / :390) with
+      //    brand-primary-new-… as the fallback. The drawer's brand mark is asserted through
+      //    that route instead — the mark class the visual gate reads.
+      expect(drawerContent).not.toContain('var(--dsw-alias-brand-primary)')
+      expect(drawerContent).toContain('vectr-mark')
     })
   })
 

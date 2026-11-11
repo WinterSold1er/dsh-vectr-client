@@ -9,6 +9,7 @@
 import { useState, type ReactNode } from 'react'
 import {
   formatMode,
+  isMemoryOnly as isMemoryOnlyMode,
   resolveUnifiedStatus,
   type SessionVectrState,
   type UnifiedStatus,
@@ -16,6 +17,7 @@ import {
 import { BTN } from './buttons'
 import { CodebaseModal } from './CodebaseModal'
 import { MemoryViewer } from './MemoryViewer'
+import { DowngradeButton } from './index'
 
 export interface SessionDrawerModalProps {
   workspace: string
@@ -94,7 +96,6 @@ export function SessionDrawerModal({
   // Never compare `state.mode` directly: a hyphen or a mixed case flips the flag.
   const canonicalMode = formatMode(state?.mode, live)
   const isMemoryOnly = canonicalMode === 'memory_only'
-  const isSearchOnly = canonicalMode === 'search_only'
 
   const handleReindex = async (): Promise<void> => {
     setReindexing(true)
@@ -294,81 +295,49 @@ export function SessionDrawerModal({
     <div className="vectr-modal-backdrop" onClick={onClose}>
       <div className="vectr-modal-card" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div
-          style={{
-            padding: '16px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            background: 'var(--dsw-alias-bg-layer-1)',
-          }}
-        >
+        <div className="vectr-drawer-head">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 18 }}>⚡</span>
+            <span className="vectr-mark" style={{ fontSize: 18 }} aria-hidden="true">⚡</span>
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontWeight: 600, fontSize: 15 }}>Vectr 会话工作区面板</span>
+              {/* Title + status + mode + port on one row. It wraps: with the longest
+               * status label the row needs 425px of min-content and the 390px phone drawer
+               * gives it 351px, which the visual gate reports as element-level horizontal
+               * overflow on .vectr-drawer-head / .vectr-modal-card. */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="vectr-drawer-title">Vectr 会话工作区面板</span>
+                {/* Status chip — filled, because the state is the one thing in this
+                 * header a user must read at a glance. The fill/ring/word roles live in
+                 * the shared sheet (.vectr-pill-live-filled / .vectr-pill-pending-filled,
+                 * buttons.tsx) where the same sheet states why -tertiary is a fill layer
+                 * and why it can never be the word. Outlined for offline, where the point
+                 * is the absence of a state, not its colour. */}
                 <span
-                  style={{
-                    padding: '2px 8px',
-                    borderRadius: 10,
-                    fontSize: 11,
-                    fontWeight: 600,
-                    background:
-                      unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only'
-                        ? 'var(--dsw-alias-state-success-tertiary)'
-                        : unifiedStatus.isBusy
-                          ? 'var(--dsw-alias-state-warn-tertiary)'
-                          : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                    color:
-                      unifiedStatus.kind === 'ready' || unifiedStatus.kind === 'memory_only'
-                        ? 'var(--dsw-alias-state-success-primary)'
-                        : unifiedStatus.isBusy
-                          ? 'var(--dsw-alias-state-warn-primary)'
-                          : 'var(--dsw-alias-state-error-primary)',
-                  }}
+                  className={`vectr-pill ${
+                    unifiedStatus.kind === 'ready'
+                      ? 'vectr-pill-live vectr-pill-live-filled'
+                      : unifiedStatus.isBusy ||
+                          unifiedStatus.kind === 'search_only' ||
+                          unifiedStatus.kind === 'memory_only'
+                        ? 'vectr-pill-pending vectr-pill-pending-filled'
+                        : 'vectr-pill-offline'
+                  }`}
                   title={unifiedStatus.description}
                 >
-                  {unifiedStatus.kind === 'offline' ? '○ ' : '● '}
+                  <span className="vectr-pill-dot" aria-hidden="true" />
                   {unifiedStatus.label}
                 </span>
-                <span
-                  style={{
-                    padding: '2px 8px',
-                    borderRadius: 10,
-                    fontSize: 11,
-                    fontWeight: 500,
-                    background: isMemoryOnly
-                      ? 'var(--dsw-alias-brand-tertiary)'
-                      : isSearchOnly
-                        ? 'var(--dsw-alias-state-warn-tertiary)'
-                        : 'var(--dsw-alias-brand-tertiary)',
-                    color: isMemoryOnly
-                      ? 'var(--dsw-alias-brand-primary)'
-                      : isSearchOnly
-                        ? 'var(--dsw-alias-state-warn-primary)'
-                        : 'var(--dsw-alias-brand-primary)',
-                  }}
-                >
-                  {canonicalMode}
-                </span>
+                {/* Mode chip. --dsw-alias-brand-tertiary is not defined by any host
+                 * stylesheet, so this chip has never had a fill: it rendered as bare text
+                 * on the panel. The shared neutral pill is what it actually looked like. */}
+                <span className="vectr-pill">{canonicalMode}</span>
                 {state?.port && (
-                  <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+                  <span className="vectr-meta">
                     Port: {state.port} {state.pid ? `(PID ${state.pid})` : ''}
                   </span>
                 )}
               </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--dsw-alias-label-secondary)',
-                  marginTop: 3,
-                  fontFamily: 'monospace',
-                }}
-                title={workspace}
-              >
-                📁 {workspace}
+              <div className="vectr-card-path" title={workspace}>
+                {workspace}
               </div>
             </div>
           </div>
@@ -385,6 +354,14 @@ export function SessionDrawerModal({
                 {startingDaemon ? '启动中…' : '⚡ 启动守护进程'}
               </button>
             )}
+            {/* 每个工作区都要能就地降级：这个抽屉是对话页里唯一的工作区面板，缺这个入口
+                用户就得绕去设置页。门是模式本身，和工作区卡片用的是同一个 isMemoryOnly：
+                本地的 canonicalMode 会把离线行折叠成 offline，照它判断就会给一个已经
+                memory_only 的工作区再摆一次降级按钮。state 还没到手时也不渲染——那时还
+                不知道当前模式，不该给出改变它的动作。 */}
+            {state !== null && !isMemoryOnlyMode(state.mode) && (
+              <DowngradeButton workspace={workspace} onDowngraded={onRefresh} />
+            )}
             <button
               type="button"
               className={BTN.secondary}
@@ -396,8 +373,8 @@ export function SessionDrawerModal({
             </button>
             <button
               type="button"
-              className="vectr-btn"
-              style={{ fontSize: 18, color: 'var(--dsw-alias-label-secondary)' }}
+              className="vectr-btn vectr-btn-dense vectr-btn-secondary vectr-btn-icon"
+              aria-label="关闭面板"
               onClick={onClose}
               title="关闭"
             >
@@ -407,65 +384,57 @@ export function SessionDrawerModal({
         </div>
 
         {/* Metrics Grid */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 12,
-            padding: '14px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2)',
-          }}
-        >
+        <div className="vectr-metric-grid">
           <div className="vectr-metric-card">
-            <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-              📁 索引文件数
+            <span className="vectr-metric-title">
+              索引文件数
             </span>
-            <span style={{ fontSize: 18, fontWeight: 600 }}>
+            <span className="vectr-metric-value">
               {isMemoryOnly ? (
-                <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
+                <span className="vectr-metric-na">
                   N/A (仅记忆)
                 </span>
               ) : (
                 status?.indexed_files ?? (live ? 0 : '-')
               )}
             </span>
-            <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+            <span className="vectr-metric-hint">
               {isMemoryOnly ? '无代码目录正常工作' : '已入库文件'}
             </span>
           </div>
 
           <div className="vectr-metric-card">
-            <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-              🧩 代码块数
+            <span className="vectr-metric-title">
+              代码块数
             </span>
-            <span style={{ fontSize: 18, fontWeight: 600 }}>
+            <span className="vectr-metric-value">
               {isMemoryOnly ? (
-                <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
+                <span className="vectr-metric-na">
                   N/A
                 </span>
               ) : (
                 status?.total_chunks ?? (live ? 0 : '-')
               )}
             </span>
-            <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+            <span className="vectr-metric-hint">
               {isMemoryOnly ? '不建索引' : '语义向量切片'}
             </span>
           </div>
 
           <div className="vectr-metric-card">
-            <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-              🧠 记忆条目数
+            <span className="vectr-metric-title">
+              记忆条目数
             </span>
-            <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-brand-primary)' }}>
+            <span className="vectr-metric-value">
               {status?.notes_count ?? (live ? 0 : '-')}
             </span>
-            <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+            <span className="vectr-metric-hint">
               工作记忆 (Notes)
             </span>
           </div>
 
           <div className="vectr-metric-card">
-            <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
+            <span className="vectr-metric-title">
               ⚡ 运行就绪
             </span>
             <span
@@ -474,11 +443,11 @@ export function SessionDrawerModal({
             >
               {READINESS_COPY[unifiedStatus.kind]}
             </span>
-            <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+            <span className="vectr-metric-hint">
               {status?.embed_model ? status.embed_model.split('/').pop() : '嵌入模型未就绪'}
             </span>
             {unifiedStatus.background && (
-              <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>
+              <span className="vectr-metric-hint">
                 {unifiedStatus.background}
               </span>
             )}
@@ -486,34 +455,27 @@ export function SessionDrawerModal({
         </div>
 
         {/* Tab Header */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 12,
-            padding: '0 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2)',
-          }}
-        >
+        <div className="vectr-tab-row">
           <button
             type="button"
             className={`vectr-tab-btn ${activeTab === 'codebases' ? 'active' : ''}`}
             onClick={() => setActiveTab('codebases')}
           >
-            📁 挂载代码库 ({state?.codebases.length ?? 0})
+            挂载代码库 ({state?.codebases.length ?? 0})
           </button>
           <button
             type="button"
             className={`vectr-tab-btn ${activeTab === 'memory' ? 'active' : ''}`}
             onClick={() => setActiveTab('memory')}
           >
-            🧠 工作记忆检索 (Memory)
+            工作记忆检索 (Memory)
           </button>
           <button
             type="button"
             className={`vectr-tab-btn ${activeTab === 'ops' ? 'active' : ''}`}
             onClick={() => setActiveTab('ops')}
           >
-            ⚙️ 维护与初始化 (Init)
+            维护与初始化 (Init)
           </button>
         </div>
 
@@ -535,38 +497,18 @@ export function SessionDrawerModal({
               </div>
 
               {codebaseMsg && (
-                <div
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 6,
-                    background: codebaseMsg.ok
-                      ? 'var(--dsw-alias-state-success-tertiary)'
-                      : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                    color: codebaseMsg.ok
-                      ? 'var(--dsw-alias-state-success-primary)'
-                      : 'var(--dsw-alias-state-error-primary)',
-                    fontSize: 12,
-                  }}
-                >
-                  {codebaseMsg.text}
-                </div>
+                <div className={codebaseMsg.ok ? 'vectr-result' : 'vectr-error'}>{codebaseMsg.text}</div>
               )}
 
               {!state?.codebases || state.codebases.length === 0 ? (
-                <div
-                  style={{
-                    padding: '30px',
-                    textAlign: 'center',
-                    color: 'var(--dsw-alias-label-tertiary)',
-                    fontSize: 13,
-                    border: '1px dashed var(--dsw-alias-border-l2)',
-                    borderRadius: 8,
-                  }}
-                >
-                  当前工作区暂未挂载 Codebase，可点击上方“添加 Codebase”进行配置绑定。
+                <div className="vectr-state">
+                  <p className="vectr-state-hint">
+                    当前工作区暂未挂载 Codebase，可点击上方“添加 Codebase”进行配置绑定。
+                  </p>
                 </div>
               ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <div className="vectr-scroll">
+                <table style={{ width: '100%', minWidth: 620, borderCollapse: 'collapse', fontSize: 13 }}>
                   <thead>
                     <tr
                       style={{
@@ -592,36 +534,34 @@ export function SessionDrawerModal({
                           {cb.slug}
                           {cb.isPrimary && (
                             <span
-                              style={{
-                                marginLeft: 6,
-                                padding: '2px 6px',
-                                borderRadius: 4,
-                                fontSize: 10,
-                                background: 'var(--dsw-alias-brand-tertiary)',
-                                color: 'var(--dsw-alias-brand-primary)',
-                                fontWeight: 600,
-                              }}
+                              className="vectr-pill vectr-pill-pending"
+                              /* only the 6px gap from the slug is left inline: the shared
+                               * pill owns everything else about this badge. */
+                              style={{ marginLeft: 6 }}
                             >
                               Primary
                             </span>
                           )}
                         </td>
                         <td style={{ padding: '10px' }}>
-                          {cb.type === 'remote' ? '🌐 Remote' : '📁 Local'}
+                          {cb.type === 'remote' ? 'Remote' : 'Local'}
                         </td>
                         <td style={{ padding: '10px', fontFamily: 'monospace', fontSize: 12 }}>
                           {cb.target}
                         </td>
                         <td style={{ padding: '10px' }}>
                           <span
+                            /* status reads from the word, not from the colour:
+                             * state-success-primary as text is 2.28:1 on this platform's
+                             * light surface and there is no darker success alias to use. */
                             style={{
                               fontWeight: 600,
                               color:
                                 cb.status === 'up'
-                                  ? 'var(--dsw-alias-state-success-primary)'
+                                  ? 'var(--dsw-alias-label-primary)'
                                   : cb.status === 'error'
                                     ? 'var(--dsw-alias-state-error-primary)'
-                                    : 'var(--dsw-alias-label-tertiary)',
+                                    : 'var(--dsw-alias-label-secondary)',
                             }}
                             title={cb.error || ''}
                           >
@@ -696,6 +636,7 @@ export function SessionDrawerModal({
                     ))}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           )}
@@ -723,16 +664,9 @@ export function SessionDrawerModal({
 
                 {isMemoryOnly ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div
-                      style={{
-                        padding: '10px 12px',
-                        borderRadius: 6,
-                        background: 'var(--dsw-alias-brand-tertiary)',
-                        color: 'var(--dsw-alias-brand-primary)',
-                        fontSize: 12,
-                      }}
-                    >
-                      ℹ️ 当前工作区运行在 <strong>memory_only</strong> 模式，禁止发起索引请求（原生支持仅工作记忆与 hooks，无需代码目录，不建索引）。
+                    <div className="vectr-result">
+                      当前工作区运行在 <strong>memory_only</strong> 模式，禁止发起索引请求（原生支持仅工作记忆与
+                      hooks，无需代码目录，不建索引）。
                     </div>
                     <div>
                       <button
@@ -746,17 +680,7 @@ export function SessionDrawerModal({
                     </div>
                     {upgradeMsg && (
                       <div
-                        style={{
-                          padding: '8px 12px',
-                          borderRadius: 6,
-                          background: upgradeMsg.ok
-                            ? 'var(--dsw-alias-state-success-tertiary)'
-                            : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                          color: upgradeMsg.ok
-                            ? 'var(--dsw-alias-state-success-primary)'
-                            : 'var(--dsw-alias-state-error-primary)',
-                          fontSize: 12,
-                        }}
+                        className={upgradeMsg.ok ? 'vectr-result' : 'vectr-error'}
                       >
                         {upgradeMsg.text}
                       </div>
@@ -803,18 +727,8 @@ export function SessionDrawerModal({
 
                 {startDaemonMsg && (
                   <div
-                    style={{
-                      marginTop: 10,
-                      padding: '8px 12px',
-                      borderRadius: 6,
-                      background: startDaemonMsg.ok
-                        ? 'var(--dsw-alias-state-success-tertiary)'
-                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                      color: startDaemonMsg.ok
-                        ? 'var(--dsw-alias-state-success-primary)'
-                        : 'var(--dsw-alias-state-error-primary)',
-                      fontSize: 12,
-                    }}
+                    style={{ marginTop: 10 }}
+                          className={startDaemonMsg.ok ? 'vectr-result' : 'vectr-error'}
                   >
                     {startDaemonMsg.text}
                   </div>
@@ -822,18 +736,8 @@ export function SessionDrawerModal({
 
                 {reindexMsg && (
                   <div
-                    style={{
-                      marginTop: 10,
-                      padding: '8px 12px',
-                      borderRadius: 6,
-                      background: reindexMsg.ok
-                        ? 'var(--dsw-alias-state-success-tertiary)'
-                        : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                      color: reindexMsg.ok
-                        ? 'var(--dsw-alias-state-success-primary)'
-                        : 'var(--dsw-alias-state-error-primary)',
-                      fontSize: 12,
-                    }}
+                    style={{ marginTop: 10 }}
+                          className={reindexMsg.ok ? 'vectr-result' : 'vectr-error'}
                   >
                     {reindexMsg.text}
                   </div>
@@ -894,19 +798,8 @@ export function SessionDrawerModal({
                 {initResult && (
                   <div style={{ marginTop: 10 }}>
                     <div
-                      style={{
-                        padding: '10px 12px',
-                        borderRadius: 6,
-                        background: initResult.ok
-                          ? 'var(--dsw-alias-state-success-tertiary)'
-                          : 'var(--dsw-alias-interactive-bg-hover-danger)',
-                        color: initResult.ok
-                          ? 'var(--dsw-alias-state-success-primary)'
-                          : 'var(--dsw-alias-state-error-primary)',
-                        fontSize: 12,
-                        fontFamily: 'monospace',
-                        whiteSpace: 'pre-wrap',
-                      }}
+                      style={{ fontFamily: 'var(--ds-font-family-code)', whiteSpace: 'pre-wrap' }}
+                        className={initResult.ok ? 'vectr-result' : 'vectr-error'}
                     >
                       {initResult.text}
                     </div>

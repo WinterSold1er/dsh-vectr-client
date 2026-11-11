@@ -190,8 +190,8 @@ export function CodebaseModal({
           <div style={{ fontWeight: 600, fontSize: 16 }}>添加 Codebase</div>
           <button
             type="button"
-            className="vectr-btn"
-            style={{ fontSize: 18, color: 'var(--dsw-alias-label-secondary)' }}
+            className="vectr-btn vectr-btn-dense vectr-btn-secondary vectr-btn-icon"
+            aria-label="关闭面板"
             onClick={onClose}
           >
             ✕
@@ -236,23 +236,23 @@ export function CodebaseModal({
           <div>
             <label className="vectr-label">类型</label>
             <div style={{ display: 'flex', gap: 16 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+              <label className="vectr-choice">
                 <input
                   type="radio"
                   name="cb-type"
                   checked={type === 'local'}
                   onChange={() => handleTypeChange('local')}
                 />
-                📁 本地代码库 (Local)
+                本地代码库 (Local)
               </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+              <label className="vectr-choice">
                 <input
                   type="radio"
                   name="cb-type"
                   checked={type === 'remote'}
                   onChange={() => handleTypeChange('remote')}
                 />
-                🌐 远程代码库 (Remote via SSH)
+                远程代码库 (Remote via SSH)
               </label>
             </div>
           </div>
@@ -323,7 +323,7 @@ export function CodebaseModal({
               <div>
                 <label className="vectr-label">认证凭据隔离</label>
                 <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                  <label className="vectr-choice">
                     <input
                       type="radio"
                       name="auth-type"
@@ -332,7 +332,7 @@ export function CodebaseModal({
                     />
                     SSH Key (免密 / 默认)
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                  <label className="vectr-choice">
                     <input
                       type="radio"
                       name="auth-type"
@@ -357,13 +357,7 @@ export function CodebaseModal({
             </div>
           )}
 
-          <div
-            style={{
-              fontSize: 11,
-              color: 'var(--dsw-alias-label-tertiary)',
-              paddingTop: 4,
-            }}
-          >
+          <div className="vectr-meta" style={{ paddingTop: 4 }}>
             挂载归属工作区: <code>{workspace}</code>
           </div>
 

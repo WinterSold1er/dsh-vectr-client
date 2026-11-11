@@ -386,3 +386,112 @@ describe('T18 Unassigned element is gone', () => {
     expect(html.match(/<article class="vectr-card">/g)?.length).toBe(VIEWS.length)
   })
 })
+
+/** The polygon that IS the Vectr mark; used to prove an icon slot rendered it. */
+const VECTR_POLYGON = '13 2 3 14 12 14 11 22 21 10 12 10 13 2'
+
+describe('merged panel: one surface, global block above the workspace block', () => {
+  it('labels both blocks inside a single page frame, global first', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+    const eyebrowAt = (label: string): number => html.indexOf(`class="vectr-eyebrow">${label}<`)
+
+    const globalAt = eyebrowAt('全局')
+    const workspaceAt = eyebrowAt('工作区')
+    expect(globalAt).toBeGreaterThan(-1)
+    expect(workspaceAt).toBeGreaterThan(-1)
+    expect(globalAt).toBeLessThan(workspaceAt)
+    // One panel, not a panel plus a second surface.
+    expect(html.match(/class="vectr-page"/g)).toHaveLength(1)
+  })
+
+  it('keeps the daemon sweep, the refresh control and the fleet counts in the global card', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+    const globalCardAt = html.indexOf('<div class="vectr-card">')
+    const workspaceEyebrowAt = html.indexOf('class="vectr-eyebrow">工作区')
+
+    expect(globalCardAt).toBeGreaterThan(-1)
+    expect(html.indexOf('一键启动全部 Daemon')).toBeGreaterThan(globalCardAt)
+    expect(html.indexOf('aria-label="refresh workspace list"')).toBeGreaterThan(globalCardAt)
+    expect(html.indexOf('class="vectr-stat-strip"')).toBeGreaterThan(globalCardAt)
+    // …all of it before the workspace list starts, so the global block reads as global.
+    expect(html.indexOf('一键启动全部 Daemon')).toBeLessThan(workspaceEyebrowAt)
+    expect(html.indexOf('class="vectr-stat-strip"')).toBeLessThan(workspaceEyebrowAt)
+  })
+
+  it('skeletons only while the first load has nothing to show, and marks the block busy', () => {
+    const cold = renderToHtml(<WorkspaceConsoleView {...viewProps({ loading: true, wsViews: null })} />)
+    expect(cold).toContain('class="vectr-skeleton"')
+    expect(cold.match(/class="vectr-skeleton-row"/g)?.length).toBe(3)
+    expect(cold).toContain('aria-busy="true"')
+    // No fake cards while loading.
+    expect(cold).not.toContain('<article class="vectr-card">')
+
+    // Second condition: data already on screen keeps the cards and only marks busy.
+    const refetch = renderToHtml(<WorkspaceConsoleView {...viewProps({ loading: true })} />)
+    expect(refetch).not.toContain('class="vectr-skeleton"')
+    expect(refetch).toContain('aria-busy="true"')
+    expect(refetch.match(/<article class="vectr-card">/g)?.length).toBe(VIEWS.length)
+
+    const settled = renderToHtml(<WorkspaceConsoleView {...viewProps()} />)
+    expect(settled).not.toContain('class="vectr-skeleton"')
+    expect(settled).toContain('aria-busy="false"')
+  })
+
+  it('pairs the empty state with the plugin mark and one action line', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps({ wsViews: [] })} />)
+    const stateAt = html.indexOf('class="vectr-state"')
+    expect(stateAt).toBeGreaterThan(-1)
+
+    const head = html.slice(stateAt, html.indexOf('class="vectr-state-hint"'))
+    expect(head).toContain(`points="${VECTR_POLYGON}"`)
+    expect(head).toContain('尚未注册任何 vectr 工作区')
+  })
+
+  it('reports a failed load as an alert instead of an empty panel', () => {
+    const html = renderToHtml(<WorkspaceConsoleView {...viewProps({ wsViews: null, wsError: 'socket hang up' })} />)
+
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('failed to load workspaces: socket hang up')
+    expect(html).not.toContain('尚未注册任何 vectr 工作区')
+    expect(html).not.toContain('class="vectr-skeleton"')
+  })
+})
+
+describe('design baseline in the shared stylesheet', () => {
+  it('carries no colour literal and lets the host theme own every colour', () => {
+    const hexadecimals = VECTR_CSS.match(/#[0-9a-fA-F]{3,8}/g) ?? []
+
+    // The whole sheet, accent included, resolves through host tokens: a literal here
+    // would freeze one theme's colour into the plugin.
+    expect(hexadecimals).toEqual([])
+    expect(VECTR_CSS).toMatch(/--vx-accent:\s*var\(--dsw-alias-[a-z-]+\)/)
+  })
+
+  it('names one motion curve and switches all of it off for reduced motion', () => {
+    expect(VECTR_CSS).toContain('--vx-ease: cubic-bezier(.16, 1, .3, 1)')
+    expect(VECTR_CSS).toMatch(/@media \(prefers-reduced-motion: reduce\)/)
+    const reduced = VECTR_CSS.slice(VECTR_CSS.indexOf('@media (prefers-reduced-motion: reduce)'))
+    expect(reduced).toMatch(/animation:\s*none/)
+    expect(reduced).toMatch(/transition:\s*none/)
+  })
+
+  it('paints no emphasis with brand-primary, which this platform binds to ink', () => {
+    // design-platform.css binds brand-primary to neutral-bluish-1000 (light) and
+    // neutral-bluish-50 (dark): as a border or an active-tab colour it renders ink,
+    // not an accent. The sheet keeps it out entirely and uses --vx-accent instead.
+    expect(VECTR_CSS).not.toContain('var(--dsw-alias-brand-primary)')
+    expect(VECTR_CSS).toContain('var(--vx-accent)')
+  })
+
+  it('bounds the panel and sets the type scale the baseline specifies', () => {
+    expect(VECTR_CSS).toMatch(/\.vectr-page\s*\{[^}]*max-width:\s*720px/)
+    expect(VECTR_CSS).toMatch(/\.vectr-page\s*\{[^}]*gap:\s*24px/)
+    expect(VECTR_CSS).toMatch(/\.vectr-eyebrow\s*\{[^}]*letter-spacing:\s*\.08em/)
+    expect(VECTR_CSS).toMatch(/\.vectr-eyebrow\s*\{[^}]*font-size:\s*10px/)
+    // Every numeric surface reads in tabular figures: stat tiles, card facts, the
+    // session capsule and the drawer metric cards.
+    for (const selector of ['.vectr-stat-value', '.vectr-fact-value', '.vectr-header-capsule', '.vectr-metric-card']) {
+      expect(VECTR_CSS).toMatch(new RegExp(`\\${selector}\\s*\\{[^}]*font-variant-numeric:\\s*tabular-nums`))
+    }
+  })
+})

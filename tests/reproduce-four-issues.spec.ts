@@ -157,16 +157,16 @@ describe('Issue 3: New Chat Page Missing Dialog Trigger Button', () => {
 })
 
 describe('Issue 4: Settings Panel Vectr Item Icon Needs Replacement', () => {
-  it('settings.section registration options MUST specify a dedicated icon property', () => {
-    const registrations: Array<{ name: string; id?: string; icon?: any }> = []
+  it('registers the plugin glyph into the settings.section.icon slot under the section id', () => {
+    const registrations: Array<{ name: string; id?: string; icon?: any; component?: unknown }> = []
     const mockCtx: any = {
       slots: {
         inject: (slotName: string, callback: () => void) => {
           callback()
           return () => {}
         },
-        register: (options: any) => {
-          registrations.push(options)
+        register: (options: any, component: unknown) => {
+          registrations.push({ ...options, component })
           return () => {}
         },
       },
@@ -177,9 +177,18 @@ describe('Issue 4: Settings Panel Vectr Item Icon Needs Replacement', () => {
 
     const settingsSection = registrations.find(r => r.name === 'settings.section' && r.id === 'vectr')
     expect(settingsSection).toBeDefined()
-    // In a4efca6, settingsSection.icon is undefined!
-    expect(settingsSection?.icon).toBeDefined()
-    expect(typeof settingsSection?.icon).not.toBe('undefined')
+    // In a4efca6 the rail kept the host gear. The diagnosis there — "add an icon
+    // property to the settings.section registration" — was wrong: the host projects
+    // this slot into SettingsSectionRow { id, order, label } and drops `icon`, so
+    // that field could never paint anything. The channel that works is the separate
+    // icon slot, which SettingsRoot.tsx:92 selects with `{ only: row.id }`: an id
+    // that does not match the section's own id falls back to the host gear.
+    const glyph = registrations.find(r => r.name === 'settings.section.icon')
+    expect(glyph).toBeDefined()
+    expect(glyph?.id).toBe(settingsSection?.id)
+    expect(typeof glyph?.component).toBe('function')
+    // And the section registration no longer pretends the dropped field does the job.
+    expect(settingsSection?.icon).toBeUndefined()
   })
 
   it('client module must export VectrNavIcon component', async () => {

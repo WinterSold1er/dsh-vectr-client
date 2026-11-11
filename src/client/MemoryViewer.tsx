@@ -88,15 +88,10 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
 
   if (!live) {
     return (
-      <div
-        style={{
-          padding: '24px',
-          textAlign: 'center',
-          color: 'var(--dsw-alias-label-tertiary)',
-          fontSize: 13,
-        }}
-      >
-        ⚠️ Vectr 实例当前处于离线状态，启动后即可访问工作记忆（Recall & Resume）。
+      <div className="vectr-state">
+        <p className="vectr-state-hint">
+          Vectr 实例当前处于离线状态，启动后即可访问工作记忆（Recall & Resume）。
+        </p>
       </div>
     )
   }
@@ -117,7 +112,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
           className={`vectr-tab-btn ${subTab === 'recall' ? 'active' : ''}`}
           onClick={() => setSubTab('recall')}
         >
-          🔍 Note 记忆检索 (Recall)
+          Note 记忆检索 (Recall)
         </button>
         <button
           type="button"
@@ -127,13 +122,13 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
             if (!resumeData && !resumeBusy) void handleResume()
           }}
         >
-          ⏱️ 任务接续 (Resume)
+          任务接续 (Resume)
         </button>
       </div>
 
       {subTab === 'recall' ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div className="vectr-form-row">
             <input
               className="vectr-input"
               style={{ flex: 1 }}
@@ -184,15 +179,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
           </div>
 
           {recallError && (
-            <div
-              style={{
-                padding: '8px 12px',
-                borderRadius: 6,
-                background: 'var(--dsw-alias-interactive-bg-hover-danger)',
-                color: 'var(--dsw-alias-state-error-primary)',
-                fontSize: 12,
-              }}
-            >
+            <div className="vectr-error">
               {recallError}
             </div>
           )}
@@ -207,7 +194,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
                 borderRadius: 8,
                 padding: '12px 16px',
                 fontSize: 13,
-                fontFamily: 'monospace',
+                fontFamily: 'var(--ds-font-family-code)',
                 whiteSpace: 'pre-wrap',
                 lineHeight: 1.5,
               }}
@@ -233,15 +220,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
           </div>
 
           {resumeError && (
-            <div
-              style={{
-                padding: '8px 12px',
-                borderRadius: 6,
-                background: 'var(--dsw-alias-interactive-bg-hover-danger)',
-                color: 'var(--dsw-alias-state-error-primary)',
-                fontSize: 12,
-              }}
-            >
+            <div className="vectr-error">
               {resumeError}
             </div>
           )}
@@ -250,8 +229,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {resumeData.last_task && (
                 <div className="vectr-note-card">
-                  <div style={{ fontWeight: 600, color: 'var(--dsw-alias-brand-primary)', marginBottom: 4 }}>
-                    📌 最近任务 (Last Task)
+                  <div style={{ fontWeight: 600, color: 'var(--dsw-alias-label-primary)', marginBottom: 4 }}>
+                    最近任务 (Last Task)
                   </div>
                   <div style={{ fontSize: 13 }}>
                     {resumeData.last_task.title || resumeData.last_task.content || JSON.stringify(resumeData.last_task)}
@@ -262,7 +241,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
               {resumeData.gotchas && resumeData.gotchas.length > 0 && (
                 <div className="vectr-note-card">
                   <div style={{ fontWeight: 600, color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 4 }}>
-                    ⚠️ 关联避坑项 (Gotchas: {resumeData.gotchas.length})
+                    关联避坑项 (Gotchas: {resumeData.gotchas.length})
                   </div>
                   {resumeData.gotchas.map((g, idx) => (
                     <div key={idx} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--dsw-alias-state-warn-primary)' }}>
@@ -282,7 +261,7 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
                   borderRadius: 8,
                   padding: '12px 16px',
                   fontSize: 12,
-                  fontFamily: 'monospace',
+                  fontFamily: 'var(--ds-font-family-code)',
                   whiteSpace: 'pre-wrap',
                 }}
               >

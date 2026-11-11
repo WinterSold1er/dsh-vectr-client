@@ -289,3 +289,41 @@ describe('T2 — the hook-bound header still renders its capsule', () => {
     expect(html).not.toContain('idx:')
   })
 })
+
+/**
+ * 降级 is a per-workspace action, and this drawer is the only workspace surface a
+ * conversation page has — so the control has to be here too, gated on the same
+ * canonical mode the workspace cards gate on, not on daemon liveness.
+ */
+describe('the session drawer carries the downgrade control too', () => {
+  it('offers it on a live full-mode workspace', () => {
+    const html = drawerOf({ mode: 'full', live: true, status: { fully_ready: true, indexed_files: 12, total_chunks: 40 } })
+
+    expect(html).toContain('降级为仅记忆')
+  })
+
+  it('offers it while the daemon is offline: the mode changes, not the daemon', () => {
+    const html = drawerOf({ mode: 'full', live: false, error: 'connect ECONNREFUSED 127.0.0.1:8778' })
+
+    expect(html).toContain('降级为仅记忆')
+  })
+
+  it('offers it from search_only, which is still above memory-only', () => {
+    expect(drawerOf({ mode: 'search_only', live: true })).toContain('降级为仅记忆')
+  })
+
+  it('withholds it once the workspace is memory-only, however the registry spells it', () => {
+    expect(drawerOf({ mode: 'memory_only', live: true })).not.toContain('降级为仅记忆')
+    expect(drawerOf({ mode: 'memory-only', live: true })).not.toContain('降级为仅记忆')
+    expect(drawerOf({ mode: 'Memory-Only', live: true })).not.toContain('降级为仅记忆')
+    // The gate is the mode, not the resolved status: an offline memory-only workspace
+    // must not be offered a downgrade it already has.
+    expect(drawerOf({ mode: 'memory_only', live: false, error: 'connect ECONNREFUSED 127.0.0.1:8778' })).not.toContain('降级为仅记忆')
+  })
+
+  it('withholds it before the session state has been fetched', () => {
+    // state === null means the mode is unknown; an action that changes the mode has
+    // no business being offered yet.
+    expect(renderDrawer(null)).not.toContain('降级为仅记忆')
+  })
+})

@@ -28,7 +28,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { formatMode, isMemoryOnly, isReservedPrimarySlug, normalizeMode, normalizePath, type VectrLanguageEntry } from '../domain'
-import { VectrSettings } from './vectr-settings'
+import { VectrSettings, VectrSettingsRailIcon } from './vectr-settings'
 import { thStyle, tdStyle, ellipsisStyle } from './tableStyles'
 import { BTN } from './buttons'
 import { DaemonLauncher } from './DaemonLauncher'
@@ -133,16 +133,26 @@ function reindexDisabledReason(view: WorkspaceView): string | undefined {
   return undefined
 }
 
-/** Single status pill: up=green, down=gray, error=red (title shows the message). */
+/** Single status pill: the dot carries the colour, the word carries the meaning.
+ *
+ * The word used to be painted with the state alias itself. It cannot pass contrast
+ * that way on this platform: `up` in var(--dsw-alias-state-success-primary) is
+ * rgb(34,197,94) = 2.28:1 on the panel's light surface — the number
+ * tests/e2e/visual-settings.spec.tsx carried in KNOWN_CONTRAST as a defect owned by
+ * this file — and the platform publishes nothing deeper than green-500 as a success
+ * alias (design-platform.css:270-272 light, :394-396 dark: primary=green-500,
+ * secondary=green-400, tertiary=green-100/900, a *fill*). So the state colour moves
+ * into the 6px dot — coloured by .vectr-pill-live / -error / -offline .vectr-pill-dot in
+ * buttons.tsx — which is decoration (`aria-hidden`, no text requirement), and the
+ * word sits on the label aliases: label-primary 18.9:1 light / 17.5:1 dark for up and
+ * error, label-secondary 5.8:1 light / 12.1:1 dark for down. `down` keeps the offline
+ * pill because "not running" is a neutral fact, not an error. */
 function StatusPill(props: { status: CodebaseView['status']; error?: string | undefined }): ReactNode {
   const { status, error } = props
-  const color = status === 'up'
-    ? 'var(--dsw-alias-state-success-primary)'
-    : status === 'error'
-      ? 'var(--dsw-alias-state-error-primary)'
-      : 'var(--dsw-alias-label-secondary)'
+  const tone = status === 'down' ? 'vectr-pill-offline' : status === 'error' ? 'vectr-pill-error' : 'vectr-pill-live'
   return (
-    <span style={{ color, fontWeight: 600, whiteSpace: 'nowrap' }} title={error ?? ''}>
+    <span className={`vectr-pill ${tone}`} title={error ?? ''}>
+      <span className="vectr-pill-dot" aria-hidden="true" />
       {status}
     </span>
   )
@@ -192,8 +202,20 @@ function CodebaseSubRow(props: {
                 padding: '1px 4px',
                 borderRadius: 3,
                 fontSize: 10,
-                background: 'var(--dsw-alias-brand-tertiary)',
-                color: 'var(--dsw-alias-brand-primary)',
+                /* The tag used to ask for a `--dsw-alias-brand-tertiary` background with a
+                 * `--dsw-alias-brand-primary` word. Neither is a tag colour here:
+                 * `--dsw-alias-brand-tertiary` is defined by no host stylesheet at all
+                 * (grep over the DSH 0.2.2-rc.1 packages tree returns 0 hits), so the
+                 * badge never had a fill and the gate flagged it as a dead alias;
+                 * `--dsw-alias-brand-primary` resolves to ink — neutral-bluish-1000
+                 * rgb(15,17,21) in light, neutral-bluish-50 rgb(249,250,251) in dark
+                 * (design-platform.css:202 / :326) — which is why buttons.tsx:138 and
+                 * :178 deliberately avoid it for chrome. A label-tertiary hairline with
+                 * the secondary label as the word (5.80:1 light / 12.1:1 dark — the same
+                 * pair the gate measures on .vectr-stat-label) is the same tag built
+                 * only from aliases the host actually publishes. */
+                border: '1px solid var(--dsw-alias-label-tertiary)',
+                color: 'var(--dsw-alias-label-secondary)',
                 fontWeight: 600,
               }}
             >
@@ -561,12 +583,12 @@ export interface StartDaemonButtonViewProps {
 export function StartDaemonButtonView(props: StartDaemonButtonViewProps): ReactNode {
   const { busy, error, onStart } = props
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }} aria-busy={busy}>
       <button type="button" className={BTN.primary} disabled={busy} onClick={onStart}>
         {busy ? 'starting…' : 'start daemon'}
       </button>
       {/* The card's action cell sets `white-space: nowrap`; the error text must still wrap. */}
-      {error !== null ? <p className="vectr-error" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
+      {error !== null ? <p className="vectr-error" role="alert" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
     </div>
   )
 }
@@ -600,11 +622,11 @@ export interface DowngradeButtonViewProps {
 export function DowngradeButtonView(props: DowngradeButtonViewProps): ReactNode {
   const { busy, error, onDowngrade } = props
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }} aria-busy={busy}>
       <button type="button" className={BTN.secondary} disabled={busy} onClick={onDowngrade}>
         {busy ? '降级中…' : '降级为仅记忆'}
       </button>
-      {error !== null ? <p className="vectr-error" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
+      {error !== null ? <p className="vectr-error" role="alert" style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{error}</p> : null}
     </div>
   )
 }
@@ -907,68 +929,89 @@ export function WorkspaceConsoleView(props: {
           {/* T28: our own standalone mark beside the page title — this is the
               surface the user actually looks at, and it must not read as a gear. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <VectrNavIcon size={16} title="Vectr" />
+            <VectrNavIcon size={16} className="vectr-mark" title="Vectr" />
             <h3 className="vectr-page-title">Vectr 工作区</h3>
           </div>
           <p className="vectr-page-subtitle">每个已注册的工作区对应一个 vectr daemon；展开任意一行可以查看并管理它的代码库，re-index 会重建该 daemon 的索引。</p>
         </div>
-        <div className="vectr-toolbar">
-          <DaemonLauncher onChanged={refresh} />
-          <button type="button" className={BTN.secondary} disabled={loading} onClick={refresh} aria-label="refresh workspace list">
-            {loading ? 'refreshing…' : 'refresh'}
-          </button>
-          {flash !== null
-            ? <span className="vectr-flash">{flash}</span>
-            : loading
-              ? <span className="vectr-flash">loading…</span>
-              : null}
+      </div>
+
+      {/* 全局区：daemon 控制 + 全量统计。原先散在 header 里的全局动作集中到这一张卡，
+          合并面板因此只剩一层——全局在上、工作区在下，不再弹独立模态。 */}
+      <section className="vectr-section" aria-labelledby="vectr-eyebrow-global">
+        <h4 id="vectr-eyebrow-global" className="vectr-eyebrow">全局</h4>
+        <div className="vectr-card">
+          <div className="vectr-toolbar">
+            <DaemonLauncher onChanged={refresh} />
+            <button type="button" className={BTN.secondary} disabled={loading} onClick={refresh} aria-label="refresh workspace list">
+              {loading ? 'refreshing…' : 'refresh'}
+            </button>
+            {flash !== null
+              ? <span className="vectr-flash">{flash}</span>
+              : loading
+                ? <span className="vectr-flash">loading…</span>
+                : null}
+          </div>
+          <div className="vectr-stat-strip">
+            <StatTile value={summary.total} label="已注册" />
+            <StatTile value={summary.live} label="在线" />
+            <StatTile value={summary.memoryOnly} label="仅记忆" />
+            <StatTile value={summary.offline} label="离线" />
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="vectr-stat-strip">
-        <StatTile value={summary.total} label="已注册" />
-        <StatTile value={summary.live} label="在线" />
-        <StatTile value={summary.memoryOnly} label="仅记忆" />
-        <StatTile value={summary.offline} label="离线" />
-      </div>
+      {wsError !== null ? <p className="vectr-error" role="alert">failed to load workspaces: {wsError}</p> : null}
+      {cbError !== null ? <p className="vectr-error" role="alert">failed to load codebases: {cbError}</p> : null}
 
-      {wsError !== null ? <p className="vectr-error">failed to load workspaces: {wsError}</p> : null}
-      {cbError !== null ? <p className="vectr-error">failed to load codebases: {cbError}</p> : null}
-
-      {showEmpty
-        ? (
-          <div className="vectr-state">
-            <p className="vectr-state-title">尚未注册任何 vectr 工作区</p>
-            <p className="vectr-state-hint">在某个项目目录里首次使用 vectr 工具（或在该目录完成一次 vectr 初始化）后，这个工作区就会出现在这里。</p>
-          </div>
-        )
-        : null}
-      {showList
-        ? (
-          <div className="vectr-ws-list">
-            {wsViews?.map((view) => {
-              const affiliated = byWs.get(normWs(view.workspace)) ?? []
-              const key = `ws:${view.workspace}`
-              return (
-                <WorkspaceCard
-                  key={key}
-                  view={view}
-                  entries={affiliated}
-                  expanded={expanded.has(key)}
-                  onToggle={() => toggle(key)}
-                  onReindex={reindex}
-                  busyPort={busyPort === view.port}
-                  onTest={test}
-                  onStart={start}
-                  onDelete={del}
-                  busySlug={busySlug}
-                  onCreated={refresh}
-                />
-              )
-            })}
-          </div>
-        )
-        : null}
+      {/* 工作区块：每个工作区一张卡，选中后在同一面板内展开详情（不弹独立模态）。 */}
+      <section className="vectr-section" aria-labelledby="vectr-eyebrow-ws" aria-busy={loading}>
+        <h4 id="vectr-eyebrow-ws" className="vectr-eyebrow">工作区</h4>
+        {loading && wsViews === null
+          ? (
+            <div className="vectr-skeleton" aria-hidden="true">
+              <div className="vectr-skeleton-row" />
+              <div className="vectr-skeleton-row" />
+              <div className="vectr-skeleton-row" />
+            </div>
+          )
+          : null}
+        {showEmpty
+          ? (
+            <div className="vectr-state">
+              <VectrNavIcon size={22} className="vectr-state-icon" title="Vectr" />
+              <p className="vectr-state-title">尚未注册任何 vectr 工作区</p>
+              <p className="vectr-state-hint">在某个项目目录里首次使用 vectr 工具（或在该目录完成一次 vectr 初始化）后，这个工作区就会出现在这里。</p>
+            </div>
+          )
+          : null}
+        {showList
+          ? (
+            <div className="vectr-ws-list">
+              {wsViews?.map((view) => {
+                const affiliated = byWs.get(normWs(view.workspace)) ?? []
+                const key = `ws:${view.workspace}`
+                return (
+                  <WorkspaceCard
+                    key={key}
+                    view={view}
+                    entries={affiliated}
+                    expanded={expanded.has(key)}
+                    onToggle={() => toggle(key)}
+                    onReindex={reindex}
+                    busyPort={busyPort === view.port}
+                    onTest={test}
+                    onStart={start}
+                    onDelete={del}
+                    busySlug={busySlug}
+                    onCreated={refresh}
+                  />
+                )
+              })}
+            </div>
+          )
+          : null}
+      </section>
     </div>
   )
 }
@@ -1009,13 +1052,41 @@ export function apply(ctx: ClientContext): void {
   // `settings.section` slot accepts a `label` FUNCTION (not just a string), which
   // is the supported hook for i18n when a plugin needs it; we simply return the
   // constant. No `locale` key is passed because there is nothing to translate.
-  effectInject(ctx, 'settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'vectr',
-    order: VECTR_SECTION_ORDER,
-    label: () => 'Vectr',
-    icon: VectrNavIcon,
-  }, VectrSettings), 'vectr: settings.section')
+  // The rail glyph is a SEPARATE slot the host filters by id: SettingsRoot.tsx:92
+  // renders `renderSlot('settings.section.icon', { size: 16, active }, { only: row.id,
+  // fallback: navIcon(row.id) })`. An id mismatch keeps the host's gear, so both
+  // registrations carry id 'vectr' and share ONE effect — they mount together,
+  // dispose together, and an HMR reload never leaves the glyph orphaned.
+  // The section registration no longer passes `icon`: the host projects the slot
+  // entry into `SettingsSectionRow { id, order, label }` and drops that field, so
+  // leaving it in place reads as wiring that does nothing.
+  effectInject(ctx, 'settings.section', () => {
+    const disposeSection = ctx.slots.register({
+      name: 'settings.section',
+      id: 'vectr',
+      order: VECTR_SECTION_ORDER,
+      label: () => 'Vectr',
+    }, VectrSettings)
+    // Guarded because the plugin pins no `dsh-client-ui-settings` version: on a host
+    // that has not declared `settings.section.icon`, ui-slots throws on an undeclared
+    // slot, and an unguarded throw here would take the whole Vectr section down with
+    // it. The failure is reported, not swallowed — the rail then keeps the host gear.
+    let disposeIcon: (() => void) | undefined
+    try {
+      disposeIcon = ctx.slots.register({
+        name: 'settings.section.icon',
+        id: 'vectr',
+        order: VECTR_SECTION_ORDER,
+        label: () => 'Vectr',
+      }, VectrSettingsRailIcon)
+    } catch (err) {
+      console.warn('[vectr] settings.section.icon slot unavailable; the rail keeps its default gear:', err)
+    }
+    return (): void => {
+      disposeSection()
+      if (disposeIcon !== undefined) disposeIcon()
+    }
+  }, 'vectr: settings.section')
 
   // Mount session utility in conversation header, reacting dynamically to active session cwd.
   effectInject(ctx, 'conversation.session.header.utilities', () => ctx.slots.register({

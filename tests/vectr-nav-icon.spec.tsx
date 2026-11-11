@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest'
 import * as React from 'react'
 import { renderToHtml } from './react-render'
 import { VectrNavIcon } from '../src/client/VectrNavIcon'
+import { VectrSettingsRailIcon } from '../src/client/vectr-settings'
 import { WorkspaceConsoleView, apply } from '../src/client/index'
 
 /** The polygon that IS the Vectr mark. */
@@ -120,29 +121,70 @@ describe('the Vectr settings page shows the mark in its header', () => {
   })
 })
 
-describe('the settings-section registration wires our mark', () => {
-  it('registers VectrNavIcon as the icon of the vectr section', () => {
+describe('the settings rail gets its glyph from the settings.section.icon slot', () => {
+  /** Mirror of the host slot table: everything `apply()` registered. */
+  function registrationsFromApply(): Array<Record<string, unknown>> {
     const registrations: Array<Record<string, unknown>> = []
     const ctx = {
       slots: {
-        inject: (_key: string, callback: () => void) => {
+        inject: (_key: string, callback: () => unknown) => {
           callback()
           return (): void => {}
         },
-        register: (options: Record<string, unknown>) => {
-          registrations.push(options)
+        register: (options: Record<string, unknown>, component: unknown) => {
+          registrations.push({ ...options, component })
           return (): void => {}
         },
       },
-      effect: (): void => {},
+      effect: (_fn: unknown, _name?: string): void => {},
     }
 
     apply(ctx as never)
+    return registrations
+  }
 
+  it('registers the rail glyph under the SAME id as the section', () => {
+    const registrations = registrationsFromApply()
     const section = registrations.find((row) => row.name === 'settings.section' && row.id === 'vectr')
     expect(section).toBeDefined()
-    // Identity, not just "something truthy": the rail must get THIS component.
-    expect(section?.icon).toBe(VectrNavIcon)
-    expect(section?.icon).not.toBe(undefined)
+
+    // SettingsRoot.tsx:92 picks the glyph with `{ only: row.id }`, so the glyph is
+    // reachable only under the section's own id; any other id keeps the host gear.
+    const glyphs = registrations.filter((row) => row.name === 'settings.section.icon')
+    expect(glyphs).toHaveLength(1)
+    expect(glyphs[0]?.id).toBe('vectr')
+    expect(glyphs[0]?.id).toBe(section?.id)
+    // Identity, not just "something truthy": the slot must carry THIS component.
+    expect(glyphs[0]?.component).toBe(VectrSettingsRailIcon)
+  })
+
+  it('does not rely on the icon field the host projection discards', () => {
+    const registrations = registrationsFromApply()
+    const section = registrations.find((row) => row.name === 'settings.section' && row.id === 'vectr')
+    // The host projects the slot entry into SettingsSectionRow { id, order, label },
+    // dropping `icon`. Keeping it here would read as wiring that does nothing, so the
+    // rail glyph has exactly one channel: the icon slot above.
+    expect(section?.icon).toBeUndefined()
+  })
+
+  it('renders the plugin mark at the host size and paints the accent only when active', () => {
+    const glyph = registrationsFromApply().find((row) => row.name === 'settings.section.icon')
+    const Glyph = glyph?.component as (props: { size: number; active: boolean }) => React.ReactElement
+
+    // { size, active } are the exact props the host hands this slot.
+    const idle = renderToHtml(<Glyph size={16} active={false} />)
+    const live = renderToHtml(<Glyph size={20} active />)
+
+    expect(idle).toContain(`points="${VECTR_POLYGON}"`)
+    expect(idle).toContain('width="16"')
+    expect(idle).toContain('height="16"')
+    expect(idle).not.toContain('--vx-accent')
+    expect(idle).not.toContain(GEAR_HUB)
+
+    expect(live).toContain('width="20"')
+    expect(live).toContain('height="20"')
+    expect(live).toContain('--vx-accent')
+    // `active` is a colour, not a swap: still our polygon.
+    expect(live).toContain(`points="${VECTR_POLYGON}"`)
   })
 })

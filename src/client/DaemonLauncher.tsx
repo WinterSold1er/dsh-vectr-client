@@ -53,19 +53,19 @@ export function DaemonLauncherView(props: DaemonLauncherViewProps): ReactNode {
   const { busy, data, error, onRun } = props
   const failures = data === null ? [] : data.results.filter(r => r.status === 'failed')
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} aria-busy={busy}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" className={BTN.primary} disabled={busy} onClick={onRun}>
           {busy ? '正在启动…' : '一键启动全部 Daemon'}
         </button>
         {data !== null && (
-          <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
+          <span className="vectr-meta">
             {`已启动 ${data.started} · 已在运行 ${data.alreadyRunning} · 失败 ${data.failed}`}
           </span>
         )}
       </div>
       {error !== null && (
-        <div style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</div>
+        <div role="alert" style={{ fontSize: 11, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</div>
       )}
       {failures.map(result => (
         <div
