@@ -19,6 +19,10 @@ import { CodebaseModal } from './CodebaseModal'
 import { MemoryViewer } from './MemoryViewer'
 import { DowngradeButton } from './index'
 
+/** The drawer's three panels. Named type so a caller can ask for one without re-spelling
+ *  the union. */
+export type SessionDrawerTab = 'codebases' | 'memory' | 'ops'
+
 export interface SessionDrawerModalProps {
   workspace: string
   state: SessionVectrState | null
@@ -26,6 +30,14 @@ export interface SessionDrawerModalProps {
   isOpen: boolean
   onClose: () => void
   onRefresh: () => void
+  /**
+   * Panel to open on. Defaults to 'codebases' (the production behaviour, unchanged).
+   * The visual gate renders the shipped component through react-dom/server — no hydration,
+   * so a click cannot switch tabs there — and the Init panel is exactly the one whose
+   * height has to be measured on a 390x844 viewport. This prop is how the gate gets there
+   * without faking the markup.
+   */
+  initialTab?: SessionDrawerTab
 }
 
 /**
@@ -51,8 +63,9 @@ export function SessionDrawerModal({
   isOpen,
   onClose,
   onRefresh,
+  initialTab = 'codebases',
 }: SessionDrawerModalProps): ReactNode {
-  const [activeTab, setActiveTab] = useState<'codebases' | 'memory' | 'ops'>('codebases')
+  const [activeTab, setActiveTab] = useState<SessionDrawerTab>(initialTab)
   const [showAddModal, setShowAddModal] = useState(false)
 
   // Re-index state
@@ -479,8 +492,11 @@ export function SessionDrawerModal({
           </button>
         </div>
 
-        {/* Tab Content */}
-        <div style={{ padding: '18px 20px', overflowY: 'auto', flex: 1, minHeight: 320 }}>
+        {/* Tab Content — the sheet's ONE scrolling layer (.vectr-sheet-body, buttons.tsx).
+     The inline `minHeight: 320` this div used to carry is the phone bug itself: it held the
+     body open past the card's 88vh clip, so the Init tab hung below the clip and no swipe
+     brought it back. The class owns the padding, min-height:0 and the scroll now. */}
+        <div className="vectr-sheet-body">
           {activeTab === 'codebases' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -760,23 +776,27 @@ export function SessionDrawerModal({
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                  <label className="vectr-choice">
                     <input
                       type="checkbox"
                       checked={initHooks}
                       onChange={(e) => setInitHooks(e.target.checked)}
                     />
-                    写入 Claude Code Hooks (<code>--hooks</code>, 自动注入 SessionStart / UserPrompt 记忆)
+                    <span>
+                      写入 Claude Code Hooks (<code>--hooks</code>, 自动注入 SessionStart / UserPrompt 记忆)
+                    </span>
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                  <label className="vectr-choice">
                     <input
                       type="checkbox"
                       checked={initMemoryOnly}
                       onChange={(e) => setInitMemoryOnly(e.target.checked)}
                     />
-                    仅工作记忆模式 (<code>--memory-only</code> / <code>--style memory-only</code>，无代码目录正常工作)
+                    <span>
+                      仅工作记忆模式 (<code>--memory-only</code> / <code>--style memory-only</code>，无代码目录正常工作)
+                    </span>
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                  <label className="vectr-choice">
                     <input
                       type="checkbox"
                       checked={initAutoStart}

@@ -291,6 +291,9 @@ const startAllResult = (): StartAllResponse => ({
 interface Scene {
   name: string
   body: string
+  /** Scroll the sheet body to its bottom after the resting shot and take a second artifact.
+   *  Used by the panel that is taller than a phone screen (task-14's Init tab). */
+  scrollSheet?: boolean
 }
 
 const scenes: Scene[] = [
@@ -410,7 +413,37 @@ const scenes: Scene[] = [
       '</div>',
     ].join('\n'),
   },
+  {
+    /* task-14 — the phone complaint itself. '维护与初始化 (Init)' is the tallest panel in the
+     * drawer and 390x844 is the viewport where it used to be cut off, so the gate renders it
+     * open on that tab. SSR markup only (nothing is hydrated), so initialTab is the only way
+     * to land there without faking the DOM. Rendered from the offline daemon state on purpose:
+     * it is the fullest version of the panel — the start-daemon row is up alongside the
+     * reindex and init blocks, which is what makes the scroll assertion non-trivial. */
+    name: '07-session-drawer-init',
+    scrollSheet: true,
+    body: [
+      '<div class="vectr-settings">',
+      renderToHtml(<VectrStyles />),
+      renderToHtml(
+        <SessionDrawerModal
+          workspace="/home/dev/alpha"
+          state={drawerState('offline')}
+          loading={false}
+          isOpen={true}
+          onClose={noop}
+          onRefresh={noop}
+          initialTab="ops"
+        />,
+      ),
+      '</div>',
+    ].join('\n'),
+  },
 ]
+
+/** Scenes that MUST expose a sheet scroll layer: for these a missing .vectr-sheet-body is a
+ *  defect, not a scene that happens not to contain a modal. */
+const SHEET_SCENES = new Set(scenes.filter((s) => s.scrollSheet === true).map((s) => s.name))
 
 /* ------------------------------------------------------------------ page assembly */
 
@@ -536,6 +569,13 @@ interface SceneReport {
   png: string
   pngWidth: number
   pngHeight: number
+  /** The sheet layout as measured at its resting (top) scroll position. */
+  sheet: SheetMetric
+  /** For a scrollSheet scene: the same surface scrolled to its bottom, plus that artifact. */
+  pngBottom?: string | undefined
+  pngBottomWidth?: number | undefined
+  pngBottomHeight?: number | undefined
+  sheetBottom?: SheetMetric | undefined
   overflow: OverflowMetric
   visibility: VisibilityMetric
   controls: ControlMetric[]
@@ -618,6 +658,223 @@ function pngSize(path: string): { width: number; height: number } {
     throw new Error(`not a PNG (or too small): ${path} (${buf.length} bytes)`)
   }
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) }
+}
+
+/* ------------------------------------------------------------------ sheet measurement */
+
+/** Phone touch-target floor (WCAG 2.5.5 / Apple HIG): 44px on the smaller axis. */
+const MIN_TOUCH_HEIGHT = 44
+
+interface SheetMetric {
+  found: boolean
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  /** More content than room: the scrollport has something to scroll. */
+  scrollable: boolean
+  /** The card that owns this scroll layer, and whether it is the frame or the screen. */
+  cardRect: { x: number; y: number; w: number; h: number }
+  cardCls: string
+  cardRadius: string
+  viewportW: number
+  viewportH: number
+  /** The last enabled focusable control inside the scrollport in DOM order — the thing a
+   * user has to scroll to reach. If THAT one is reachable, everything above it is. */
+  lastControl: string | null
+  lastControlRect: { top: number; bottom: number; left: number; right: number } | null
+  /** …sits fully inside the scrollport's own visible box… */
+  lastControlInside: boolean
+  /** …and inside the visual viewport, so it can actually be seen and tapped. */
+  lastControlInViewport: boolean
+  /** Enabled controls still hanging below the scrollport's bottom edge at this position.
+   * Empty after scrolling to the bottom == the whole panel is reachable. */
+  belowFold: string[]
+  /** Enabled controls inside the sheet smaller than the touch floor (radio/checkbox measured
+   * through their label, the way a thumb actually aims at them). */
+  smallTargets: string[]
+  /** Every scroll layer the sheet owns (its body plus any nested list). A nested one that
+   * does not contain its overscroll hands the scroll to the layer above it — the phone
+   * "which layer did I just grab?" failure. */
+  scrollLayers: Array<{ cls: string; overscroll: string; room: number }>
+  /** What the SHIPPED stylesheet declares for the two sheet scroll selectors. A nested list
+   * only exists once a daemon answers, so the containment of its rule is checked where it can
+   * always be checked: the CSSOM. */
+  declaredLayers: Array<{ sel: string; overscroll: string }>
+  /** Proof the page did not move: only the sheet scrolled. */
+  docScrollTop: number
+  docScrollLeft: number
+  docScrollHeight: number
+}
+
+/** Read the sheet out of the live layout: one bounded scroll layer, its card, the control at
+ * the end of it, and the document's own scroll position. */
+async function measureSheet(page: import('playwright-core').Page): Promise<SheetMetric> {
+  return page.evaluate((minTouch: number) => {
+    const empty: SheetMetric = {
+      found: false,
+      scrollTop: 0,
+      scrollHeight: 0,
+      clientHeight: 0,
+      scrollable: false,
+      cardRect: { x: 0, y: 0, w: 0, h: 0 },
+      cardCls: '',
+      cardRadius: '',
+      viewportW: window.innerWidth,
+      viewportH: window.innerHeight,
+      lastControl: null,
+      lastControlRect: null,
+      lastControlInside: false,
+      lastControlInViewport: false,
+      belowFold: [],
+      smallTargets: [],
+      scrollLayers: [],
+      declaredLayers: [],
+      docScrollTop: 0,
+      docScrollLeft: 0,
+      docScrollHeight: 0,
+    }
+    const body = document.querySelector('.vectr-sheet-body')
+    const card = body !== null ? body.closest('.vectr-modal-card') : null
+    if (body === null || card === null) return empty
+
+    const labelOf = (el: Element): string => {
+      const html = el as HTMLElement
+      const cls = typeof html.className === 'string' && html.className !== '' ? `.${html.className.trim().split(/\s+/).join('.')}` : ''
+      const text =
+        (el.textContent ?? '').trim() ||
+        el.getAttribute('aria-label') ||
+        (el as HTMLInputElement).placeholder ||
+        (el.closest('label')?.textContent ?? '').trim() ||
+        ''
+      return `${el.tagName.toLowerCase()}${cls} "${text.slice(0, 40)}"`
+    }
+
+    // Enabled, painted focusables only: a disabled control is not one a user has to reach,
+    // and a zero-box one is not one they can aim at.
+    const focusables = Array.from(
+      body.querySelectorAll('button, input, select, a[href], [tabindex]:not([tabindex="-1"])'),
+    ).filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.width > 0 && r.height > 0 && (el as HTMLButtonElement).disabled !== true
+    })
+
+    const bRect = body.getBoundingClientRect()
+    const cRect = card.getBoundingClientRect()
+    const doc = document.scrollingElement ?? document.documentElement
+
+    const scrollLayers = Array.from(card.querySelectorAll('.vectr-sheet-body, .vectr-scrollport')).map((el) => ({
+      cls: (el as HTMLElement).className.trim(),
+      overscroll: getComputedStyle(el).overscrollBehavior,
+      room: el.scrollHeight - el.clientHeight,
+    }))
+
+    // The stylesheet's own claim about the two sheet scroll selectors. VECTR_CSS is injected
+    // twice on this page (the gate injects it and <VectrStyles /> does), so keep one entry per
+    // selector and let a non-containing declaration win over a containing one.
+    const wanted = ['.vectr-scrollport', '.vectr-sheet-body']
+    const declared = new Map<string, string>()
+    for (const styleSheet of Array.from(document.styleSheets)) {
+      let rules: CSSRuleList
+      try {
+        rules = styleSheet.cssRules
+      } catch {
+        // A cross-origin sheet throws here; this page only injects its own, so skipping is
+        // skipping a sheet we could not read, not skipping a defect.
+        continue
+      }
+      for (const rule of Array.from(rules)) {
+        const styleRule = rule as CSSStyleRule
+        if (typeof styleRule.selectorText !== 'string' || !wanted.includes(styleRule.selectorText)) continue
+        const value = styleRule.style.overscrollBehavior === '' ? '(not declared)' : styleRule.style.overscrollBehavior
+        const seen = declared.get(styleRule.selectorText)
+        if (seen === undefined || seen === 'contain') declared.set(styleRule.selectorText, value)
+      }
+    }
+    const declaredLayers = Array.from(declared, ([sel, overscroll]) => ({ sel, overscroll }))
+
+    const smallTargets: string[] = []
+    for (const el of focusables) {
+      const input = el as HTMLInputElement
+      const target = input.type === 'radio' || input.type === 'checkbox' ? (el.closest('label') ?? el) : el
+      const h = target.getBoundingClientRect().height
+      if (h < minTouch) smallTargets.push(`${labelOf(el)} ${Math.round(h * 100) / 100}px`)
+    }
+
+    const belowFold: string[] = []
+    for (const el of focusables) {
+      if (el.getBoundingClientRect().bottom > bRect.bottom + 1) belowFold.push(labelOf(el))
+    }
+
+    const last = focusables.length > 0 ? (focusables[focusables.length - 1] as HTMLElement) : null
+    const lr = last !== null ? last.getBoundingClientRect() : null
+
+    return {
+      found: true,
+      scrollTop: Math.round(body.scrollTop),
+      scrollHeight: body.scrollHeight,
+      clientHeight: body.clientHeight,
+      scrollable: body.scrollHeight > body.clientHeight,
+      cardRect: {
+        x: Math.round(cRect.x),
+        y: Math.round(cRect.y),
+        w: Math.round(cRect.width),
+        h: Math.round(cRect.height),
+      },
+      cardCls: typeof card.className === 'string' ? card.className.trim() : '',
+      cardRadius: getComputedStyle(card).borderRadius,
+      viewportW: window.innerWidth,
+      viewportH: window.innerHeight,
+      lastControl: last !== null ? labelOf(last) : null,
+      lastControlRect:
+        lr !== null
+          ? { top: Math.round(lr.top), bottom: Math.round(lr.bottom), left: Math.round(lr.left), right: Math.round(lr.right) }
+          : null,
+      lastControlInside:
+        lr !== null &&
+        lr.top >= bRect.top - 1 &&
+        lr.bottom <= bRect.bottom + 1 &&
+        lr.left >= bRect.left - 1 &&
+        lr.right <= bRect.right + 1,
+      lastControlInViewport:
+        lr !== null && lr.top >= -1 && lr.bottom <= window.innerHeight + 1 && lr.right <= window.innerWidth + 1,
+      belowFold,
+      smallTargets,
+      scrollLayers,
+      declaredLayers,
+      docScrollTop: Math.round(doc.scrollTop),
+      docScrollLeft: Math.round(doc.scrollLeft),
+      docScrollHeight: doc.scrollHeight,
+    }
+  }, MIN_TOUCH_HEIGHT)
+}
+
+/** Drive a scroll the way a person does — a real wheel over the middle of the sheet.
+ *  Assigning `scrollTop` directly would prove nothing: an `overflow: hidden` box accepts a
+ *  scripted scrollTop just fine while a thumb over it gets nothing. Hit-tested wheel input is
+ *  what separates "scrollable by a user" from "movable by a script"; if the sheet cannot take
+ *  the scroll, the document under it takes it instead, and the doc-scroll assertions say so. */
+async function scrollSheetToBottom(page: import('playwright-core').Page): Promise<void> {
+  const target = await page.evaluate(() => {
+    const el = document.querySelector('.vectr-sheet-body')
+    if (el === null) return null
+    const r = el.getBoundingClientRect()
+    return {
+      x: Math.round(r.x + r.width / 2),
+      y: Math.round(r.y + r.height / 2),
+      need: el.scrollHeight - el.clientHeight,
+    }
+  })
+  if (target === null) return
+  await page.mouse.move(target.x, target.y)
+  const step = Math.min(Math.max(target.need, 1), 400)
+  for (let i = 0; i < 12; i++) {
+    await page.mouse.wheel(0, step)
+    const at = await page.evaluate(() => {
+      const el = document.querySelector('.vectr-sheet-body')
+      return el === null ? 0 : el.scrollTop
+    })
+    if (at >= target.need - 1) return
+  }
 }
 
 /** What one measurement pass produces (all of it read out of the live layout). */
@@ -1082,15 +1339,36 @@ describe('Vectr visual gate (chromium, real components)', () => {
             })
             await page.evaluate(() => {
               // The keyboard walk focuses controls sitting inside a scrollport, and the browser
-              // scrolls them into view. The artifact is the surface at its initial scroll position.
+              // scrolls them into view. The artifact is the surface at its initial scroll
+              // position — on both axes, because a sheet body is a vertical scrollport too.
               window.scrollTo(0, 0)
               for (const el of Array.from(document.querySelectorAll('body *'))) {
                 if (el.scrollLeft !== 0) el.scrollLeft = 0
+                if (el.scrollTop !== 0) el.scrollTop = 0
               }
             })
             await page.evaluate(() => document.fonts.ready)
+            const sheet = await measureSheet(page)
             const png = join(OUT_DIR, `vqa-${scene.name}-${vp.key}.png`)
             await page.screenshot({ path: png })
+
+            // A panel taller than the screen is only fixed if its LAST control can actually be
+            // reached: drive the sheet's own scrollport to the end, shoot it, re-measure there.
+            let pngBottom: string | undefined
+            let pngBottomWidth: number | undefined
+            let pngBottomHeight: number | undefined
+            let sheetBottom: SheetMetric | undefined
+            if (scene.scrollSheet === true) {
+              await scrollSheetToBottom(page)
+              await page.evaluate(() => document.fonts.ready)
+              pngBottom = join(OUT_DIR, `vqa-${scene.name}-${vp.key}-bottom.png`)
+              await page.screenshot({ path: pngBottom })
+              const bottomSize = pngSize(pngBottom)
+              pngBottomWidth = bottomSize.width
+              pngBottomHeight = bottomSize.height
+              sheetBottom = await measureSheet(page)
+            }
+
             await page.emulateMedia({ reducedMotion: null })
             const size = pngSize(png)
             const report: SceneReport = {
@@ -1099,6 +1377,11 @@ describe('Vectr visual gate (chromium, real components)', () => {
               png,
               pngWidth: size.width,
               pngHeight: size.height,
+              sheet,
+              pngBottom,
+              pngBottomWidth,
+              pngBottomHeight,
+              sheetBottom,
               ...reduced,
               motionNormal: normal.motion,
               consoleErrors: [],
@@ -1136,6 +1419,31 @@ describe('Vectr visual gate (chromium, real components)', () => {
           `  in-viewport text: ${r.visibility.inViewportChars}/${r.visibility.totalChars} chars inside the shot ` +
             `| regions: ${r.visibility.regions.map((x) => `${x.sel} ${x.w}x${x.h}@${x.x},${x.y}`).join(' | ')}`,
         )
+        if (r.sheet.found) {
+          const room = r.sheet.scrollHeight - r.sheet.clientHeight
+          console.log(
+            `  sheet: ${r.sheet.cardCls} ${r.sheet.cardRect.w}x${r.sheet.cardRect.h}@${r.sheet.cardRect.x},${r.sheet.cardRect.y} ` +
+              `radius=${r.sheet.cardRadius} | body ${r.sheet.clientHeight}px of room for ${r.sheet.scrollHeight}px of content ` +
+              `(${r.sheet.scrollable ? `scrolls ${room}px` : 'fits without scrolling'}) ` +
+              `| doc scroll ${r.sheet.docScrollTop},${r.sheet.docScrollLeft} docH ${r.sheet.docScrollHeight}/${r.sheet.viewportH} ` +
+              `| layers: ${r.sheet.scrollLayers.map((l) => `${l.cls}=${l.overscroll}/${l.room}px`).join(', ')}` +
+              (r.sheet.belowFold.length === 0
+                ? ''
+                : `\n    controls below the sheet's bottom edge at rest: ${r.sheet.belowFold.join(' | ')}`) +
+              (r.sheet.smallTargets.length === 0
+                ? ''
+                : `\n    controls under the ${MIN_TOUCH_HEIGHT}px touch target: ${r.sheet.smallTargets.join(' | ')}`),
+          )
+          if (r.sheetBottom !== undefined) {
+            console.log(
+              `  sheet driven to its end -> ${r.pngBottom?.replace(`${process.cwd()}/`, '')}: ` +
+                `scrollTop ${r.sheetBottom.scrollTop}/${r.sheetBottom.scrollHeight - r.sheetBottom.clientHeight} ` +
+                `| last control ${r.sheetBottom.lastControl ?? '(none)'} rect ${JSON.stringify(r.sheetBottom.lastControlRect)} ` +
+                `inside-sheet=${String(r.sheetBottom.lastControlInside)} in-viewport=${String(r.sheetBottom.lastControlInViewport)} ` +
+                `| still below the edge: ${r.sheetBottom.belowFold.length} | doc scroll ${r.sheetBottom.docScrollTop}`,
+            )
+          }
+        }
         const badFocus = r.focus.filter(
           (f) =>
             f.outlineStyle === 'none' ||
@@ -1382,6 +1690,99 @@ describe('Vectr visual gate (chromium, real components)', () => {
           r.fonts.computedFamily.includes('Montserrat'),
           `panel body text is on the display face (${r.fonts.computedFamily}) where it should inherit the host text stack ${where}`,
         ).toBe(false)
+
+        /* ---- task-14: the sheet is ONE bounded scroll layer and its end is reachable ---- */
+        if (SHEET_SCENES.has(r.scene)) {
+          expect(
+            r.sheet.found,
+            `no .vectr-sheet-body scroll layer inside a modal card ${where} — the sheet refactor is not applied`,
+          ).toBe(true)
+        }
+        if (r.sheet.found) {
+          expect(
+            r.sheet.cardRect.h <= r.sheet.viewportH,
+            `the modal card is ${r.sheet.cardRect.h}px tall against a ${r.sheet.viewportH}px viewport: its lower half is off-screen ${where}`,
+          ).toBe(true)
+          expect(
+            r.sheet.docScrollTop,
+            `the document scrolled vertically (${r.sheet.docScrollTop}) instead of the sheet's own scrollport ${where}`,
+          ).toBe(0)
+          expect(
+            r.sheet.docScrollLeft,
+            `the document scrolled sideways (${r.sheet.docScrollLeft}) instead of the sheet's own scrollport ${where}`,
+          ).toBe(0)
+          expect(
+            r.sheet.scrollLayers.filter((l) => l.overscroll !== 'contain').map((l) => `${l.cls} = ${l.overscroll}`),
+            `a scroll layer inside the sheet hands its overscroll to the layer above it ${where}: ${r.sheet.scrollLayers
+              .map((l) => `${l.cls}=${l.overscroll}(${l.room}px)`)
+              .join(', ')}`,
+          ).toEqual([])
+          expect(
+            r.sheet.declaredLayers.map((l) => l.sel).sort(),
+            `the shipped stylesheet no longer declares both sheet scroll selectors ${where}`
+          ).toEqual(['.vectr-scrollport', '.vectr-sheet-body'])
+          expect(
+            r.sheet.declaredLayers.filter((l) => l.overscroll !== 'contain').map((l) => `${l.sel}=${l.overscroll}`),
+            `a sheet scroll selector in VECTR_CSS dropped its overscroll-behavior:contain ${where}`
+          ).toEqual([])
+          if (r.viewport === 'phone') {
+            expect(
+              r.sheet.cardRect.h,
+              `a phone sheet fills the screen: card ${r.sheet.cardRect.h}px against a ${r.sheet.viewportH}px viewport ${where}`,
+            ).toBe(r.sheet.viewportH)
+            expect(r.sheet.cardRect.w, `a phone sheet spans the full width ${where}`).toBe(r.sheet.viewportW)
+            expect(r.sheet.cardRadius, `the phone sheet kept the desktop frame border-radius ${where}`).toBe('0px')
+            expect(
+              r.sheet.smallTargets,
+              `controls inside the phone sheet sit under the ${MIN_TOUCH_HEIGHT}px touch target ${where}`,
+            ).toEqual([])
+          } else {
+            const cap = Math.round(r.sheet.viewportH * 0.88)
+            expect(
+              r.sheet.cardRect.h <= cap,
+              `the desktop card ${r.sheet.cardRect.h}px breaks the min(88vh, 900px) cap (${cap}px) ${where}`,
+            ).toBe(true)
+            expect(r.sheet.cardRadius, `the desktop card lost its 12px frame ${where}`).toBe('12px')
+          }
+        }
+        if (r.sheetBottom !== undefined) {
+          const roomAtRest = r.sheet.scrollHeight - r.sheet.clientHeight
+          const roomAtEnd = r.sheetBottom.scrollHeight - r.sheetBottom.clientHeight
+          if (r.viewport === 'phone') {
+            expect(
+              roomAtRest,
+              `${r.scene} is a scrollSheet scene but its sheet had nothing to scroll on a phone (${r.sheet.clientHeight}px of room for ${r.sheet.scrollHeight}px of content) ${where}`,
+            ).toBeGreaterThan(0)
+          }
+          expect(
+            r.sheetBottom.scrollTop >= roomAtEnd - 1,
+            `driving the sheet to its end only reached scrollTop ${r.sheetBottom.scrollTop} of ${roomAtEnd}px ${where} — the scrollport does not actually scroll`,
+          ).toBe(true)
+          expect(
+            r.sheetBottom.belowFold,
+            `controls still hang below the sheet's bottom edge after it was driven to its end ${where}`,
+          ).toEqual([])
+          expect(r.sheetBottom.lastControl, `no reachable control inside the sheet ${where}`).not.toBeNull()
+          expect(
+            r.sheetBottom.lastControlInside,
+            `the panel's last control ${r.sheetBottom.lastControl} ${JSON.stringify(r.sheetBottom.lastControlRect)} is outside the sheet's visible box ${where}`,
+          ).toBe(true)
+          expect(
+            r.sheetBottom.lastControlInViewport,
+            `the panel's last control ${r.sheetBottom.lastControl} ${JSON.stringify(r.sheetBottom.lastControlRect)} is outside the ${r.sheetBottom.viewportW}x${r.sheetBottom.viewportH} viewport ${where}`,
+          ).toBe(true)
+          expect(
+            r.sheetBottom.docScrollTop,
+            `the page moved (scrollTop ${r.sheetBottom.docScrollTop}) while the sheet was scrolled ${where}`,
+          ).toBe(0)
+          expect(
+            r.sheetBottom.docScrollHeight,
+            `scrolling the sheet changed the document's own height (${r.sheet.docScrollHeight} -> ${r.sheetBottom.docScrollHeight}) ${where}`,
+          ).toBe(r.sheet.docScrollHeight)
+          expect(existsSync(r.pngBottom ?? ''), `the scrolled artifact is missing ${where}`).toBe(true)
+          expect(r.pngBottomWidth, `scrolled artifact width ${where}`).toBe(vp?.width ?? -1)
+          expect(r.pngBottomHeight, `scrolled artifact height ${where}`).toBe(vp?.height ?? -1)
+        }
       }
       expect(consoleErrors, 'console errors').toEqual([])
       expect(pageErrors, 'page errors').toEqual([])

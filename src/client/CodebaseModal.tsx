@@ -174,19 +174,13 @@ export function CodebaseModal({
   return (
     <div className="vectr-modal-backdrop" onClick={onClose}>
       <div
-        className="vectr-modal-card"
-        style={{ maxWidth: 540 }}
+        className="vectr-modal-card vectr-modal-card--narrow"
         onClick={(e) => e.stopPropagation()}
       >
-        <div
-          style={{
-            padding: '16px 20px',
-            borderBottom: '1px solid var(--dsw-alias-border-l2)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
+        {/* Same fixed sheet header as the session drawer: a row of the column that stays put
+     while the form below it scrolls (the narrow width moved from an inline style into
+     .vectr-modal-card--narrow so the phone full-bleed rule can override it). */}
+        <div className="vectr-drawer-head">
           <div style={{ fontWeight: 600, fontSize: 16 }}>添加 Codebase</div>
           <button
             type="button"
@@ -198,7 +192,10 @@ export function CodebaseModal({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* The form is this sheet's scrolling layer: on a phone the field stack plus the two
+     action buttons are taller than the screen, and without its own scrollport the create
+     button sat below the card's clip. */}
+        <form onSubmit={handleSubmit} className="vectr-sheet-body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {error && (
             <div
               style={{

@@ -185,10 +185,15 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
           )}
 
           {recalledText !== null && (
+            /* .vectr-scrollport (buttons.tsx): a scrollport INSIDE the drawer's sheet body.
+         overscroll-behavior:contain is what stops a flick that bottoms out here from
+         chaining into the sheet and moving the whole panel. The cap is fluid (40dvh) so on
+         a phone the inner list never eats the entire screen and leaves the outer sheet
+         nothing to show. */
             <div
+              className="vectr-scrollport"
               style={{
-                maxHeight: '380px',
-                overflowY: 'auto',
+                maxHeight: 'min(380px, 40dvh)',
                 background: 'var(--dsw-alias-bg-layer-1)',
                 border: '1px solid var(--dsw-alias-border-l2)',
                 borderRadius: 8,
@@ -252,10 +257,11 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
                 </div>
               )}
 
+              {/* The resumed-notes list: same nested-scrollport rule as the recall output. */}
               <div
+                className="vectr-scrollport"
                 style={{
-                  maxHeight: '300px',
-                  overflowY: 'auto',
+                  maxHeight: 'min(300px, 35dvh)',
                   background: 'var(--dsw-alias-bg-layer-1)',
                   border: '1px solid var(--dsw-alias-border-l2)',
                   borderRadius: 8,
