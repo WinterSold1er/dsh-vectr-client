@@ -175,6 +175,14 @@ export const VECTR_CSS = `
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
+/* The height caps for those inner lists. They are declared here rather than written inline on
+ * the element because the max-width:640px block below has to be able to take them away — an
+ * inline max-height beats any stylesheet rule short of !important. A capped box inside a
+ * scrolling sheet is a wheel sink: the pointer lands on it, it scrolls, and the sheet behind it
+ * never moves. Desktop keeps the caps (a nested box under a pointer wheel is expected
+ * behaviour); a phone sheet gets exactly one scroll layer. */
+.vectr-list-cap { max-height: min(380px, 40dvh); }
+.vectr-list-cap--sm { max-height: min(300px, 35dvh); }
 .vectr-header-capsule {
   font-family: inherit;
   display: inline-flex; align-items: center; gap: 6px;
@@ -341,6 +349,18 @@ export const VECTR_CSS = `
     padding-left: max(12px, env(safe-area-inset-left));
     padding-right: max(12px, env(safe-area-inset-right));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+  /* One scroll layer per phone sheet. A capped inner list is a wheel sink: the pointer lands on
+   * the list, the list scrolls, and the sheet behind it stays at 0 — measured before this rule
+   * existed (inner 0->862, sheet 0), which is the phone user who cannot reach the bottom of a
+   * long note list. Lifting the cap and taking the box out of the scroll chain (overflow-y:
+   * visible: it is no longer a scroll container at all) lets the list grow to its own height and
+   * the sheet body scroll the difference. overscroll-behavior stays as declared on
+   * .vectr-scrollport; on a box that cannot scroll it is inert either way. */
+  .vectr-list-cap,
+  .vectr-list-cap--sm {
+    max-height: none;
+    overflow-y: visible;
   }
   /* 28px is a pointer target, not a thumb target. Every control inside a phone sheet clears
    * 44px (WCAG 2.5.5 / Apple HIG floor). Scoped to the sheet on purpose: the panel's dense

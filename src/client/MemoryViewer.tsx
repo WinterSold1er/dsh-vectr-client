@@ -16,6 +16,46 @@ export interface MemoryViewerProps {
   live: boolean
 }
 
+export interface MemoryNoteListProps {
+  /** Note text exactly as the daemon returned it (recall output or `resume.formatted`). */
+  text: string
+  /** 'resume' is the denser variant the Resume panel uses. */
+  variant?: 'recall' | 'resume'
+}
+
+/**
+ * One box of note text: the presentational half of {@link MemoryViewer}, same container/view
+ * split as `WorkspaceConsole` / `WorkspaceConsoleView`. Hook-free and props-driven, so the
+ * shipped markup renders headlessly (see tests/react-render.ts: effects never run there, so a
+ * component that fetches its own list can only ever be asserted in its empty state).
+ *
+ * The height cap is a CLASS (`.vectr-list-cap` / `.vectr-list-cap--sm`, buttons.tsx) and not an
+ * inline `maxHeight`. An inline cap is untouchable from a stylesheet, and that is exactly how
+ * this box became a wheel sink inside a phone sheet: with the pointer over it the list scrolled
+ * 0->862 while `.vectr-sheet-body` behind it stayed at 0. Declared in CSS, the `max-width:640px`
+ * block can lift it and leave the sheet body as the sheet's only scroll layer.
+ */
+export function MemoryNoteListView({ text, variant = 'recall' }: MemoryNoteListProps): ReactNode {
+  const cap = variant === 'resume' ? 'vectr-list-cap vectr-list-cap--sm' : 'vectr-list-cap'
+  return (
+    <div
+      className={`vectr-scrollport ${cap}`}
+      style={{
+        background: 'var(--dsw-alias-bg-layer-1)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 8,
+        padding: '12px 16px',
+        fontSize: variant === 'resume' ? 12 : 13,
+        fontFamily: 'var(--ds-font-family-code)',
+        whiteSpace: 'pre-wrap',
+        lineHeight: variant === 'resume' ? undefined : 1.5,
+      }}
+    >
+      {text}
+    </div>
+  )
+}
+
 export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): ReactNode {
   const [subTab, setSubTab] = useState<'recall' | 'resume'>('recall')
 
@@ -185,27 +225,12 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
           )}
 
           {recalledText !== null && (
-            /* .vectr-scrollport (buttons.tsx): a scrollport INSIDE the drawer's sheet body.
-         overscroll-behavior:contain is what stops a flick that bottoms out here from
-         chaining into the sheet and moving the whole panel. The cap is fluid (40dvh) so on
-         a phone the inner list never eats the entire screen and leaves the outer sheet
-         nothing to show. */
-            <div
-              className="vectr-scrollport"
-              style={{
-                maxHeight: 'min(380px, 40dvh)',
-                background: 'var(--dsw-alias-bg-layer-1)',
-                border: '1px solid var(--dsw-alias-border-l2)',
-                borderRadius: 8,
-                padding: '12px 16px',
-                fontSize: 13,
-                fontFamily: 'var(--ds-font-family-code)',
-                whiteSpace: 'pre-wrap',
-                lineHeight: 1.5,
-              }}
-            >
-              {recalledText}
-            </div>
+            /* A scrollport INSIDE the drawer's sheet body. overscroll-behavior:contain (from
+         .vectr-scrollport, buttons.tsx) is what stops a flick that bottoms out here from
+         chaining into the sheet and moving the whole panel. The cap (.vectr-list-cap) is fluid
+         (40dvh) and is declared in the stylesheet, not inline, so the phone block can drop it:
+         there the sheet body is the only layer a thumb can grab. */
+            <MemoryNoteListView text={recalledText} />
           )}
         </div>
       ) : (
@@ -257,22 +282,8 @@ export function MemoryViewer({ workspace, port, live }: MemoryViewerProps): Reac
                 </div>
               )}
 
-              {/* The resumed-notes list: same nested-scrollport rule as the recall output. */}
-              <div
-                className="vectr-scrollport"
-                style={{
-                  maxHeight: 'min(300px, 35dvh)',
-                  background: 'var(--dsw-alias-bg-layer-1)',
-                  border: '1px solid var(--dsw-alias-border-l2)',
-                  borderRadius: 8,
-                  padding: '12px 16px',
-                  fontSize: 12,
-                  fontFamily: 'var(--ds-font-family-code)',
-                  whiteSpace: 'pre-wrap',
-                }}
-              >
-                {resumeData.formatted}
-              </div>
+              {/* The resumed-notes list: same view, same cap classes, denser variant. */}
+              <MemoryNoteListView text={resumeData.formatted} variant="resume" />
             </div>
           )}
         </div>

@@ -24,9 +24,11 @@
  * The host panel at 127.0.0.1:3080 is NOT touched: `/` answers 401 and a screenshot of a
  * login wall would prove nothing. The page under test is assembled here from real components.
  *
- * Self-skip: if chromium or the host token sheet cannot be found, the spec prints
- *   [visual-qa] SKIP: <reason>
- * and writes a report with { ran: false, reason }. It never pretends the checks passed.
+ * Gate availability: chromium and the host token sheet are resolved up front. If either is
+ * missing the spec FAILS — it writes { ran: false, reason } and throws. A visual gate that
+ * skips quietly and still reports green proves nothing, so silence is not an option:
+ *   VQA_ALLOW_SKIP=1   opt in to a loud, explicitly-labelled skip
+ * Without that variable the missing toolchain is a test failure, not a warning.
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -38,7 +40,7 @@ import { renderToHtml } from '../react-render'
 import { VECTR_CSS, VectrStyles } from '../../src/client/buttons'
 import { WorkspaceConsoleView } from '../../src/client/index'
 import { DaemonLauncherView, type StartAllResponse } from '../../src/client/DaemonLauncher'
-import { MemoryViewer } from '../../src/client/MemoryViewer'
+import { MemoryViewer, MemoryNoteListView } from '../../src/client/MemoryViewer'
 import { CodebaseModal } from '../../src/client/CodebaseModal'
 import { SessionDrawerModal } from '../../src/client/SessionDrawerModal'
 import { StaticInputRightAction } from '../../src/client/ConversationInputRightAction'
@@ -286,6 +288,62 @@ const startAllResult = (): StartAllResponse => ({
   ],
 })
 
+/* Fixture for the Memory tab: the shape of a real `vectr_recall` full-detail render — one index
+ * line per note plus its body — long enough that a 390x844 sheet cannot show it in one screen.
+ * Fixture data in exactly the sense WS_VIEWS above is fixture data: no daemon is contacted, and
+ * nothing here pretends to be this workspace's real memory. */
+const RECALL_FIXTURE = [
+  '# Working Notes — index (18 entries; use vectr_recall(note_id=N) to expand)',
+  '',
+  '[#159] finding/medium (layout-reviewer) · task-15 residual findings: gate skip path, scrollSheet coverage, nested scrollport sink  (3m ago)',
+  '  A capped box inside a scrolling sheet eats the wheel: with the pointer parked over it the inner list scrolled 0->862 while the sheet stayed at 0.',
+  '',
+  '[#158] finding/high (layout-reviewer) · task-15 review verdict: sheet layout APPROVED with evidence  (3m ago)',
+  '  Card = screen at 390x844 (390x844@0,0, radius 0), body clientHeight 414 < scrollHeight 566, driven to 152/152 with the last control inside the box.',
+  '',
+  '[#157] decision/high · 为什么用共享 sheet 布局修手机 Init 不可达（而不是页面滚动或砍内容）  (27m ago)',
+  '  One scroll layer per sheet keeps the head, metric grid and tab strip fixed; page-level scrolling would move the backdrop and the tab row with it.',
+  '',
+  '[#156] finding/high (layout-refactor) · 滚动可达性必须用真实 wheel 驱动，不能用 scrollTop 赋值  (35m ago)',
+  '  el.scrollTop = el.scrollHeight works on an overflow:hidden box in Chromium, so a scripted scroll proves nothing; hit-tested wheel input does.',
+  '',
+  '[#155] finding/high (layout-refactor) · Sheet layout root fix: .vectr-sheet-body scroll layer + phone full-bleed  (36m ago)',
+  '  A flex item\'s automatic minimum is its min-content: the old inline minHeight:320 kept the body taller than the card clip, so Init never reached.',
+  '',
+  '[#154] finding/high · task-12 UI 对抗审查 APPROVE：守卫/视觉门变异验证 + 降级按钮与 icon id 证据  (7h ago)',
+  '  Mutation checks: flip the guard back, the gate must fail; flip the stylesheet rule back, the visual assertions must fail.',
+  '',
+  '[#119] finding/medium (settings-icon-wire) · SettingsSectionRow.icon wired via slot-options cast  (17d ago)',
+  '  The host slot accepts a narrower option shape than the row renders; the cast is at the slot boundary, not inside the row.',
+  '',
+  '[#92] task/high (lead) · DELIVERED (f8fa29d): use-flow README with real screenshots, rest trimmed  (22d ago)',
+  '',
+  '[#63] gotcha/medium (settings-ui) · T23: disabled card action — nowrap head + token-painted disabled state (not opacity)  (23d ago)',
+  '  opacity on a dense row reads as a rendering bug to the host theme; the disabled state has to be painted with the state tokens.',
+  '',
+  '[#52] finding/high (ui-verifier) · T15: D1/D2/D3 all PASS on redeployed 3088 build  (24d ago)',
+  '  languages real names, sticky pinned 302->302, memory_only visible unscrolled — measured on the deployed bundle, not a local render.',
+  '',
+  '[#48] finding/medium (settings-ui) · T10: Settings→Vectr table is 11 columns, minWidth 680, bounded scrollport  (24d ago)',
+  '  The table is wider than the panel on purpose; .vectr-scroll hands the overflow sideways instead of compressing the columns.',
+  '',
+  '[#45] finding/high (ui-verifier) · T9: Settings→Vectr live render on 3088 — nav path, class names, capsule defect  (24d ago)',
+  '  languages-column rendered "[object Object]" — the cell rendered the language record instead of its name.',
+].join('\n')
+
+const RESUME_FIXTURE = [
+  '# Resume — pick up where you left off',
+  '',
+  'Last task  : task-16 手机端去掉 sheet 内嵌套滚动陷阱（Memory 列表）',
+  'Snapshot   : sheet-layout-task14 (2026-11-11T23:58:00Z)',
+  'Open gotchas (4):',
+  '  [src/client/buttons.tsx]  .vectr-scrollport 的 max-height 必须能在手机媒体查询里被取消，否则内层吃掉滚轮。',
+  '  [tests/e2e/visual-settings.spec.tsx]  视觉门走 SSR，不跑 effects：需要数据必须由组件从 props 拿到。',
+  '  [src/client/SessionDrawerModal.tsx]  initialTab 是视觉门进入非默认面板的唯一入口，默认值不能被改。',
+  '  [package.json]  视觉门不允许新增依赖：react-dom 从本地 dsh checkout 里取。',
+  'Snapshots (3): sheet-layout-task14, visual-gate-mutation, memory-only-downgrade',
+].join('\n')
+
 /* ------------------------------------------------------------------ scenes */
 
 interface Scene {
@@ -294,6 +352,11 @@ interface Scene {
   /** Scroll the sheet body to its bottom after the resting shot and take a second artifact.
    *  Used by the panel that is taller than a phone screen (task-14's Init tab). */
   scrollSheet?: boolean
+  /** Assert the sheet invariants (one bounded scroll layer, the phone full-bleed frame, no
+   *  capped nested box) without driving this sheet to its bottom. */
+  sheetCheck?: boolean
+  /** Park the wheel on the nested note list and record which layer actually moved. */
+  nestedProbe?: boolean
 }
 
 const scenes: Scene[] = [
@@ -439,11 +502,70 @@ const scenes: Scene[] = [
       '</div>',
     ].join('\n'),
   },
+  {
+    /* The Memory tab as the drawer itself mounts it: SessionDrawerModal renders MemoryViewer, and
+     * initialTab is the only way the gate lands on it (SSR markup, nothing hydrated — the same
+     * seam scene 07 uses for the Init tab). Rendered from the live daemon state, because that is
+     * the version with the recall form up. This is the empty-state half: no note list exists yet,
+     * so the sheet must own exactly one scroll layer here. */
+    name: '08-session-drawer-memory',
+    sheetCheck: true,
+    body: [
+      '<div class="vectr-settings">',
+      renderToHtml(<VectrStyles />),
+      renderToHtml(
+        <SessionDrawerModal
+          workspace="/home/dev/alpha"
+          state={drawerState('ready')}
+          loading={false}
+          isOpen={true}
+          onClose={noop}
+          onRefresh={noop}
+          initialTab="memory"
+        />,
+      ),
+      '</div>',
+    ].join('\n'),
+  },
+  {
+    /* The Memory tab with its note lists actually filled in — the shape task-15's review found
+     * untested (no scene ever instantiated .vectr-scrollport) and the one that acted as a scroll
+     * sink on a phone. MemoryViewer is the shipped panel, rendered from the live daemon state;
+     * MemoryNoteListView is the component it renders for BOTH sub-tabs once a daemon answers,
+     * shown here in its filled state because renderToStaticMarkup never runs the fetch
+     * (tests/react-render.ts). The backdrop + card + sheet-body divs mirror the wrapper
+     * SessionDrawerModal renders (it builds its own sheet and cannot be handed a child); every
+     * element inside them is shipped markup. The wheel is then parked ON the list, where a thumb
+     * reading notes lands. */
+    name: '09-memory-list-in-sheet',
+    nestedProbe: true,
+    body: [
+      '<div class="vectr-settings">',
+      renderToHtml(<VectrStyles />),
+      '<section class="vx-block"><p class="vectr-eyebrow">note list inside a sheet</p>',
+      '<div class="vectr-modal-backdrop" role="dialog" aria-modal="true" aria-label="Working memory">',
+      '<div class="vectr-modal-card">',
+      '<div class="vectr-sheet-body">',
+      renderToHtml(<MemoryViewer workspace="/home/dev/alpha" port={7411} live={true} />),
+      renderToHtml(<MemoryNoteListView text={RECALL_FIXTURE} />),
+      renderToHtml(<MemoryNoteListView text={RESUME_FIXTURE} variant="resume" />),
+      '</div>',
+      '</div>',
+      '</div>',
+      '</section>',
+      '</div>',
+    ].join('\n'),
+  },
 ]
 
 /** Scenes that MUST expose a sheet scroll layer: for these a missing .vectr-sheet-body is a
  *  defect, not a scene that happens not to contain a modal. */
-const SHEET_SCENES = new Set(scenes.filter((s) => s.scrollSheet === true).map((s) => s.name))
+const SHEET_SCENES = new Set(
+  scenes.filter((s) => s.scrollSheet === true || s.sheetCheck === true || s.nestedProbe === true).map((s) => s.name),
+)
+
+/** Scenes where the wheel is driven from inside the nested note list instead of the sheet. */
+const NESTED_SCENES = new Set(scenes.filter((s) => s.nestedProbe === true).map((s) => s.name))
 
 /* ------------------------------------------------------------------ page assembly */
 
@@ -576,6 +698,12 @@ interface SceneReport {
   pngBottomWidth?: number | undefined
   pngBottomHeight?: number | undefined
   sheetBottom?: SheetMetric | undefined
+  /** For a nestedProbe scene: what a real wheel parked on the note list actually moved. */
+  nested?: NestedScrollProbe | undefined
+  /** For a nestedProbe scene: the artifact taken after that wheel drive. */
+  pngWheel?: string | undefined
+  pngWheelWidth?: number | undefined
+  pngWheelHeight?: number | undefined
   overflow: OverflowMetric
   visibility: VisibilityMetric
   controls: ControlMetric[]
@@ -696,6 +824,11 @@ interface SheetMetric {
    * does not contain its overscroll hands the scroll to the layer above it — the phone
    * "which layer did I just grab?" failure. */
   scrollLayers: Array<{ cls: string; overscroll: string; room: number }>
+  /** Boxes INSIDE the card that can scroll vertically and are capped by a max-height. A capped
+   * nested box is a wheel sink: the flick lands on it, it scrolls, and the sheet behind it never
+   * moves. A phone sheet has to own none of them — .vectr-sheet-body is the one layer a thumb
+   * is aiming at. Desktop is allowed to have them (a pointer wheel over a nested box is normal). */
+  cappedLayers: Array<{ cls: string; maxHeight: string; overflowY: string; room: number }>
   /** What the SHIPPED stylesheet declares for the two sheet scroll selectors. A nested list
    * only exists once a daemon answers, so the containment of its rule is checked where it can
    * always be checked: the CSSOM. */
@@ -728,6 +861,7 @@ async function measureSheet(page: import('playwright-core').Page): Promise<Sheet
       belowFold: [],
       smallTargets: [],
       scrollLayers: [],
+      cappedLayers: [],
       declaredLayers: [],
       docScrollTop: 0,
       docScrollLeft: 0,
@@ -767,6 +901,24 @@ async function measureSheet(page: import('playwright-core').Page): Promise<Sheet
       overscroll: getComputedStyle(el).overscrollBehavior,
       room: el.scrollHeight - el.clientHeight,
     }))
+
+    // Any box INSIDE the card that can scroll vertically and is capped by a max-height, however
+    // the cap got there (class or inline). This is the wheel-sink shape: the flick lands on the
+    // capped box, it scrolls, and the sheet behind it stays put.
+    const cappedLayers = Array.from(card.querySelectorAll<HTMLElement>('.vectr-modal-card *'))
+      .filter((el) => {
+        const cs = getComputedStyle(el)
+        return (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && cs.maxHeight !== 'none'
+      })
+      .map((el) => {
+        const cs = getComputedStyle(el)
+        return {
+          cls: el.className.trim() || el.tagName.toLowerCase(),
+          maxHeight: cs.maxHeight,
+          overflowY: cs.overflowY,
+          room: el.scrollHeight - el.clientHeight,
+        }
+      })
 
     // The stylesheet's own claim about the two sheet scroll selectors. VECTR_CSS is injected
     // twice on this page (the gate injects it and <VectrStyles /> does), so keep one entry per
@@ -840,6 +992,7 @@ async function measureSheet(page: import('playwright-core').Page): Promise<Sheet
       belowFold,
       smallTargets,
       scrollLayers,
+      cappedLayers,
       declaredLayers,
       docScrollTop: Math.round(doc.scrollTop),
       docScrollLeft: Math.round(doc.scrollLeft),
@@ -874,6 +1027,182 @@ async function scrollSheetToBottom(page: import('playwright-core').Page): Promis
       return el === null ? 0 : el.scrollTop
     })
     if (at >= target.need - 1) return
+  }
+}
+
+/** Where a real wheel landed when the pointer was parked on the nested note list. */
+interface NestedScrollProbe {
+  found: boolean
+  /** The pointer spot: the middle of the note list — where a thumb lands when the list is what
+   * the person is reading. */
+  pointerX: number
+  pointerY: number
+  innerCls: string
+  innerMaxHeight: string
+  innerOverflowY: string
+  innerRoom: number
+  innerScrollTopStart: number
+  innerScrollTopEnd: number
+  sheetCls: string
+  sheetRoom: number
+  sheetClientHeight: number
+  sheetScrollTopStart: number
+  sheetScrollTopEnd: number
+  wheelSteps: number
+  wheelStepPx: number
+  /** Proof the page still did not move while all of this happened. */
+  docScrollTopEnd: number
+  docScrollHeightEnd: number
+  /** The list's last painted text line (measured with a Range over its last text node). */
+  lastLineRect: { top: number; bottom: number } | null
+  lastLineInsideSheet: boolean
+  listRect: { top: number; bottom: number; h: number }
+}
+
+/** Park the pointer on the nested list and wheel — the way a person reading the list does it —
+ *  then report WHICH layer moved. A capped inner box swallows the wheel and the sheet behind it
+ *  stays at 0; a phone sheet has to take the scroll itself. Assigning scrollTop would answer
+ *  nothing (see scrollSheetToBottom), so every scroll here is hit-tested wheel input. */
+async function probeWheelOverNestedList(page: import('playwright-core').Page): Promise<NestedScrollProbe> {
+  const none: NestedScrollProbe = {
+    found: false,
+    pointerX: 0,
+    pointerY: 0,
+    innerCls: '',
+    innerMaxHeight: '',
+    innerOverflowY: '',
+    innerRoom: 0,
+    innerScrollTopStart: 0,
+    innerScrollTopEnd: 0,
+    sheetCls: '',
+    sheetRoom: 0,
+    sheetClientHeight: 0,
+    sheetScrollTopStart: 0,
+    sheetScrollTopEnd: 0,
+    wheelSteps: 0,
+    wheelStepPx: 0,
+    docScrollTopEnd: 0,
+    docScrollHeightEnd: 0,
+    lastLineRect: null,
+    lastLineInsideSheet: false,
+    listRect: { top: 0, bottom: 0, h: 0 },
+  }
+
+  const start = await page.evaluate(() => {
+    const sheet = document.querySelector('.vectr-sheet-body')
+    const list = sheet === null ? null : sheet.querySelector('.vectr-scrollport')
+    if (sheet === null || list === null) return null
+    const r = list.getBoundingClientRect()
+    const s = sheet.getBoundingClientRect()
+    // Park on the part of the list a thumb can actually land on: the visible overlap of the list
+    // box, the sheet's box and the viewport. Off-screen coordinates would make playwright aim the
+    // wheel at something else entirely and the probe would measure the wrong layer.
+    const top = Math.max(r.top, s.top, 0)
+    const bottom = Math.min(r.bottom, s.bottom, window.innerHeight)
+    const left = Math.max(r.left, s.left, 0)
+    const right = Math.min(r.right, s.right, window.innerWidth)
+    if (bottom <= top || right <= left) return null
+    const cs = getComputedStyle(list)
+    return {
+      x: Math.round((left + right) / 2),
+      y: Math.round((top + bottom) / 2),
+      innerCls: (list as HTMLElement).className.trim(),
+      innerMaxHeight: cs.maxHeight,
+      innerOverflowY: cs.overflowY,
+      innerRoom: list.scrollHeight - list.clientHeight,
+      innerScrollTop: list.scrollTop,
+      sheetCls: (sheet as HTMLElement).className.trim(),
+      sheetRoom: sheet.scrollHeight - sheet.clientHeight,
+      sheetClientHeight: sheet.clientHeight,
+      sheetScrollTop: sheet.scrollTop,
+    }
+  })
+  if (start === null) return none
+
+  await page.mouse.move(start.x, start.y)
+  const step = Math.min(Math.max(start.sheetRoom, 1), 400)
+  let steps = 0
+  for (let i = 0; i < 12; i++) {
+    await page.mouse.wheel(0, step)
+    steps++
+    const at = await page.evaluate(() => {
+      const el = document.querySelector('.vectr-sheet-body')
+      return el === null ? 0 : el.scrollTop
+    })
+    if (at >= start.sheetRoom - 1) break
+  }
+
+  const end = await page.evaluate(() => {
+    const sheet = document.querySelector('.vectr-sheet-body')
+    const list = sheet === null ? null : sheet.querySelector('.vectr-scrollport')
+    if (sheet === null || list === null) return null
+    const doc = document.scrollingElement ?? document.documentElement
+    const lRect = list.getBoundingClientRect()
+    const sRect = sheet.getBoundingClientRect()
+
+    // The last painted line of note text: a Range over the list's last non-empty text node,
+    // taken in the list's own scroll position. "The box is inside the sheet" is not enough —
+    // the line a user came here to read has to be inside the sheet's visible box.
+    const walker = document.createTreeWalker(list, NodeFilter.SHOW_TEXT)
+    let last: Text | null = null
+    for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) {
+      const t = n as Text
+      if ((t.textContent ?? '').trim() !== '') last = t
+    }
+    let lastLineRect: { top: number; bottom: number } | null = null
+    if (last !== null) {
+      const range = document.createRange()
+      range.selectNodeContents(last)
+      const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+      const r = rects.length > 0 ? rects[rects.length - 1] : null
+      if (r !== null) lastLineRect = { top: Math.round(r.top), bottom: Math.round(r.bottom) }
+    }
+
+    return {
+      innerScrollTop: list.scrollTop,
+      sheetCls: (sheet as HTMLElement).className.trim(),
+      sheetRoom: sheet.scrollHeight - sheet.clientHeight,
+      sheetClientHeight: sheet.clientHeight,
+      sheetScrollTop: sheet.scrollTop,
+      docScrollTop: Math.round(doc.scrollTop),
+      docScrollHeight: doc.scrollHeight,
+      listRect: {
+        top: Math.round(lRect.top),
+        bottom: Math.round(lRect.bottom),
+        h: Math.round(lRect.height),
+      },
+      sheetBottom: Math.round(sRect.bottom),
+      viewportBottom: window.innerHeight,
+      lastLineRect,
+    }
+  })
+  if (end === null) return { ...none, wheelSteps: steps, wheelStepPx: step }
+
+  return {
+    found: true,
+    pointerX: start.x,
+    pointerY: start.y,
+    innerCls: start.innerCls,
+    innerMaxHeight: start.innerMaxHeight,
+    innerOverflowY: start.innerOverflowY,
+    innerRoom: start.innerRoom,
+    innerScrollTopStart: start.innerScrollTop,
+    innerScrollTopEnd: end.innerScrollTop,
+    sheetCls: end.sheetCls,
+    sheetRoom: end.sheetRoom,
+    sheetClientHeight: end.sheetClientHeight,
+    sheetScrollTopStart: start.sheetScrollTop,
+    sheetScrollTopEnd: end.sheetScrollTop,
+    wheelSteps: steps,
+    wheelStepPx: step,
+    docScrollTopEnd: end.docScrollTop,
+    docScrollHeightEnd: end.docScrollHeight,
+    lastLineRect: end.lastLineRect,
+    lastLineInsideSheet:
+      end.lastLineRect !== null &&
+      end.lastLineRect.top >= 0 &&
+      end.lastLineRect.bottom <= Math.min(end.sheetBottom, end.viewportBottom) + 1,
+    listRect: end.listRect,
   }
 }
 
@@ -1262,9 +1591,21 @@ describe('Vectr visual gate (chromium, real components)', () => {
     async () => {
       if (!environmentReady) {
         const reason = `chromium=${chromiumBin ?? 'NOT FOUND'} hostCss=${hostCss?.dir ?? 'NOT FOUND'}`
-        console.warn(`[visual-qa] SKIP: ${reason} — no assertion ran. A green test here means nothing was checked.`)
+        const allowed = process.env.VQA_ALLOW_SKIP === '1'
         mkdirSync(ARTIFACTS, { recursive: true })
-        writeFileSync(REPORT_PATH, JSON.stringify({ ran: false, reason }, null, 2))
+        writeFileSync(REPORT_PATH, JSON.stringify({ ran: false, reason, skipped: allowed }, null, 2))
+        // The old shape of this guard warned and returned, so a run that checked nothing looked
+        // identical to a run that checked everything. Missing toolchain is a failure by default
+        // now; VQA_ALLOW_SKIP=1 is the only way to opt into a skip, and the skip stays loud and
+        // lands in the report as { ran: false, skipped: true } either way.
+        if (!allowed) {
+          throw new Error(
+            `[visual-qa] cannot run: ${reason}. Without chromium and the host token sheet this ` +
+              'gate asserts nothing, so it fails rather than passing quietly. Set VQA_ALLOW_SKIP=1 ' +
+              'to opt into an explicit, labelled skip.',
+          )
+        }
+        console.warn(`[visual-qa] SKIP (VQA_ALLOW_SKIP=1): ${reason} — no assertion ran.`)
         return
       }
       const bin = chromiumBin
@@ -1369,6 +1710,22 @@ describe('Vectr visual gate (chromium, real components)', () => {
               sheetBottom = await measureSheet(page)
             }
 
+            // A nested list is only safe if the wheel a person lands ON the list reaches the
+            // sheet. Park the pointer on the list, wheel, and record which layer moved.
+            let pngWheel: string | undefined
+            let pngWheelWidth: number | undefined
+            let pngWheelHeight: number | undefined
+            let nested: NestedScrollProbe | undefined
+            if (scene.nestedProbe === true) {
+              nested = await probeWheelOverNestedList(page)
+              await page.evaluate(() => document.fonts.ready)
+              pngWheel = join(OUT_DIR, `vqa-${scene.name}-${vp.key}-wheel.png`)
+              await page.screenshot({ path: pngWheel })
+              const wheelSize = pngSize(pngWheel)
+              pngWheelWidth = wheelSize.width
+              pngWheelHeight = wheelSize.height
+            }
+
             await page.emulateMedia({ reducedMotion: null })
             const size = pngSize(png)
             const report: SceneReport = {
@@ -1382,6 +1739,10 @@ describe('Vectr visual gate (chromium, real components)', () => {
               pngBottomWidth,
               pngBottomHeight,
               sheetBottom,
+              nested,
+              pngWheel,
+              pngWheelWidth,
+              pngWheelHeight,
               ...reduced,
               motionNormal: normal.motion,
               consoleErrors: [],
@@ -1441,6 +1802,18 @@ describe('Vectr visual gate (chromium, real components)', () => {
                 `| last control ${r.sheetBottom.lastControl ?? '(none)'} rect ${JSON.stringify(r.sheetBottom.lastControlRect)} ` +
                 `inside-sheet=${String(r.sheetBottom.lastControlInside)} in-viewport=${String(r.sheetBottom.lastControlInViewport)} ` +
                 `| still below the edge: ${r.sheetBottom.belowFold.length} | doc scroll ${r.sheetBottom.docScrollTop}`,
+            )
+          }
+          if (r.nested !== undefined) {
+            console.log(
+              `  wheel parked ON the note list at (${r.nested.pointerX},${r.nested.pointerY}) ` +
+                `| inner ${r.nested.innerCls} maxHeight=${r.nested.innerMaxHeight} overflowY=${r.nested.innerOverflowY} ` +
+                `room=${r.nested.innerRoom} scrollTop ${r.nested.innerScrollTopStart}->${r.nested.innerScrollTopEnd} ` +
+                `| sheet room ${r.nested.sheetRoom} scrollTop ${r.nested.sheetScrollTopStart}->${r.nested.sheetScrollTopEnd} ` +
+                `after ${r.nested.wheelSteps} wheels of ${r.nested.wheelStepPx}px ` +
+                `| last note line ${JSON.stringify(r.nested.lastLineRect)} inside-sheet=${String(r.nested.lastLineInsideSheet)} ` +
+                `| capped boxes inside the card: ${r.sheet.cappedLayers.length === 0 ? 'none' : r.sheet.cappedLayers.map((c) => `${c.cls} maxH=${c.maxHeight} room=${c.room}`).join(', ')}` +
+                ` | doc scroll ${r.nested.docScrollTopEnd}`,
             )
           }
         }
@@ -1743,6 +2116,89 @@ describe('Vectr visual gate (chromium, real components)', () => {
               `the desktop card ${r.sheet.cardRect.h}px breaks the min(88vh, 900px) cap (${cap}px) ${where}`,
             ).toBe(true)
             expect(r.sheet.cardRadius, `the desktop card lost its 12px frame ${where}`).toBe('12px')
+          }
+        }
+        /* ---- task-16: no phone sheet may own a capped nested scroll box ----
+         * The shape task-15's review measured: pointer over the capped list, the list scrolls
+         * 0->862, the sheet behind stays 0. Measured on every scene that renders a sheet, not
+         * only the one that drives it. */
+        if (r.sheet.found && r.viewport === 'phone') {
+          expect(
+            r.sheet.cappedLayers.map((c) => `${c.cls} max-height=${c.maxHeight} overflow-y=${c.overflowY} room=${c.room}px`),
+            `a phone sheet owns a capped nested scroll box, which eats the wheel the sheet is ` +
+              `supposed to take ${where}: ${r.sheet.cappedLayers
+                .map((c) => `${c.cls} max-height=${c.maxHeight} overflow-y=${c.overflowY} room=${c.room}px`)
+                .join(', ')}`,
+          ).toEqual([])
+        }
+        /* ---- task-16: the wheel parked on the note list must move the SHEET ---- */
+        if (NESTED_SCENES.has(r.scene)) {
+          expect(
+            r.nested?.found,
+            `no .vectr-scrollport was found inside the sheet to park the wheel on ${where} — the note list is not being rendered`
+          ).toBe(true)
+        }
+        if (r.nested !== undefined) {
+          const n = r.nested
+          const drive = `${n.wheelSteps} wheels of ${n.wheelStepPx}px at (${n.pointerX},${n.pointerY})`
+          if (r.viewport === 'phone') {
+            expect(
+              n.sheetRoom,
+              `the sheet had nothing to scroll (${n.sheetClientHeight}px of room for ` +
+                `${n.sheetClientHeight + n.sheetRoom}px of content) — a wheel assertion here would be vacuous ${where}`
+            ).toBeGreaterThan(0)
+            expect(
+              n.innerMaxHeight,
+              `the note list is height-capped inside a phone sheet (max-height ${n.innerMaxHeight}): the wheel sink is back ${where}`
+            ).toBe('none')
+            expect(
+              n.innerOverflowY,
+              `the note list is still its own scroll container on a phone (overflow-y ${n.innerOverflowY}) ${where}`
+            ).toBe('visible')
+            expect(
+              n.innerScrollTopEnd,
+              `the note list ate the wheel: parked on it, ${drive}, its own scrollTop reached ` +
+                `${n.innerScrollTopEnd} of ${n.innerRoom}px while the pointer never left it ${where}`
+            ).toBe(0)
+            expect(
+              n.sheetScrollTopEnd > n.sheetScrollTopStart,
+              `the sheet never moved (${n.sheetScrollTopStart}->${n.sheetScrollTopEnd}) although ${drive} landed on the note list ${where}`
+            ).toBe(true)
+            expect(
+              n.sheetScrollTopEnd >= n.sheetRoom - 1,
+              `driving the sheet from its own note list only reached scrollTop ${n.sheetScrollTopEnd} of ${n.sheetRoom}px ${where}`
+            ).toBe(true)
+            expect(
+              n.docScrollTopEnd,
+              `the page took the scroll instead of the sheet (${n.docScrollTopEnd}) while the wheel was parked on the note list ${where}`
+            ).toBe(0)
+            expect(n.lastLineRect, `no painted note text was found inside the list ${where}`).not.toBeNull()
+            expect(
+              n.lastLineInsideSheet,
+              `the last note line ${JSON.stringify(n.lastLineRect)} is still out of reach after the sheet was driven to its end ${where}`
+            ).toBe(true)
+          } else {
+            /* Desktop keeps the nested list as its own capped scrollport: a pointer wheel over a
+             * nested box is normal there, and lifting the cap on a 1440x900 panel would be an
+             * unrequested change to a layout that already works. */
+            expect(
+              n.innerMaxHeight,
+              `the desktop note list lost its height cap (max-height ${n.innerMaxHeight}) ${where}`
+            ).not.toBe('none')
+            expect(
+              n.innerOverflowY,
+              `the desktop note list is no longer a scroll container (overflow-y ${n.innerOverflowY}) ${where}`
+            ).toBe('auto')
+            expect(
+              n.innerRoom,
+              `the desktop note list has nothing to scroll (${n.innerRoom}px) — the .vectr-list-cap cap is not being applied ${where}`
+            ).toBeGreaterThan(0)
+            expect(
+              r.sheet.cappedLayers.filter((c) => c.cls.includes('vectr-list-cap')).length,
+              `the two capped note lists inside a desktop sheet are not both capped (${r.sheet.cappedLayers
+                .map((c) => `${c.cls} max-height=${c.maxHeight}`)
+                .join(', ')}) ${where}`
+            ).toBe(2)
           }
         }
         if (r.sheetBottom !== undefined) {
