@@ -20,6 +20,8 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -114,18 +116,11 @@ describe('vectr-client live daemon e2e', () => {
           liveContexts.add(bootCtx)
           bootCtx.loader.builtins['vectr-test-system-prompt'] = SystemPrompt
           bootCtx.loader.builtins['vectr-test-tools'] = ToolRuntime
+          bootCtx.loader.builtins['vectr-test-tool-executor'] = NativeToolExecutor
           bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
           bootCtx.loader.builtins['vectr-test-session'] = SessionStore
           bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
-          bootCtx.loader.builtins['vectr-test-session-projections'] = {
-            name: 'vectr-test-session-projections',
-            apply(c: Context) {
-              c.provide('sessionProjections', {
-                register: () => {},
-                stateOf: () => undefined,
-              })
-            },
-          }
+          bootCtx.loader.builtins['vectr-test-session-projections'] = SessionProjectionRegistry
           bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
           bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
         },
@@ -147,15 +142,14 @@ describe('vectr-client live daemon e2e', () => {
       expect(ctx.tools.get('mcp__vectr__vectr_status')).toBeUndefined()
 
       // Execute against the REAL daemon.
-      const result = await ctx.tools.execute({
+      const batch = await ctx.tools.execute({
         signal: new AbortController().signal,
-        callId: CallId(`vectr-live-call-${Date.now()}`),
-        name: 'mcp__vectr__vectr_status',
-        arguments: {},
         agent,
+        calls: [{ type: 'tool-call', id: CallId(`vectr-live-call-${Date.now()}`), name: 'mcp__vectr__vectr_status', arguments: JSON.stringify({}) }],
       })
-      expect(result.isError).toBe(false)
-      const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+      const settled = batch.results[0]
+      expect(settled?.result.isError).toBe(false)
+      const text = (settled?.result.content ?? []).flatMap(block => block.type === 'text' ? [block.text] : []).join('')
       expect(text).toContain('Vectr status')
 
       await handle.dispose()
@@ -195,18 +189,11 @@ describe('vectr-client per-workspace port isolation', () => {
           liveContexts.add(bootCtx)
           bootCtx.loader.builtins['vectr-test-system-prompt'] = SystemPrompt
           bootCtx.loader.builtins['vectr-test-tools'] = ToolRuntime
+          bootCtx.loader.builtins['vectr-test-tool-executor'] = NativeToolExecutor
           bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
           bootCtx.loader.builtins['vectr-test-session'] = SessionStore
           bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
-          bootCtx.loader.builtins['vectr-test-session-projections'] = {
-            name: 'vectr-test-session-projections',
-            apply(c: Context) {
-              c.provide('sessionProjections', {
-                register: () => {},
-                stateOf: () => undefined,
-              })
-            },
-          }
+          bootCtx.loader.builtins['vectr-test-session-projections'] = SessionProjectionRegistry
           bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
           bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
         },
@@ -246,15 +233,14 @@ describe('vectr-client per-workspace port isolation', () => {
         await waitForTool(ctx, healthyAgent, 'mcp__vectr__vectr_status')
         expect(ctx.tools.get('mcp__vectr__vectr_status', healthyAgent)).toBeDefined()
         expect(ctx.tools.get('mcp__vectr__vectr_status')).toBeUndefined()
-        const result = await ctx.tools.execute({
+        const batch = await ctx.tools.execute({
           signal: new AbortController().signal,
-          callId: CallId(`vectr-isolation-call-${Date.now()}`),
-          name: 'mcp__vectr__vectr_status',
-          arguments: {},
           agent: healthyAgent,
+          calls: [{ type: 'tool-call', id: CallId(`vectr-isolation-call-${Date.now()}`), name: 'mcp__vectr__vectr_status', arguments: JSON.stringify({}) }],
         })
-        expect(result.isError).toBe(false)
-        const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+        const settled = batch.results[0]
+        expect(settled?.result.isError).toBe(false)
+        const text = (settled?.result.content ?? []).flatMap(block => block.type === 'text' ? [block.text] : []).join('')
         expect(text).toContain('Vectr status')
       }
 

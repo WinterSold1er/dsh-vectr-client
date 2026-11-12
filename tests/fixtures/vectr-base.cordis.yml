@@ -8,6 +8,9 @@
 - id: tools
   name: cordis:vectr-test-tools
 
+- id: tool-executor
+  name: cordis:vectr-test-tool-executor
+
 - id: llm
   name: cordis:vectr-test-llm
 

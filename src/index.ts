@@ -35,9 +35,12 @@ import {
 } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 // P7: these symbols are only exposed via the package SUBPATH
 // `@deepseek-ai/dsh-mcp-client/src/connection.ts`; the package ROOT only
-// re-exports { Config, apply, inject, name }. Pinning the subpath import is
-// intentional and must not be 'simplified' to the root, or the real binding is
-// lost at build time (rc.2 constraint; revisit if upstream adds root exports).
+// re-exports `resolveReconnectPolicy` (plus types) and `startConnection` stays
+// internal. Pinning the subpath import is intentional and must not be
+// 'simplified' to the root, or the real binding is lost at build time.
+// The build inlines this subgraph (tsdown.server.config.ts) so the shipped
+// `lib/index.js` never imports a `.ts` specifier at run time.
+import { McpStatusCell } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
 import {
   DEFAULT_DSH_WORKSPACE_FILE,
   discoverWorkspaceRoots,
@@ -400,6 +403,30 @@ export const VECTR_GREP_SECTION_TEXT = getVectrGrepText(DEFAULT_SERVER_NAME)
  * wires the plugin together.
  */
 /**
+ * Build the per-connection status cell rc.2's `startConnection` requires.
+ *
+ * rc.2 takes the writable status cell as an explicit fourth argument instead of
+ * creating one per server fiber. Each vectr connection gets its own cell so
+ * concurrent agent and codebase connections never overwrite one another's
+ * status; contained observer failures go to the plugin logger.
+ *
+ * @param ctx - plugin context whose logger receives observer failures.
+ * @param label - connection label included in the diagnostic prefix.
+ * @returns a fresh writable status cell for one connection.
+ */
+function createConnectionStatusCell(ctx: Context, label: string): McpStatusCell {
+  return new McpStatusCell((message, error) => ctx.logger.warn(`vectr-client(${label}): ${message}`, error))
+}
+
+/**
+ * Transport-closure budget handed to `startConnection`, matching rc.2's
+ * `DEFAULT_CLOSE_TIMEOUT_MS` (the `mcp-client` schema default). Vectr has no
+ * config knob for it; the value must stay finite because rc.2 rejects a
+ * missing budget at the type level.
+ */
+const MCP_CLOSE_TIMEOUT_MS = 5_000
+
+/**
  * Install the vectr MCP connection for one agent. Re-reads the registry on
  * every call so a daemon restart (new port / new pid) is picked up by the next
  * `agent/created` or seed without a Host reload.
@@ -533,8 +560,10 @@ export function install(
         url: `http://${host}:${port}/mcp`,
         headers: {},
         toolCallTimeoutMs: config.toolCallTimeoutMs,
+        closeTimeoutMs: MCP_CLOSE_TIMEOUT_MS,
+        expandTemplates: false,
         failOnStartupError: false,
-      }, policy)
+      }, policy, createConnectionStatusCell(ctx, `session ${agent.id}`))
 
       void conn.ready.then((outcome) => {
         if (outcome.error !== undefined) {
@@ -656,8 +685,10 @@ export async function installCodebaseConnections(
         url: `http://127.0.0.1:${entry.localPort}/mcp`,
         headers: {},
         toolCallTimeoutMs: config.toolCallTimeoutMs,
+        closeTimeoutMs: MCP_CLOSE_TIMEOUT_MS,
+        expandTemplates: false,
         failOnStartupError: false,
-      }, policy)
+      }, policy, createConnectionStatusCell(ctx, `codebase ${entry.serverName}`))
       void conn.ready.then((outcome) => {
         if (outcome.error !== undefined) {
           const message = `vectr-client: codebase connection failed for session ${agent.id} (serverName=${entry.serverName}, port=${entry.localPort}): ${String(outcome.error)}`

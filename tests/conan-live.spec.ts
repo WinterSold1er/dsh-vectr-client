@@ -19,6 +19,35 @@ async function isConanReachable(): Promise<boolean> {
   })
 }
 
+/**
+ * Read the conan daemon's port from the same remote registry the plugin reads.
+ * The port is remote environment state (a daemon restart reallocates it), so
+ * the live assertion compares against that registry instead of a stale
+ * constant.
+ *
+ * @returns the remote port for the vnm_gui workspace, or undefined when the
+ * remote registry does not list it.
+ */
+async function remoteDaemonPort(): Promise<number | undefined> {
+  const proc = spawn('ssh', [
+    '-o', 'ConnectTimeout=2', '-o', 'BatchMode=yes', 'conan',
+    'cat', '~/.vectr/instances.json',
+  ])
+  const chunks: Buffer[] = []
+  proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+  const code = await new Promise<number | null>(resolve => proc.on('close', resolve))
+  if (code !== 0) return undefined
+  try {
+    const registry = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, { workspace?: string, port?: number }>
+    for (const value of Object.values(registry)) {
+      if (value.workspace === '/home/edogawaconan/Code/Work/vnm_gui') return value.port
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
 describe('Live Conan Integration Verification', () => {
   let tempDir: string | undefined
   let metaPath: string
@@ -84,8 +113,15 @@ describe('Live Conan Integration Verification', () => {
     expect(entry.host).toBe('conan')
     expect(entry.status).toBe('up')
 
-    // 2. Verify remote port was resolved from remote instances.json
-    expect(entry.remotePort).toBe(8767)
+    // 2. Verify remote port was resolved from remote instances.json (the
+    //    remote daemon reallocates its port on restart, so compare with the
+    //    live registry rather than a hardcoded constant).
+    const expectedRemotePort = await remoteDaemonPort()
+    if (expectedRemotePort === undefined) {
+      console.warn('Skipping remote-port assertion: conan registry does not list the workspace')
+    } else {
+      expect(entry.remotePort).toBe(expectedRemotePort)
+    }
 
     // 3. Verify local port allocation
     expect(entry.localPort).toBeGreaterThanOrEqual(8900)

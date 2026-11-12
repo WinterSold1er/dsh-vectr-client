@@ -21,6 +21,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -129,18 +131,11 @@ describe('vectr-client real composition', () => {
         liveContexts.add(bootCtx)
         bootCtx.loader.builtins['vectr-test-system-prompt'] = SystemPrompt
         bootCtx.loader.builtins['vectr-test-tools'] = ToolRuntime
+        bootCtx.loader.builtins['vectr-test-tool-executor'] = NativeToolExecutor
         bootCtx.loader.builtins['vectr-test-llm'] = LlmRuntime
         bootCtx.loader.builtins['vectr-test-session'] = SessionStore
         bootCtx.loader.builtins['vectr-test-agent'] = AgentRegistry
-        bootCtx.loader.builtins['vectr-test-session-projections'] = {
-          name: 'vectr-test-session-projections',
-          apply(c: Context) {
-            c.provide('sessionProjections', {
-              register: () => {},
-              stateOf: () => undefined,
-            })
-          },
-        }
+        bootCtx.loader.builtins['vectr-test-session-projections'] = SessionProjectionRegistry
         bootCtx.loader.builtins['vectr-test-agent-loop'] = AgentLoop
         bootCtx.loader.builtins['vectr-test-vectr-client'] = vectrClient
       },
@@ -164,15 +159,14 @@ describe('vectr-client real composition', () => {
     expect(ctx.tools.get('mcp__vectr__vectr_search')).toBeUndefined()
 
     // Execute it through the scoped dispatcher.
-    const result = await ctx.tools.execute({
+    const batch = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('vectr-composition-call-1'),
-      name: 'mcp__vectr__vectr_search',
-      arguments: { query: 'lock acquisition' },
       agent,
+      calls: [{ type: 'tool-call', id: CallId('vectr-composition-call-1'), name: 'mcp__vectr__vectr_search', arguments: JSON.stringify({ query: 'lock acquisition' }) }],
     })
-    expect(result.isError).toBe(false)
-    const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+    const settled = batch.results[0]
+    expect(settled?.result.isError).toBe(false)
+    const text = (settled?.result.content ?? []).flatMap(block => block.type === 'text' ? [block.text] : []).join('')
     expect(text).toContain('search:lock acquisition')
 
     // Disposing the agent unwinds the scoped tools.

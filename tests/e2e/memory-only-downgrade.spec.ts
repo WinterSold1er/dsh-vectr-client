@@ -34,10 +34,26 @@ function normMode(mode: unknown): string {
   return String(mode ?? '').trim().toLowerCase().replace(/-/g, '_')
 }
 
+/**
+ * Decide whether the live host can serve this spec.
+ *
+ * An authenticated deployment answers 401/403 to every unauthenticated route:
+ * the environment cannot provide an unauthenticated host, so the spec skips
+ * instead of reporting an authorization failure as a vectr regression. Any
+ * other reachable response keeps the spec running so real breakage fails.
+ *
+ * @returns true when the vectr route answers without auth.
+ */
 async function hostReachable(): Promise<boolean> {
   try {
-    const res = await fetch(HOST, { signal: AbortSignal.timeout(3_000) })
+    const res = await fetch(`${HOST}/api/vectr/session-status?workspace=${encodeURIComponent(WORKSPACE)}`, {
+      signal: AbortSignal.timeout(3_000),
+    })
     await res.text()
+    if (res.status === 401 || res.status === 403) {
+      console.warn(`Skipping live host e2e: ${HOST} requires authentication (HTTP ${res.status})`)
+      return false
+    }
     return true
   } catch {
     return false

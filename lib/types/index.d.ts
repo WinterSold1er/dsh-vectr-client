@@ -203,12 +203,6 @@ export declare const VECTR_GREP_SECTION_ORDER = 1500;
 export declare function getVectrGrepText(serverName?: string): string;
 export declare const VECTR_GREP_SECTION_TEXT: string;
 /**
- * @see ./registry.ts for `resolveInstance` / `readInstancesFile`.
- * @see ./probe.ts for `isPortListening` / `isDaemonAlive` / `diagnoseDaemon`.
- * These were migrated out of this file; it re-exports them above and only
- * wires the plugin together.
- */
-/**
  * Install the vectr MCP connection for one agent. Re-reads the registry on
  * every call so a daemon restart (new port / new pid) is picked up by the next
  * `agent/created` or seed without a Host reload.

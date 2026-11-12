@@ -18,6 +18,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -42,6 +44,8 @@ async function mountRegistry(): Promise<Context> {
   await ctx.plugin(SystemPrompt, { persona: '' })
   await ctx.plugin(SessionStore)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   return ctx
 }
@@ -174,15 +178,14 @@ describe('vectr-client scoped registration', () => {
     expect(globalAssembly.tools.map(t => t.name)).not.toContain('mcp__vectr__vectr_search')
 
     // Execute through the scoped dispatcher.
-    const result = await ctx.tools.execute({
+    const batch = await ctx.tools.execute({
       signal: testToolSignal,
-      callId: CallId('vectr-call-1'),
-      name: 'mcp__vectr__vectr_search',
-      arguments: { query: 'lock acquisition' },
       agent,
+      calls: [{ type: 'tool-call', id: CallId('vectr-call-1'), name: 'mcp__vectr__vectr_search', arguments: JSON.stringify({ query: 'lock acquisition' }) }],
     })
-    expect(result.isError).toBe(false)
-    const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+    const settled = batch.results[0]
+    expect(settled?.result.isError).toBe(false)
+    const text = (settled?.result.content ?? []).flatMap(block => block.type === 'text' ? [block.text] : []).join('')
     expect(text).toContain('search:lock acquisition')
 
     // Disposal unwinds the tools (scope first, then the registry edge).

@@ -24,7 +24,7 @@ import type { ReactElement } from 'react'
 
 /** react-dom @ 18.3.1 inside the local dsh checkout, resolvable without a root install. */
 const REACT_DOM_DIR =
-  '/home/csy/Code/installer/deepseek-harness/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom'
+  '/home/csy/Code/installer/deepseek-harness-0.2.2-rc.2/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom'
 
 const requireFromReactDom = createRequire(`${REACT_DOM_DIR}/package.json`)
 

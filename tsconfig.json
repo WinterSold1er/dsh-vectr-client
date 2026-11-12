@@ -23,7 +23,8 @@
     "outDir": "lib/types",
     "paths": {
       "@deepseek-ai/dsh-util-values": ["./node_modules/@deepseek-ai/dsh-util-values"],
-      "@deepseek-ai/dsh-mcp-client/src/connection.ts": ["./node_modules/@deepseek-ai/dsh-mcp-client/lib/types/connection.d.ts"]
+      "@deepseek-ai/dsh-mcp-client/src/connection.ts": ["./node_modules/@deepseek-ai/dsh-mcp-client/lib/types/connection.d.ts"],
+      "@deepseek-ai/dsh-mcp-client/src/status.ts": ["./node_modules/@deepseek-ai/dsh-mcp-client/lib/types/status.d.ts"]
     }
   },
   "include": ["src"],
