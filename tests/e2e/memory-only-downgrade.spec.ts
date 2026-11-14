@@ -8,12 +8,23 @@
  * Do NOT add a restore-to-full step. Re-running is safe and expected: the route
  * re-persists memory-only and still returns a decidable success (idempotent).
  *
- * The spec self-skips (like tests/live-e2e.spec.ts) when the live host is absent,
- * so other machines / CI do not fail on an environment they cannot provide.
+ * The self-skips (like tests/live-e2e.spec.ts) so other machines / CI do not fail
+ * on an environment they cannot provide — and so a routine `pnpm test` on a machine
+ * that DOES have a live host does not restart that host's daemons. See LIVE_OPT_IN.
  */
 import { describe, expect, it } from 'vitest'
 
 const HOST = process.env.VECTR_E2E_HOST ?? 'http://127.0.0.1:3080'
+/**
+ * Second gate: a reachable host is not a licence to mutate it. The downgrade route
+ * restarts a real daemon and rewrites the real ~/.vectr/instances.json, which is
+ * what the route is for — and what makes `pnpm test` non-hermetic. So the live
+ * assertions run only when explicitly asked for:
+ *   VECTR_E2E_LIVE=1 pnpm vitest run tests/e2e/memory-only-downgrade.spec.ts
+ * The state this spec enforces (memory_only for /home/csy) lives in the registry,
+ * not in this file, so skipping it neither hides a regression nor undoes it.
+ */
+const LIVE_OPT_IN = process.env.VECTR_E2E_LIVE === '1'
 const WORKSPACE = '/home/csy'
 const TEST_TIMEOUT = 60_000
 
@@ -81,7 +92,14 @@ async function postDowngrade(body: unknown): Promise<{ status: number; json: Rec
   return { status: res.status, json: (await res.json()) as Record<string, unknown> }
 }
 
-describe.skipIf(!hostUp)('live host: memory-only downgrade for /home/csy', () => {
+if (!LIVE_OPT_IN && hostUp) {
+  console.log(
+    'vectr e2e: skipping the live downgrade spec — it restarts a real daemon on the running host. ' +
+    'Run it on purpose with VECTR_E2E_LIVE=1.',
+  )
+}
+
+describe.skipIf(!LIVE_OPT_IN || !hostUp)('live host: memory-only downgrade for /home/csy', () => {
   it('downgrades /home/csy to memory_only and keeps working memory readable', async () => {
     const before = await getSessionStatus()
     expect(before.workspace).toBe(WORKSPACE)

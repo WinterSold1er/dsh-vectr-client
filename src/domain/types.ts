@@ -198,6 +198,12 @@ export interface VectrStartOptions {
   workspace: string
   /** Whether to start in memory-only mode (--memory-only). */
   memoryOnly?: boolean | undefined
+  /**
+   * Whether to start in search-only mode (--search-only): code search without
+   * working memory. Mutually exclusive with {@link VectrStartOptions.memoryOnly}
+   * — the runner refuses both rather than emitting two mode flags.
+   */
+  searchOnly?: boolean | undefined
   /** Additional roots to index. */
   extraRoots?: string[] | undefined
 }

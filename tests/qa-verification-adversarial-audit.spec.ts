@@ -6,6 +6,7 @@
  */
 
 import { createServer, type Server } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -84,23 +85,45 @@ function makeMockAgent(id: string, cwd?: string) {
 const roots: string[] = []
 let mockHttpServer: Server
 let mockHttpPort: number
+/**
+ * A workspace may legitimately run a SECOND (or third) daemon, and the codebase
+ * fixtures below bind entries to those daemons. Their ports must be real listeners:
+ * `healLocalCodebase` probes the recorded port, and a port nobody listens on is not a
+ * live second daemon — it is stale metadata, which heal is entitled to repair (and
+ * which would make the fixture's outcome depend on whether heal won the race with the
+ * first bind).
+ */
+let mockSecondServer: Server
+let mockSecondPort: number
+let mockThirdServer: Server
+let mockThirdPort: number
+
+function mockDaemonHandler(_req: IncomingMessage, res: ServerResponse): void {
+  res.statusCode = 200
+  res.setHeader('content-type', 'application/json')
+  res.end(JSON.stringify({ fully_ready: true }))
+}
+
+async function listenOnEphemeralPort(server: Server): Promise<number> {
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  return (server.address() as AddressInfo).port
+}
 
 beforeAll(async () => {
-  mockHttpServer = createServer((_req, res) => {
-    res.statusCode = 200
-    res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ fully_ready: true }))
-  })
-  await new Promise<void>((resolve) => {
-    mockHttpServer.listen(0, '127.0.0.1', () => {
-      mockHttpPort = (mockHttpServer.address() as AddressInfo).port
-      resolve()
-    })
-  })
+  mockHttpServer = createServer(mockDaemonHandler)
+  mockHttpPort = await listenOnEphemeralPort(mockHttpServer)
+  mockSecondServer = createServer(mockDaemonHandler)
+  mockSecondPort = await listenOnEphemeralPort(mockSecondServer)
+  mockThirdServer = createServer(mockDaemonHandler)
+  mockThirdPort = await listenOnEphemeralPort(mockThirdServer)
 })
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => mockHttpServer.close(() => resolve()))
+  await Promise.all([
+    new Promise<void>((resolve) => mockHttpServer.close(() => resolve())),
+    new Promise<void>((resolve) => mockSecondServer.close(() => resolve())),
+    new Promise<void>((resolve) => mockThirdServer.close(() => resolve())),
+  ])
 })
 
 afterEach(async () => {
@@ -419,10 +442,17 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
 
       await writeFile(instancesPath, JSON.stringify({
         'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+        'key-2': { workspace: ws, port: mockSecondPort, pid: process.pid },
+        'key-3': { workspace: ws, port: mockThirdPort, pid: process.pid },
       }))
       await writeFile(codebasesPath, JSON.stringify([
-        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws },
-        { id: 'cb2', slug: 'cb-2', type: 'local', path: ws, serverName: 'cb_2', status: 'up', localPort: mockHttpPort, workspace: ws },
+        // Ports distinct from the workspace's own primary daemon (mockHttpPort): an
+        // entry that mirrors the endpoint the main connection already dials is now
+        // skipped as a duplicate registration, so this teardown test needs two real
+        // second daemons — each with a listener AND its own record in the registry,
+        // which is what keeps `startupHeal` from rewriting them onto the primary port.
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockSecondPort, workspace: ws },
+        { id: 'cb2', slug: 'cb-2', type: 'local', path: ws, serverName: 'cb_2', status: 'up', localPort: mockThirdPort, workspace: ws },
       ]))
 
       const ctx = new Context()
@@ -437,7 +467,12 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
 
       apply(ctx, {
         instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
         codebasesPath,
+        // Sweep off: the production sweep's workspace discovery reads the real DSH
+        // workspace list, so a temporary registry here means `vectr start` on real
+        // workspaces + a real `~/.vectr/instances.json` rewrite.
+        autoStartDaemons: false,
       })
 
       const mainDispose = vi.fn().mockResolvedValue(undefined)
@@ -481,10 +516,13 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
       await writeFile(instancesPath, JSON.stringify({
         'key-1': { workspace: ws1, port: mockHttpPort, pid: process.pid },
         'key-2': { workspace: ws2, port: mockHttpPort, pid: process.pid },
+        // Each workspace has a second daemon of its own: live port + registry record.
+        'key-3': { workspace: ws1, port: mockSecondPort, pid: process.pid },
+        'key-4': { workspace: ws2, port: mockThirdPort, pid: process.pid },
       }))
       await writeFile(codebasesPath, JSON.stringify([
-        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws1, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws1 },
-        { id: 'cb2', slug: 'cb-2', type: 'local', path: ws2, serverName: 'cb_2', status: 'up', localPort: mockHttpPort, workspace: ws2 },
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws1, serverName: 'cb_1', status: 'up', localPort: mockSecondPort, workspace: ws1 },
+        { id: 'cb2', slug: 'cb-2', type: 'local', path: ws2, serverName: 'cb_2', status: 'up', localPort: mockThirdPort, workspace: ws2 },
       ]))
 
       const ctx = new Context()
@@ -499,7 +537,12 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
         teardownDisposer = fn()
       }) as any)
 
-      apply(ctx, { instancesPath, codebasesPath })
+      apply(ctx, {
+        instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
+        codebasesPath,
+        autoStartDaemons: false,
+      })
 
       const disposers: Mock[] = []
       startConnectionMock.mockImplementation(() => {
@@ -540,9 +583,13 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
 
       await writeFile(instancesPath, JSON.stringify({
         'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+        'key-2': { workspace: ws, port: mockSecondPort, pid: process.pid },
       }))
       await writeFile(codebasesPath, JSON.stringify([
-        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws },
+        // A distinct port: an entry mirroring the main daemon endpoint is skipped as
+        // a duplicate, and this test needs a codebase connection to dispose — so the
+        // distinct port is a second daemon the registry actually lists.
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockSecondPort, workspace: ws },
       ]))
 
       const ctx = new Context()
@@ -555,7 +602,12 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
         if (evt === 'agent/disposed') disposedHandler = fn
       }) as any)
 
-      apply(ctx, { instancesPath, codebasesPath })
+      apply(ctx, {
+        instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
+        codebasesPath,
+        autoStartDaemons: false,
+      })
 
       startConnectionMock.mockImplementation(() => {
         return {
@@ -853,9 +905,13 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
 
       await writeFile(instancesPath, JSON.stringify({
         'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+        'key-2': { workspace: ws, port: mockSecondPort, pid: process.pid },
       }))
       await writeFile(codebasesPath, JSON.stringify([
-        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws },
+        // Distinct port so each of the 50 agents gets a main + a codebase connection;
+        // an entry mirroring its own main daemon endpoint would be skipped. It is a
+        // second daemon of the workspace, listed in the registry like a real one.
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockSecondPort, workspace: ws },
       ]))
 
       const ctx = new Context()
@@ -872,7 +928,12 @@ describe('QA Adversarial Audit: Core Requirements & Invariants', () => {
         teardownDisposer = fn()
       }) as any)
 
-      apply(ctx, { instancesPath, codebasesPath })
+      apply(ctx, {
+        instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
+        codebasesPath,
+        autoStartDaemons: false,
+      })
 
       const AGENT_COUNT = 50
       const activeAgents: Agent[] = []

@@ -7,7 +7,9 @@
  * - prompt-anchored recall (`UserPromptSubmit` equivalent) once per turn;
  * - tool-anchored gotcha recall after `edit`/`write`/`bash`, delivered through
  *   `tools/post-execute` `additionalContexts` (the only host seam that can
- *   attach context near a tool call — `tools/pre-execute` can only deny);
+ *   attach context near a tool call: `tools/pre-execute` is a gate, not a
+ *   channel — its `PreToolDecision` has four states, `allow` / `deny` /
+ *   `cancel` / `ask`, and none of them carries context to the model);
  * - compaction lifecycle: snapshot + trigger reset, then a boot re-delivery.
  *
  * Every network call is bounded and degrades to "inject nothing". Failures

@@ -28,12 +28,15 @@ import { type InstancesFile } from './registry';
 import { type AliveDiagnosis } from './probe';
 import type { InstanceEntry, StartResult, VectrStartOptions } from './domain';
 import { HostInjector } from './injection';
+import { type ModeHarvestResult, type PersistedMode } from './modes';
 export * from './domain';
 export * from './infra';
 export * from './bridge';
 export { isDaemonAlive, isPortListening } from './probe';
 export { readInstancesFile, resolveInstance, resolveInstanceExact, DEFAULT_INSTANCES_FILE, WORKSPACE_KEY_LENGTH } from './registry';
 export type { InstanceEntry, InstancesFile } from './registry';
+export { DEFAULT_MODES_FILE, readModes, writeMode, lookupMode, harvestFromInstances, modeStartFlags, resolveStartMode, isPersistedMode, toPersistedMode } from './modes';
+export type { PersistedMode, ModeHarvestConflict, ModeHarvestResult } from './modes';
 export { ensureTunnelUp, healLocalCodebase, probeTunnel, startLocalDaemon, startRemoteDaemon, startCodebaseDaemon, DEFAULT_TUNNEL_PROBE_MS, withLocalDaemonLock, _resetLocalDaemonLockForTests } from './codebases';
 export type { TunnelHealth, EnsureTunnelResult, TestCodebaseOpts, DaemonAliveProbe, LocalDaemonStartOutcome, RemoteDaemonStartOutcome, LocalHealResult, RecordedPortLookup } from './codebases';
 /**
@@ -88,6 +91,13 @@ export interface Config {
     codebasesPath?: string;
     /** Path of the file-backed secret store (feature B; default `~/.dsh/vectr-secrets.json`). */
     secretsPath?: string;
+    /**
+     * Path of the plugin-side daemon STARTUP MODE store (default
+     * `~/.dsh/vectr-modes.json`). The plugin remembers `memory_only` /
+     * `search_only` / `full` per workspace here because the daemon registry keeps
+     * `mode` only while the daemon is alive.
+     */
+    modesPath?: string;
     /** HTTP `/v1/status` liveness-probe budget in ms (default 5000); below the known hang window so a hung daemon is judged dead. */
     daemonHttpTimeoutMs?: number;
     /** TCP port-listening probe budget in ms (default 300). */
@@ -104,7 +114,7 @@ export interface Config {
     autoStartDaemons?: boolean;
     /** Boot-recall budget in ms for the first step of a session (default 1500). */
     bootRecallTimeoutMs?: number;
-    /** Prompt-anchored recall budget in ms for each user turn (default 400). */
+    /** Prompt-anchored recall budget in ms for each user turn (default 6000; see {@link DEFAULT_PROMPT_RECALL_TIMEOUT_MS}). */
     promptRecallTimeoutMs?: number;
     /** Tool-anchored gotcha recall budget in ms (default 300). */
     toolRecallTimeoutMs?: number;
@@ -130,6 +140,21 @@ export declare const DEFAULT_CLI_TIMEOUT_MS = 30000;
 export declare const DEFAULT_RECALL_TIMEOUT_MS = 10000;
 /** Default Vectr workspace upgrade timeout in ms (default 15,000). */
 export declare const DEFAULT_UPGRADE_TIMEOUT_MS = 15000;
+/**
+ * Default per-turn prompt-anchored recall budget in ms (default 6,000).
+ *
+ * Why 6,000 and not 400: measured `/v1/recall` latency on a live indexed
+ * workspace is 1.7–4.7 s — 1 889 / 2 238 / 4 665 / 3 035 / 2 626 / 3 428 /
+ * 3 459 ms — every one of them HTTP 200 carrying notes. A 400 ms budget sits
+ * below every observed response, so the per-turn recall timed out on *every*
+ * prompt. Each timeout is recorded as a recall failure, three failures open
+ * the injection breaker (`BREAKER_FAILURE_LIMIT` / `BREAKER_OPEN_MS`,
+ * src/injection.ts) and the second strike sets `disabledUntil =
+ * Number.POSITIVE_INFINITY`, disabling injection for the rest of the session.
+ * 6 000 ms clears the slowest observed recall with ~1.3 s of headroom and is
+ * still well under the tool-call timeout. Override it with `promptRecallTimeoutMs`.
+ */
+export declare const DEFAULT_PROMPT_RECALL_TIMEOUT_MS = 6000;
 /** (b) Minimum interval between startup-time heal attempts for the same slug.
  * Prevents a persistently-unreachable host from being hammered on every host
  * restart while still leaving room for transient blips to recover. */
@@ -222,6 +247,18 @@ disposed?: WeakSet<Agent>, codebaseBoundAgents?: WeakSet<Agent>, codebaseHandles
 /** Dynamic working-memory injection; omitted by unit tests that only exercise prompt sections. */
 injector?: HostInjector): void;
 /**
+ * Identity of a vectr daemon endpoint (`host:port`) as it is actually dialled.
+ *
+ * The endpoint is what determines the tool schema an MCP registration produces, so it
+ * is the dedupe key for bindings. The owning workspace is not: one workspace may own
+ * several daemons (that is the multi-codebase feature), while a codebase entry can
+ * mirror the very daemon the main connection already serves.
+ * @param host - host as recorded for the connection; undefined means DEFAULT_HOST.
+ * @param port - TCP port of the daemon endpoint.
+ * @returns the normalized `host:port` key.
+ */
+export declare function mcpEndpointKey(host: string | undefined, port: number): string;
+/**
  * Connect the agent to every persisted codebase entry with `status === 'up'`.
  * Each entry exposes a Streamable HTTP MCP endpoint at
  * `http://127.0.0.1:<localPort>/mcp`; registration uses the entry's
@@ -231,8 +268,75 @@ injector?: HostInjector): void;
  * @param config - resolved plugin configuration.
  * @param agent - the agent to bind the codebase tools to.
  * @param codebasesPath - absolute path of the codebase metadata file.
+ * @param mainEndpoint - normalized `host:port` of the daemon the main
+ *   `config.serverName` connection is being bound to for this agent; a codebase
+ *   entry that resolves to the same endpoint is skipped instead of registering
+ *   the same tools a second time. Undefined when no main connection covers it.
  */
-export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string, disposed?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>): Promise<void>;
+export declare function installCodebaseConnections(ctx: Context, config: Required<Config>, agent: Agent, codebasesPath: string, instances?: InstancesFile, cwd?: string, disposed?: WeakSet<Agent>, codebaseHandles?: Map<Agent, ConnectionHandle[]>, mainEndpoint?: string): Promise<void>;
+/**
+ * What the daemon registry actually says about ONE local codebase entry's port.
+ * - `reconcile`          — the registry has a daemon for the directory this entry
+ *                          serves and the entry does not point at it: stale metadata.
+ * - `own-port-registered` — the entry's own port is one the registry already
+ *                          lists for that directory: nothing is stale, the owning
+ *                          workspace simply has more than one daemon.
+ * - `no-truth`           — no registry view applies (unreadable registry, an entry
+ *                          that names no directory, or no record for it).
+ */
+export type LocalRegistryTruth = {
+    readonly kind: 'reconcile';
+    readonly port: number;
+} | {
+    readonly kind: 'own-port-registered';
+    readonly port: number;
+} | {
+    readonly kind: 'no-truth';
+};
+/**
+ * Ports the daemon registry attributes to one directory.
+ *
+ * A record's stored `workspace` is the directory that daemon serves — the `--path`
+ * it was started with — so this asks "which ports serve THIS directory", not "which
+ * ports belong to the owning workspace a codebase entry is filed under".
+ *
+ * `resolveInstanceExact` answers "which daemon serves this workspace" with a
+ * SINGLE record, because vectr keys `instances.json` by `sha256(cwd)[:12]`. The
+ * file can still describe several daemons of one workspace: records under
+ * foreign keys whose stored `workspace` is equal (trailing-slash tolerant) are
+ * precisely the shape `resolveInstanceExact`'s own fallback exists to honor.
+ * Reconciling against only the first of them would collapse the workspace into
+ * one daemon. Matching is the same exact-string rule, never the prefix match of
+ * `resolveInstance` (that one hands every record-less codebase the enclosing
+ * `/home/csy` daemon's port).
+ */
+export declare function workspaceDaemonPorts(instances: InstancesFile, workspace: string): number[];
+/**
+ * Registry truth for ONE local codebase entry, as consumed by
+ * {@link healLocalCodebase}'s `recordedPort` parameter.
+ *
+ * The lookup used to be keyed by workspace alone: `instances[workspace].port`,
+ * which is fine while a workspace has one daemon and destructive when it has
+ * more. A codebase entry created for a SECOND daemon of that workspace records
+ * that daemon's own port, and a workspace-only lookup reports the primary
+ * record instead — so heal declared the entry stale, rewrote `localPort` and
+ * PERSISTED the rewrite into `vectr-codebases.json`. Several daemons of one
+ * workspace silently collapsed into one, with the user's metadata rewritten to
+ * match.
+ *
+ * The lookup is keyed on {@link daemonDirectoryOf} instead — the directory the
+ * daemon actually serves, which is what the registry keys its records by — and the
+ * entry is declared stale only when its own port is NOT one the registry already
+ * lists for that directory. When it is, the entry agrees with the registry about a
+ * live daemon and there is nothing to fix: `own-port-registered` is returned, no
+ * lookup is handed to heal, and the metadata stays untouched. A stale or dead port
+ * (not listed for the directory) still reconciles to the primary record exactly as
+ * before, which is the behavior the original defect-fix needed: a recorded port
+ * answering for a DIFFERENT directory is a port another daemon is squatting, and a
+ * TCP/HTTP probe cannot tell that apart — see the `RecordedPortLookup` contract
+ * in `codebases.ts`.
+ */
+export declare function localRegistryTruth(instances: InstancesFile | undefined, entry: Pick<CodebaseEntry, 'workspace' | 'path' | 'localPort'>): LocalRegistryTruth;
 /**
  * Run the startup heal across all eligible codebases in the metadata registry.
  * Local codebases are processed strictly sequentially (`for ... of` with `await`),
@@ -240,6 +344,20 @@ export declare function installCodebaseConnections(ctx: Context, config: Require
  * Remote codebase tunnels continue to be kicked off in the background.
  */
 export declare function startupHeal(deps: CodebaseDeps, codebasesPath: string, instancesPath: string, ctx: Context, config: Required<Config>): Promise<void>;
+/**
+ * Turn a mode harvest into log output (boot path: {@link apply}). Split out of
+ * the boot sequence so the diagnostics — the part an operator actually needs
+ * when a remembered mode and the live registry disagree — are testable without
+ * booting the plugin, and so a store that could not be written is never
+ * indistinguishable from a store that had nothing to write.
+ * @param logger - host logger (production: `ctx.logger`).
+ * @param modesPath - the store path, named in every message so a warn is actionable.
+ * @param harvest - the {@link ModeHarvestResult} from {@link harvestFromInstances}.
+ */
+export declare function reportModeHarvest(logger: {
+    info: (message: string) => void;
+    warn: (message: string) => void;
+}, modesPath: string, harvest: ModeHarvestResult): void;
 /**
  * The vectr-client plugin entry: seed already-live agents, watch
  * `agent/created` / `agent/disposed`, and close every connection on teardown.
@@ -307,6 +425,18 @@ export interface StartAllDeps {
     discover: () => DiscoveredWorkspace[];
     /** Optional warn sink for a non-fatal event (a throwing `discover`); absent in tests. */
     warn?: (message: string) => void;
+    /**
+     * Mode remembered by the plugin for a workspace path (production: the mode
+     * store, src/modes.ts). Absent in tests and for direct use: without it the
+     * sweep reads the mode off the registry exactly as before.
+     */
+    modeLookup?: (workspace: string) => PersistedMode | undefined;
+    /**
+     * Persist the mode an explicit request chose for a workspace the sweep just
+     * started, so the choice survives the next prune + restart. Optional: absent
+     * in tests unless the spec is about mode persistence.
+     */
+    recordMode?: (workspace: string, mode: PersistedMode) => void;
 }
 /**
  * Start the vectr daemon for every known workspace — registry entries plus
@@ -398,13 +528,18 @@ discover?: () => DiscoveredWorkspace[]): void;
  *
  * @param ctx - plugin context (for `credentials` lookup + logger).
  * @param secretsPath - fallback secret file path.
+ * @param modesPath - plugin mode store path; when given, every start path in
+ *   `codebases.ts` (startup heal, local-daemon restart, codebase create) emits
+ *   the mode the user chose. Omitted -> no `modeLookup` -> no mode flag, i.e.
+ *   the pre-L2 behaviour, which is what the existing specs assert.
  * @returns the assembled {@link CodebaseDeps}-compatible runners + store.
  */
-export declare function buildCodebaseDeps(ctx: Context, secretsPath: string): {
+export declare function buildCodebaseDeps(ctx: Context, secretsPath: string, modesPath?: string): {
     spawnRunner: SpawnRunner;
     sshRunner: SshRunner;
     credStore: CredentialStore;
     warn: (message: string) => void;
+    modeLookup?: (dir: string) => PersistedMode | undefined;
 };
 /**
  * Extract the codebase slug from a request pathname. Strips the codebase route
@@ -437,5 +572,6 @@ export declare function slugFromPathname(pathname: string): string;
  */
 export declare function registerCodebaseRoutes(ctx: Context, codebasesPath: string, secretsPath: string, instancesPath?: string, config?: {
     daemonHttpTimeoutMs?: number;
+    modesPath?: string;
 }): void;
 //# sourceMappingURL=index.d.ts.map

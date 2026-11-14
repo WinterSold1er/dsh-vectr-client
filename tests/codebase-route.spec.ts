@@ -23,11 +23,17 @@ type Registration = { kind: 'exact' | 'prefix'; path: string; handler: (req: unk
 let tmp: string
 let codebasesPath: string
 let secretsPath: string
+// The routes read and prune the daemon registry, so it has to be a scratch file:
+// left to the default, these tests rewrite the real ~/.vectr/instances.json.
+let instancesPath: string
+let modesPath: string
 
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), 'vectr-route-'))
   codebasesPath = join(tmp, 'codebases.json')
   secretsPath = join(tmp, 'secrets.json')
+  instancesPath = join(tmp, 'instances.json')
+  modesPath = join(tmp, 'vectr-modes.json')
   await writeFile(codebasesPath, '[]')
   await writeFile(secretsPath, '{}')
 })
@@ -64,7 +70,7 @@ function captureRegistrations(): Registration[] {
     effect: (fn: () => unknown) => fn(),
     logger: { warn() {}, info() {}, error() {} },
   } as unknown as Context
-  registerCodebaseRoutes(ctx, codebasesPath, secretsPath)
+  registerCodebaseRoutes(ctx, codebasesPath, secretsPath, instancesPath, { modesPath })
   return registrations
 }
 

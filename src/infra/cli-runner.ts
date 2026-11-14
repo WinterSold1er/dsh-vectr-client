@@ -102,8 +102,16 @@ export class VectrCliRunner implements IVectrCliRunner {
 
     const args: string[] = ['start', '--path', options.workspace]
 
+    // Two mode flags on one `vectr start` is contradictory; refuse it instead of
+    // letting the CLI's own precedence decide what the daemon ends up as.
+    if (options.memoryOnly === true && options.searchOnly === true) {
+      return { ok: false, error: 'start: memoryOnly and searchOnly are mutually exclusive' }
+    }
+
     if (options.memoryOnly === true) {
       args.push('--memory-only')
+    } else if (options.searchOnly === true) {
+      args.push('--search-only')
     }
 
     if (options.extraRoots && options.extraRoots.length > 0) {

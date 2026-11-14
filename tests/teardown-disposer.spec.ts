@@ -182,9 +182,14 @@ async function bootDisposer(entry: Omit<CodebaseEntry, 'localPort'>): Promise<{
   apply(ctx, {
     // instancesPath points at a MISSING file: the registry is absent, so no
     // migration / seeding / bind runs and the test stays on the disposer.
+    // modesPath is temporary for the same reason (the boot harvest writes it), and
+    // the sweep is off: its workspace discovery reads the real DSH workspace list,
+    // so it would `vectr start` real workspaces and rewrite the real registry.
     instancesPath: join(dir, 'instances.json'),
+    modesPath: join(dir, 'vectr-modes.json'),
     codebasesPath: join(dir, 'codebases.json'),
     secretsPath: join(dir, 'secrets.json'),
+    autoStartDaemons: false,
   })
   const factory = connectionsFactory() as () => () => Promise<void>
   const disposer = factory()

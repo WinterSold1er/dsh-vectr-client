@@ -19,6 +19,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { isPortListening } from './probe'
 import { DEFAULT_HOST, WORKSPACE_KEY_LENGTH, resolveInstance, type InstancesFile } from './registry'
 import { isReservedPrimarySlug, isSystemPrimarySlug } from './domain'
+import { modeStartFlags, type PersistedMode } from './modes'
 import type {
   CodebaseAuth,
   CodebaseEntry,
@@ -112,6 +113,14 @@ export interface CodebaseDeps {
    * tunnel-port migration). Injected by the host so this module stays
    * logger-free; may be absent in tests and direct use. */
   warn?: (message: string) => void
+  /**
+   * Remembered startup mode of a daemon DIRECTORY (the same key
+   * {@link daemonDirectoryOf} produces). Optional: absent in tests and for
+   * direct use, which keeps `vectr start` mode-flag-free exactly as before.
+   * Production wires this to the plugin mode store (src/modes.ts) so a daemon
+   * this plugin starts comes back in the mode the user chose, not in `full`.
+   */
+  modeLookup?: (dir: string) => PersistedMode | undefined
 }
 
 /** Validation regex for a slug (also used to derive `serverName`). */
@@ -433,7 +442,14 @@ async function createCodebaseCore(
   const serverName = deriveServerName(workspace, spec.slug)
 
   if (spec.type === 'local') {
-    const handle = deps.spawnRunner('vectr', ['start', '--path', spec.path, '--json'])
+    // A brand-new codebase has no mode record yet, so this normally emits no
+    // flag (unchanged behaviour). It does honor one when it exists: re-creating
+    // an entry for a directory the user already downgraded must not bring it
+    // back as a full index.
+    // `lookupMode` normalizes the key itself (same rules as the mode store writes
+    // them), so the daemon directory is passed through untouched.
+    const flags = modeStartFlags(deps.modeLookup?.(daemonDirectoryOf({ workspace, path: spec.path }) ?? spec.path))
+    const handle = deps.spawnRunner('vectr', ['start', '--path', spec.path, ...flags, '--json'])
     const result = await handle.promise
     if (result.code !== 0) {
       takenServerNames.delete(serverName)
@@ -1116,11 +1132,37 @@ export type LocalHealResult = 'alive' | 'reconciled' | 'started'
 
 /**
  * Registry lookup for {@link healLocalCodebase}: the port `~/.vectr/instances.json`
- * records for this workspace, or `undefined` when the registry has no record.
- * The caller supplies the exact-match lookup — a prefix match would hand back the
- * enclosing `/home/csy` daemon's port for every record-less codebase.
+ * records for the directory this entry's daemon serves, or `undefined` when the
+ * registry has no record. The caller supplies the exact-match lookup — a prefix
+ * match would hand back the enclosing `/home/csy` daemon's port for every
+ * record-less codebase.
+ *
+ * The lookup is asked PER ENTRY, and it is the caller's job to report only what the
+ * registry actually says about that entry. An owning workspace can carry several
+ * daemons; when the entry's own recorded port is the one already listed for the
+ * directory it serves, the caller must return `undefined` rather than some other
+ * record's port, or heal would rewrite `localPort` and persist a collapse of those
+ * daemons into a single one. See `localRegistryTruth` in `index.ts`.
  */
-export type RecordedPortLookup = (workspace: string) => number | undefined
+export type RecordedPortLookup = (daemonPath: string) => number | undefined
+
+/**
+ * The directory a LOCAL entry's daemon is registered under — the string whose
+ * `sha256(...)[:12]` is its key in `~/.vectr/instances.json`, and the argument the
+ * {@link RecordedPortLookup} must be asked with.
+ *
+ * {@link startLocalDaemon} runs `vectr start --path entry.path`, so the daemon's
+ * cwd — its registry key and the `workspace` field of its record — is `entry.path`.
+ * `entry.workspace` is a DIFFERENT directory: the owning workspace, kept for
+ * per-workspace binding isolation only. Keying a registry lookup on it resolves
+ * every codebase of that group to whichever record happens to be primary.
+ *
+ * An entry with no usable path (legacy metadata) falls back to `workspace`, which
+ * is the only directory such an entry names.
+ */
+export function daemonDirectoryOf(entry: Pick<CodebaseEntry, 'workspace' | 'path'>): string | undefined {
+  return entry.path || entry.workspace
+}
 
 /**
  * Host-startup self-heal for ONE local codebase: make its recorded endpoint both
@@ -1138,6 +1180,19 @@ export type RecordedPortLookup = (workspace: string) => number | undefined
  *     `/home/csy`). Binding that URL points the codebase MCP at the wrong
  *     index, so the registry wins and the metadata is rewritten. No daemon is
  *     restarted here.
+ *     Reconciling a LIVE endpoint this way is deliberate and is not a probe
+ *     question the client can rely on. The typed `VectrStatus` (`domain/types.ts`)
+ *     has no field naming the served directory — but the live daemon DOES answer
+ *     `/v1/status` with a `workspace_root` (measured on this machine: 8774 →
+ *     `/home/csy/Code/Github/dsh-vectr-client`, 8786 → `/home/csy/Work/vnm`,
+ *     8787 → `/home/csy/Work/vnm_rust`, 8768 → `/home/csy/Code/Github/cloudcode-link-core`),
+ *     reachable only through that type's `[key: string]: unknown` escape hatch.
+ *     Reading it back — an identity-aware probe — is the FOLLOW-UP that would let
+ *     a live-but-wrong endpoint be detected without the registry; until then the
+ *     client must not depend on a field its own types do not declare, so only the
+ *     registry can tell "the daemon on this port is this codebase's daemon" from
+ *     "another directory's daemon squatted this port". That is why the caller
+ *     answers per entry — see {@link RecordedPortLookup}.
  *  2. LIVENESS. If the (now correct) endpoint answers, return without touching
  *     it — restarting a live daemon would steal the port from the sessions using
  *     it. Only a dead endpoint is started, through {@link startLocalDaemon},
@@ -1166,7 +1221,10 @@ export async function healLocalCodebase(
   return withLocalDaemonLock(async () => {
     const host = DEFAULT_HOST
 
-    const truth = recordedPort?.(entry.workspace ?? entry.path)
+    const daemonPath = daemonDirectoryOf(entry)
+    const truth = daemonPath === undefined || daemonPath === ''
+      ? undefined
+      : recordedPort?.(daemonPath)
     let target = entry
     let reconciled = false
     if (typeof truth === 'number' && truth !== entry.localPort) {
@@ -1224,7 +1282,13 @@ export async function startLocalDaemon(
   }
 
   return withLocalDaemonLock(async () => {
-    const handle = deps.spawnRunner('vectr', ['start', '--path', entry.path, '--json'])
+    // The mode key is the DAEMON DIRECTORY (`path || workspace`), the same key
+    // the registry sweep and the mode store use. No record -> no flag ->
+    // `vectr start`'s own `full` default, i.e. unchanged behaviour.
+    // `lookupMode` normalizes the key itself (same rules as the mode store writes
+    // them), so the daemon directory is passed through untouched.
+    const flags = modeStartFlags(deps.modeLookup?.(daemonDirectoryOf(entry) ?? entry.path))
+    const handle = deps.spawnRunner('vectr', ['start', '--path', entry.path, ...flags, '--json'])
     const result = await handle.promise
 
     // A signaled exit is never a success even when the code reads clean.

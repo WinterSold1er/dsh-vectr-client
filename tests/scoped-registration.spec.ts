@@ -27,6 +27,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import * as vectrClient from '../src/index.ts'
+import { deriveServerName } from '../src/codebases.ts'
 
 const testToolSignal = new AbortController().signal
 
@@ -160,6 +161,14 @@ describe('vectr-client scoped registration', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep here: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about (real daemons, real `~/.vectr/instances.json`).
+      // The codebase table is redirected for the same reason: boot heal walks it and
+      // would rewrite the real ~/.dsh/vectr-codebases.json.
+      // These tests are about tool scoping, not about auto-start.
+      autoStartDaemons: false,
     })
 
     // The plugin seeds live agents at load; discovery settles asynchronously.
@@ -227,6 +236,14 @@ describe('vectr-client scoped registration', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep here: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about (real daemons, real `~/.vectr/instances.json`).
+      // The codebase table is redirected for the same reason: boot heal walks it and
+      // would rewrite the real ~/.dsh/vectr-codebases.json.
+      // These tests are about tool scoping, not about auto-start.
+      autoStartDaemons: false,
     })
     await new Promise(resolveWait => setTimeout(resolveWait, 50))
     expect(ctx.tools.get('mcp__vectr__vectr_search', agent)).toBeUndefined()
@@ -234,4 +251,76 @@ describe('vectr-client scoped registration', () => {
     await scope.dispose()
     disposeAgent()
   })
+
+  it('binds the agent workspace once: the mirroring codebase entry registers no second tool face', async () => {
+    // Control daemon on its OWN port, proving the per-codebase bind path really does
+    // surface tools in this harness — so the absence of the mirroring entry below is a
+    // genuine dedupe, not the codebase bind silently doing nothing.
+    const controlServer = createServer((req, res) => {
+      handleMcpRequest(req, res).catch((error: unknown) => {
+        res.writeHead(500).end(String(error))
+      })
+    })
+    const controlListening = Promise.withResolvers<void>()
+    controlServer.listen(0, '127.0.0.1', controlListening.resolve)
+    await controlListening.promise
+    const controlAddress = controlServer.address()
+    if (controlAddress === null || typeof controlAddress === 'string') {
+      throw new Error(`expected a TCP AddressInfo for the control daemon, got ${String(controlAddress)}`)
+    }
+    const controlPort = controlAddress.port
+
+    try {
+      const mirrorName = deriveServerName(cwd, 'mirrorcheck')
+      const controlName = deriveServerName(cwd, 'controldaemon')
+      await writeFile(join(instancesDir, 'codebases.json'), JSON.stringify([
+        { id: 'mirrorcheck', slug: 'mirrorcheck', type: 'local', path: cwd, workspace: cwd, serverName: mirrorName, localPort: port, status: 'up' },
+        { id: 'controldaemon', slug: 'controldaemon', type: 'local', path: cwd, workspace: cwd, serverName: controlName, localPort: controlPort, status: 'up' },
+      ]))
+
+      const ctx = await mountRegistry()
+      liveContexts.add(ctx)
+      const { agent, disposeAgent, disposeScope } = await mintAgent(ctx)
+
+      await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
+        instancesPath: join(instancesDir, 'instances.json'),
+        modesPath: join(instancesDir, 'vectr-modes.json'),
+        codebasesPath: join(instancesDir, 'codebases.json'),
+        // Same reason as above: no boot sweep, no real daemon, no real registry.
+        autoStartDaemons: false,
+      })
+
+      // 1. Positive control first: a genuinely different daemon in the SAME
+      //    workspace is bound — the multi-codebase feature is intact.
+      await vi.waitFor(() => {
+        expect(ctx.tools.get(`mcp__${controlName}__vectr_search`, agent)).toBeDefined()
+      }, { timeout: 10_000 })
+
+      // 2. The main connection established from the agent cwd.
+      await vi.waitFor(() => {
+        expect(ctx.tools.get('mcp__vectr__vectr_search', agent)).toBeDefined()
+      }, { timeout: 10_000 })
+
+      // 3. The entry mirroring the main daemon endpoint must not add a second face.
+      await new Promise(resolveWait => setTimeout(resolveWait, 250))
+      expect(ctx.tools.get(`mcp__${mirrorName}__vectr_search`, agent)).toBeUndefined()
+      expect(ctx.tools.get(`mcp__${mirrorName}__vectr_status`, agent)).toBeUndefined()
+
+      // 4. Model-facing face: one registration per daemon. 2 (main) + 2 (control),
+      //    the duplicate mirror contributes 0 — the 46 → 23 mechanism, in miniature.
+      const vectrToolNames = (await ctx.systemPrompt.assemble({ scope: agent })).tools
+        .map(tool => tool.name)
+        .filter(name => name.startsWith('mcp__vectr'))
+      expect(vectrToolNames.filter(name => name.startsWith('mcp__vectr__'))).toHaveLength(2)
+      expect(vectrToolNames.filter(name => name.startsWith(`mcp__${controlName}__`))).toHaveLength(2)
+      expect(vectrToolNames.filter(name => name.startsWith(`mcp__${mirrorName}__`))).toHaveLength(0)
+
+      await disposeScope()
+      disposeAgent()
+    } finally {
+      const closed = Promise.withResolvers<void>()
+      controlServer.close(() => { closed.resolve() })
+      await closed.promise
+    }
+  }, 20_000)
 })

@@ -9,10 +9,10 @@
  * spec is safe to run anywhere.
  */
 import { createHash } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { connect as tcpConnect } from 'node:net'
 import { join, resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -32,6 +32,33 @@ import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 const fixtureDir = resolve(import.meta.dirname, 'fixtures')
 const baseConfig = join(fixtureDir, 'vectr-base.cordis.yml')
+
+// The plugin's boot-time mode harvest writes `~/.dsh/vectr-modes.json`. A live test
+// reads the REAL daemon registry, so it must not be allowed to write the REAL mode
+// store: point the store at a throwaway path instead.
+const isolatedModesPath = join(tmpdir(), 'dsh-vectr-live-e2e-modes.json')
+
+// Boot's startupHeal also walks ~/.dsh/vectr-codebases.json and re-syncs every
+// entry's localPort against the live registry, i.e. it rewrites the user's real
+// table. Same class of side effect, same answer: hand the heal a copy under a
+// throwaway path. The copy carries the real entries so the codebase binds this
+// spec depends on are still the ones a live session would see.
+const isolatedCodebasesPath = join(tmpdir(), 'dsh-vectr-live-e2e-codebases.json')
+try {
+  writeFileSync(isolatedCodebasesPath, readFileSync(join(homedir(), '.dsh', 'vectr-codebases.json'), 'utf-8'))
+} catch {
+  writeFileSync(isolatedCodebasesPath, '[]')
+}
+
+// The daemon this spec talks to has to be a real one, so the registry it reads is a
+// faithful COPY of the live one rather than the live file itself: a heal, a prune or
+// a mode harvest during boot then lands on the copy, not on ~/.vectr/instances.json.
+const isolatedInstancesPath = join(tmpdir(), 'dsh-vectr-live-e2e-instances.json')
+try {
+  writeFileSync(isolatedInstancesPath, readFileSync(join(homedir(), '.vectr', 'instances.json'), 'utf-8'))
+} catch {
+  writeFileSync(isolatedInstancesPath, '{}')
+}
 
 const liveContexts = new Set<Context>()
 
@@ -107,7 +134,18 @@ describe('vectr-client live daemon e2e', () => {
       }
       expect(key).toBe(keyOf(workspaceCwd))
 
-      const patch: PatchOptions = { id: 'vectr-client' }
+      // The sweep is not what this test proves: with the real registry it would
+      // also `vectr start` every DSH-discovered workspace that has no record,
+      // i.e. spawn real daemons and rewrite the real `~/.vectr/instances.json`.
+      const patch: PatchOptions = {
+        id: 'vectr-client',
+        config: {
+          instancesPath: isolatedInstancesPath,
+          modesPath: isolatedModesPath,
+          codebasesPath: isolatedCodebasesPath,
+          autoStartDaemons: false,
+        },
+      }
       const ctx = await boot(
         'vectr-live-e2e',
         baseConfig,
@@ -180,7 +218,18 @@ describe('vectr-client per-workspace port isolation', () => {
         testCtx.skip()
         return
       }
-      const patch: PatchOptions = { id: 'vectr-client' }
+      // The sweep is not what this test proves: with the real registry it would
+      // also `vectr start` every DSH-discovered workspace that has no record,
+      // i.e. spawn real daemons and rewrite the real `~/.vectr/instances.json`.
+      const patch: PatchOptions = {
+        id: 'vectr-client',
+        config: {
+          instancesPath: isolatedInstancesPath,
+          modesPath: isolatedModesPath,
+          codebasesPath: isolatedCodebasesPath,
+          autoStartDaemons: false,
+        },
+      }
       const ctx = await boot(
         'vectr-isolation-e2e',
         baseConfig,

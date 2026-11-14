@@ -10,6 +10,7 @@
  */
 
 import { createServer, type Server } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -84,23 +85,39 @@ function makeMockAgent(id: string, cwd?: string) {
 const roots: string[] = []
 let mockHttpServer: Server
 let mockHttpPort: number
+/**
+ * A workspace may legitimately run a SECOND daemon, and some fixtures below bind a
+ * codebase entry to it instead of to the workspace's primary daemon. Those ports
+ * must be real listeners: `healLocalCodebase` probes the recorded port, and a port
+ * nobody listens on is not a live second daemon — it is stale metadata, which heal
+ * is entitled (and expected) to repair.
+ */
+let mockSecondServer: Server
+let mockSecondPort: number
+
+function mockDaemonHandler(_req: IncomingMessage, res: ServerResponse): void {
+  res.statusCode = 200
+  res.setHeader('content-type', 'application/json')
+  res.end(JSON.stringify({ fully_ready: true }))
+}
+
+async function listenOnEphemeralPort(server: Server): Promise<number> {
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  return (server.address() as AddressInfo).port
+}
 
 beforeAll(async () => {
-  mockHttpServer = createServer((_req, res) => {
-    res.statusCode = 200
-    res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ fully_ready: true }))
-  })
-  await new Promise<void>((resolve) => {
-    mockHttpServer.listen(0, '127.0.0.1', () => {
-      mockHttpPort = (mockHttpServer.address() as AddressInfo).port
-      resolve()
-    })
-  })
+  mockHttpServer = createServer(mockDaemonHandler)
+  mockHttpPort = await listenOnEphemeralPort(mockHttpServer)
+  mockSecondServer = createServer(mockDaemonHandler)
+  mockSecondPort = await listenOnEphemeralPort(mockSecondServer)
 })
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => mockHttpServer.close(() => resolve()))
+  await Promise.all([
+    new Promise<void>((resolve) => mockHttpServer.close(() => resolve())),
+    new Promise<void>((resolve) => mockSecondServer.close(() => resolve())),
+  ])
 })
 
 afterEach(async () => {
@@ -595,9 +612,17 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
 
       await writeFile(instancesPath, JSON.stringify({
         'key-1': { workspace: ws, port: mockHttpPort, pid: process.pid },
+        // A SECOND daemon of the same workspace: a live listener plus its own registry
+        // record. `startupHeal` must leave this entry's port alone — rewriting it to the
+        // primary daemon's port is the multi-daemon collapse defect this suite guards.
+        'key-2': { workspace: ws, port: mockSecondPort, pid: process.pid },
       }))
       await writeFile(codebasesPath, JSON.stringify([
-        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockHttpPort, workspace: ws },
+        // A port distinct from the workspace's primary daemon: an entry mirroring the
+        // endpoint the main connection already dials is skipped as a duplicate
+        // registration, and this test is about tracking/disposing a real codebase
+        // handle — so the second daemon has to be a daemon the registry actually lists.
+        { id: 'cb1', slug: 'cb-1', type: 'local', path: ws, serverName: 'cb_1', status: 'up', localPort: mockSecondPort, workspace: ws },
       ]))
 
       const ctx = new Context()
@@ -618,9 +643,14 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
 
       apply(ctx, {
         instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
         codebasesPath,
         daemonHttpTimeoutMs: 100,
         daemonTcpTimeoutMs: 50,
+        // Sweep off: its workspace discovery reads the real DSH workspace list, so
+        // a temporary registry would mean `vectr start` on real workspaces and a
+        // real `~/.vectr/instances.json` rewrite.
+        autoStartDaemons: false,
       })
 
       const mainDispose = vi.fn().mockResolvedValue(undefined)
@@ -730,9 +760,11 @@ describe('QA Verification Suite: Prompt Decoupling & Resilient Invariants', () =
       // Initialize plugin via apply()
       apply(ctx, {
         instancesPath,
+        modesPath: join(dir, 'vectr-modes.json'),
         codebasesPath: join(dir, 'empty-cb.json'),
         daemonHttpTimeoutMs: 100,
         daemonTcpTimeoutMs: 50,
+        autoStartDaemons: false,
       })
 
       // Craft agent whose inject returns a fiber that rejects on dispose

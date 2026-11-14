@@ -697,6 +697,7 @@ describe('D4 host wiring', () => {
     apply(ctx, {
       autoStartDaemons: false,
       instancesPath: join(dir, 'instances.json'),
+      modesPath: join(dir, 'vectr-modes.json'),
       codebasesPath: join(dir, 'codebases.json'),
       secretsPath: join(dir, 'secrets.json'),
     })

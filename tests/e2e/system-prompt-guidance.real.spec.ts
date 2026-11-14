@@ -151,6 +151,14 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about — real daemons plus a real
+      // `~/.vectr/instances.json` rewrite. The codebase table is redirected for the
+      // same reason: boot heal walks it and rewrites ~/.dsh/vectr-codebases.json.
+      // This spec is about the prompt section.
+      autoStartDaemons: false,
     })
 
     // Wait for the liveness IIFE to settle and inject the section.
@@ -191,6 +199,14 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about — real daemons plus a real
+      // `~/.vectr/instances.json` rewrite. The codebase table is redirected for the
+      // same reason: boot heal walks it and rewrites ~/.dsh/vectr-codebases.json.
+      // This spec is about the prompt section.
+      autoStartDaemons: false,
     })
 
     // Decoupled: guidance is injected immediately because codebase entry exists
@@ -210,6 +226,14 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about — real daemons plus a real
+      // `~/.vectr/instances.json` rewrite. The codebase table is redirected for the
+      // same reason: boot heal walks it and rewrites ~/.dsh/vectr-codebases.json.
+      // This spec is about the prompt section.
+      autoStartDaemons: false,
     })
 
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -229,6 +253,14 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about — real daemons plus a real
+      // `~/.vectr/instances.json` rewrite. The codebase table is redirected for the
+      // same reason: boot heal walks it and rewrites ~/.dsh/vectr-codebases.json.
+      // This spec is about the prompt section.
+      autoStartDaemons: false,
     })
 
     await vi.waitFor(async () => {
@@ -263,6 +295,14 @@ describe('vectr guidance section — real SystemPrompt harness (P3)', () => {
 
     await ctx.plugin({ name: 'vectr-client', inject: ['agents'], apply: vectrClient.apply }, {
       instancesPath: join(instancesDir, 'instances.json'),
+      modesPath: join(instancesDir, 'vectr-modes.json'),
+      codebasesPath: join(instancesDir, 'codebases.json'),
+      // No boot sweep: with a temporary registry it would `vectr start` every
+      // workspace DSH knows about — real daemons plus a real
+      // `~/.vectr/instances.json` rewrite. The codebase table is redirected for the
+      // same reason: boot heal walks it and rewrites ~/.dsh/vectr-codebases.json.
+      // This spec is about the prompt section.
+      autoStartDaemons: false,
     })
 
     await vi.waitFor(async () => {

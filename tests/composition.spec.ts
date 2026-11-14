@@ -121,7 +121,17 @@ describe('vectr-client real composition', () => {
 
     const patch: PatchOptions = {
       id: 'vectr-client',
-      config: { instancesPath },
+      // `autoStartDaemons: false`: the boot sweep would `vectr start` every
+      // workspace DSH knows about — a real daemon and a real
+      // `~/.vectr/instances.json` rewrite from inside a test. The codebase table is
+      // redirected for the same reason: boot heal re-syncs its ports against the
+      // registry and would rewrite ~/.dsh/vectr-codebases.json.
+      config: {
+        instancesPath,
+        modesPath: join(instancesDir, 'vectr-modes.json'),
+        codebasesPath: join(instancesDir, 'codebases.json'),
+        autoStartDaemons: false,
+      },
     }
     const ctx = await boot(
       'vectr-composition-test',

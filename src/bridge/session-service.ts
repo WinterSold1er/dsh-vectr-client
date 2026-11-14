@@ -38,6 +38,7 @@ import {
   type VectrStatus,
 } from '../domain'
 import { DEFAULT_HOST } from '../registry'
+import { toPersistedMode, writeMode, type PersistedMode } from '../modes'
 
 export interface SessionServiceOptions {
   instanceResolver: IInstanceResolver
@@ -48,6 +49,22 @@ export interface SessionServiceOptions {
   recallTimeoutMs?: number
   upgradeTimeoutMs?: number
   defaultHost?: string
+  /**
+   * Plugin-side mode store (`~/.dsh/vectr-modes.json`). When provided, a verified
+   * upgrade/downgrade records the mode the daemon was *confirmed* to be in, so a
+   * later `vectr start` (after the registry record is pruned) can replay the same
+   * mode flag instead of silently falling back to a full re-index.
+   * Omitted (tests, embedded callers) means "never write": no hidden global state.
+   */
+  modesPath?: string
+  /**
+   * Sink for non-fatal diagnostics from the mode store (production: `ctx.logger`).
+   * A persistence failure is not an error of the daemon operation — the daemon
+   * already IS in the requested mode — but it must never be silent: the workspace
+   * comes back in a different mode after the next prune. Omitted, the warning goes
+   * to `console.warn`, because "no logger wired" is not a reason to say nothing.
+   */
+  warn?: (message: string) => void
 }
 
 export class SessionVectrService implements ISessionStatusService {
@@ -59,6 +76,8 @@ export class SessionVectrService implements ISessionStatusService {
   private readonly recallTimeoutMs: number
   private readonly upgradeTimeoutMs: number
   private readonly defaultHost: string
+  private readonly modesPath: string | undefined
+  private readonly modeStoreWarn: ((message: string) => void) | undefined
   private readonly inFlightUpgrades = new Map<string, Promise<UpgradeResult>>()
 
   constructor(options: SessionServiceOptions) {
@@ -80,6 +99,31 @@ export class SessionVectrService implements ISessionStatusService {
         : undefined) ??
       15_000
     this.defaultHost = options.defaultHost ?? DEFAULT_HOST
+    this.modesPath = options.modesPath
+    this.modeStoreWarn = options.warn
+  }
+
+  /**
+   * Persist a mode that was *verified* against the live daemon. Never called on a
+   * failure path, so a failed upgrade/downgrade cannot corrupt what the plugin
+   * remembers. Persistence is a startup hint, so a write failure is not an error of
+   * the operation itself (the daemon already IS in the requested mode) and is not
+   * returned to the caller — but it is never silent either: a store that could not
+   * be written means the NEXT restart may bring this workspace up in a different
+   * mode, which is exactly the incident this whole layer exists to prevent.
+   */
+  private persistVerifiedMode(workspace: string, mode: PersistedMode): void {
+    if (this.modesPath === undefined) return
+    if (writeMode(this.modesPath, workspace, mode)) return
+    const message = `vectr-client: could not remember the verified ${mode} mode for ${workspace} `
+      + `in ${this.modesPath}; the next daemon start may bring it up in a different mode`
+    if (this.modeStoreWarn !== undefined) {
+      this.modeStoreWarn(message)
+    } else {
+      // No logger wired (embedded callers, direct construction): console is the
+      // fallback. "Nothing was injected" is not a reason to swallow a failure.
+      console.warn(message)
+    }
   }
 
   private buildCodebases(
@@ -413,6 +457,13 @@ export class SessionVectrService implements ISessionStatusService {
       }
     }
 
+    // Verified: the daemon answers as something other than memory_only after the
+    // full restart. Remember exactly what was observed (normally `full`; a daemon
+    // reporting search_only is remembered as search_only rather than a hoped-for
+    // `full`), so a later start does not fall back to a full re-index.
+    const verifiedMode = toPersistedMode(rawFinalMode)
+    if (verifiedMode !== undefined) this.persistVerifiedMode(workspace, verifiedMode)
+
     return {
       ok: true,
       mode: finalMode,
@@ -541,6 +592,12 @@ export class SessionVectrService implements ISessionStatusService {
         stderr: restartResult.stderr,
       }
     }
+
+    // Verified memory_only: remember it. This is the write that protects the
+    // workspace the next time the harness restart kills the daemon and the sweep
+    // re-issues `vectr start` — without it the pruned registry falls back to a
+    // full re-index of the workspace.
+    this.persistVerifiedMode(workspace, 'memory_only')
 
     return {
       ok: true,
